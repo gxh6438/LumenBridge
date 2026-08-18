@@ -213,7 +213,10 @@ class LumenBridgePlugin(Plugin):
             # 插件市场：网络检查绝不在游戏主线程执行，也不未经管理员确认自动安装
             self.marketplace = MarketplaceClient(self)
             market_cfg = self.config_manager.data.get("marketplace", {})
-            if isinstance(market_cfg, dict) and market_cfg.get("enable") and market_cfg.get("check_on_start", True):
+            updates_cfg = self.config_manager.data.get("updates", {})
+            market_check = isinstance(market_cfg, dict) and bool(market_cfg.get("enable")) and bool(market_cfg.get("check_on_start", True))
+            auto_update = isinstance(updates_cfg, dict) and bool(updates_cfg.get("enable", True)) and bool(updates_cfg.get("auto_update", True))
+            if market_check or auto_update:
                 threading.Thread(
                     target=self._check_market_updates_background,
                     name="LumenBridge-MarketCheck",
@@ -307,19 +310,33 @@ class LumenBridgePlugin(Plugin):
         self.logger.info(_t("plugin.disabled"))
 
     def _check_market_updates_background(self) -> None:
-        """低频市场更新检查：只记录可用更新，安装必须由 WebUI 管理员操作确认。"""
+        """低频市场更新检查：子插件只记录可用更新（安装需 WebUI 管理员确认）；
+        框架本体在 updates.auto_update 开启时自动暂存并热重载生效。
+        """
         client = self.marketplace
         if client is None:
             return
+        log = self._tee_logger or self.logger
+        if client.enabled:
+            try:
+                updates = client.check_subplugin_updates()
+                available = [name for name, info in updates.items() if info.get("available")]
+                if available:
+                    log.info("[Market] 子插件有可用更新: " + ", ".join(available))
+            except Exception as exc:  # noqa: BLE001
+                log.warning(f"[Market] 更新检查失败: {exc}")
+        updates_cfg = self.config_manager.data.get("updates", {}) if self.config_manager else {}
+        if not (isinstance(updates_cfg, dict) and updates_cfg.get("enable", True) and updates_cfg.get("auto_update", True)):
+            return
         try:
-            updates = client.check_subplugin_updates()
-            available = [name for name, info in updates.items() if info.get("available")]
-            if available:
-                (self._tee_logger or self.logger).info(
-                    "[Market] 子插件有可用更新: " + ", ".join(available)
-                )
+            info = client.framework_update_info()
+            if not info.get("available"):
+                return
+            version = str((info.get("latest") or {}).get("version") or "?")
+            log.info(f"[Update] 发现 LumenBridge 新版本 v{version}，开始自动更新并热重载")
+            client.apply_framework_update()
         except Exception as exc:  # noqa: BLE001
-            (self._tee_logger or self.logger).warning(f"[Market] 更新检查失败: {exc}")
+            log.warning(f"[Update] 框架自动更新失败: {exc}")
 
     @staticmethod
     def _qq_avatar_url(qq: int) -> str:

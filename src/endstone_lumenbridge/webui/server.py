@@ -222,11 +222,11 @@ CONFIG_LABEL_KEYS: dict[str, str] = {
     "marketplace.max_download_bytes": "marketplace.max_download_bytes",
     "marketplace.check_on_start": "marketplace.check_on_start",
     "marketplace.check_interval_seconds": "marketplace.check_interval_seconds",
-    "marketplace.report_api_key": "marketplace.report_api_key",
     "updates": "updates.section",
     "updates.enable": "updates.enable",
     "updates.api_url": "updates.api_url",
     "updates.timeout": "updates.timeout",
+    "updates.auto_update": "updates.auto_update",
     "commands": "commands.section",
     "commands.allow_in_game": "commands.allow_in_game",
     "commands.status.allow_player": "commands.status.allow_player",
@@ -647,13 +647,19 @@ class WebUIServer:
         threading.Thread(target=run_install, name=f"lumen-pip-{task_id}", daemon=True).start()
         return task_id
 
-    def _start_market_task(self, action: str, runner: Callable[[], dict[str, Any]]) -> str | None:
-        """启动市场异步任务；市场网络和 pip 安装不可阻塞 WebUI 请求线程。"""
+    def _start_market_task(self, action: str, runner: Callable[[Callable[[str], None], Callable[[int, str], None]], dict[str, Any]]) -> str | None:
+        """启动市场异步任务；市场网络和 pip 安装不可阻塞 WebUI 请求线程。
+
+        runner 接收两个回调：
+        - ``log(line)``：追加一行进度日志到任务面板（前端实时轮询展示）
+        - ``progress(percent, label)``：更新进度条（0-100）与标签
+        """
         import uuid
         task_id = uuid.uuid4().hex[:12]
         task = {
             "status": "running", "done": False, "success": False, "msg": "",
             "action": action, "result": {}, "start_time": time.time(),
+            "log_lines": [], "progress": 0, "progress_label": "",
         }
         with self._market_tasks_lock:
             now = time.time()
@@ -673,15 +679,28 @@ class WebUIServer:
                 return None
             self._market_tasks[task_id] = task
 
+        def on_log(line: str) -> None:
+            with self._market_tasks_lock:
+                t = self._market_tasks.get(task_id)
+                if t and len(t["log_lines"]) < 500:
+                    t["log_lines"].append(line)
+
+        def on_progress(percent: int, label: str = "") -> None:
+            with self._market_tasks_lock:
+                t = self._market_tasks.get(task_id)
+                if t:
+                    t["progress"] = max(0, min(100, int(percent)))
+                    t["progress_label"] = label
+
         def execute() -> None:
             try:
-                result = runner()
+                result = runner(on_log, on_progress)
                 # runner 可能返回非 dict（如 list/str/None），安全提取 message
                 msg = result.get("message", "") if isinstance(result, dict) else str(result) if result else ""
                 with self._market_tasks_lock:
                     current = self._market_tasks.get(task_id)
                     if current:
-                        current.update({"status": "success", "done": True, "success": True, "result": result, "msg": msg})
+                        current.update({"status": "success", "done": True, "success": True, "result": result, "msg": msg, "progress": 100})
             except Exception as exc:  # noqa: BLE001
                 with self._market_tasks_lock:
                     current = self._market_tasks.get(task_id)
@@ -1668,7 +1687,13 @@ class _RequestHandler(BaseHTTPRequestHandler):
             client = getattr(plugin, "marketplace", None)
             if client is None or not client.enabled:
                 return self._send_json({"code": 403, "msg": "插件市场未配置或未启用"}, 403)
-            task_id = self.webui._start_market_task("check_updates", lambda: {"updates": client.check_subplugin_updates(force=True)})
+            def _run_check(log, progress):
+                log(_t("task_log.checking_updates"))
+                progress(30, _t("task_log.checking_updates"))
+                result = {"updates": client.check_subplugin_updates(force=True)}
+                progress(100, _t("task_log.done"))
+                return result
+            task_id = self.webui._start_market_task("check_updates", _run_check)
             if task_id is None:
                 return self._send_json({"code": 429, "msg": "任务数过多，请稍后再试"}, 429)
             return self._send_json({"code": 200, "data": {"task_id": task_id}})
@@ -1682,7 +1707,13 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return self._send_json({"code": 403, "msg": "插件市场未配置或未启用"}, 403)
             if not market_id:
                 return self._send_json({"code": 400, "msg": _t("webui.msg.invalid_market_id")}, 400)
-            task_id = self.webui._start_market_task("install", lambda: client.install(market_id, version, upgrade_dependencies=True))
+            def _run_install(log, progress):
+                log(_t("task_log.installing_plugin", id=market_id))
+                progress(20, _t("task_log.downloading"))
+                result = client.install(market_id, version, upgrade_dependencies=True, log=log, progress=progress)
+                progress(100, _t("task_log.done"))
+                return result
+            task_id = self.webui._start_market_task("install", _run_install)
             if task_id is None:
                 return self._send_json({"code": 429, "msg": "任务数过多，请稍后再试"}, 429)
             return self._send_json({"code": 200, "data": {"task_id": task_id}})
@@ -1693,7 +1724,13 @@ class _RequestHandler(BaseHTTPRequestHandler):
             if client is None or not client.enabled:
                 return self._send_json({"code": 403, "msg": "插件市场未配置或未启用"}, 403)
             name = m.group(1)
-            task_id = self.webui._start_market_task("plugin_update", lambda: client.update(name, update_dependencies=True))
+            def _run_plugin_update(log, progress):
+                log(_t("task_log.updating_plugin", name=name))
+                progress(20, _t("task_log.downloading"))
+                result = client.update(name, update_dependencies=True, log=log, progress=progress)
+                progress(100, _t("task_log.done"))
+                return result
+            task_id = self.webui._start_market_task("plugin_update", _run_plugin_update)
             if task_id is None:
                 return self._send_json({"code": 429, "msg": "任务数过多，请稍后再试"}, 429)
             return self._send_json({"code": 200, "data": {"task_id": task_id}})
@@ -1704,7 +1741,13 @@ class _RequestHandler(BaseHTTPRequestHandler):
             if client is None or not client.enabled:
                 return self._send_json({"code": 403, "msg": "插件市场未配置或未启用"}, 403)
             name = m.group(1)
-            task_id = self.webui._start_market_task("dependencies_update", lambda: client.update_dependencies(name))
+            def _run_deps_update(log, progress):
+                log(_t("task_log.updating_deps", name=name))
+                progress(30, _t("task_log.installing_deps"))
+                result = client.update_dependencies(name)
+                progress(100, _t("task_log.done"))
+                return result
+            task_id = self.webui._start_market_task("dependencies_update", _run_deps_update)
             if task_id is None:
                 return self._send_json({"code": 429, "msg": "任务数过多，请稍后再试"}, 429)
             return self._send_json({"code": 200, "data": {"task_id": task_id}})
@@ -1727,7 +1770,31 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return self._send_json({"code": 403, "msg": "框架更新功能已关闭"}, 403)
             if client is None:
                 return self._send_json({"code": 500, "msg": "更新客户端不可用"}, 500)
-            task_id = self.webui._start_market_task("framework_update", client.stage_framework_update)
+            def _run_stage(log, progress):
+                log(_t("task_log.staging_framework"))
+                progress(20, _t("task_log.downloading"))
+                result = client.stage_framework_update(log=log, progress=progress)
+                progress(100, _t("task_log.done"))
+                return result
+            task_id = self.webui._start_market_task("framework_update", _run_stage)
+            if task_id is None:
+                return self._send_json({"code": 429, "msg": "任务数过多，请稍后再试"}, 429)
+            return self._send_json({"code": 200, "data": {"task_id": task_id}})
+
+        if method == "POST" and path == "/api/updates/apply":
+            client = getattr(plugin, "marketplace", None)
+            update_cfg = plugin.config_manager.data.get("updates", {}) if plugin.config_manager else {}
+            if not bool(update_cfg.get("enable", True)):
+                return self._send_json({"code": 403, "msg": "框架更新功能已关闭"}, 403)
+            if client is None:
+                return self._send_json({"code": 500, "msg": "更新客户端不可用"}, 500)
+            def _run_apply(log, progress):
+                log(_t("task_log.applying_framework"))
+                progress(20, _t("task_log.downloading"))
+                result = client.apply_framework_update(log=log, progress=progress)
+                progress(100, _t("task_log.reloading"))
+                return result
+            task_id = self.webui._start_market_task("framework_apply", _run_apply)
             if task_id is None:
                 return self._send_json({"code": 429, "msg": "任务数过多，请稍后再试"}, 429)
             return self._send_json({"code": 200, "data": {"task_id": task_id}})

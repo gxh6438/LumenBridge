@@ -376,6 +376,7 @@ function logout(silent) {
   if (typeof configNavObserver !== "undefined" && configNavObserver) { configNavObserver.disconnect(); configNavObserver = null; }
   if (marketTaskTimer) { clearInterval(marketTaskTimer); marketTaskTimer = null; }
   if (frameworkUpdateTimer) { clearInterval(frameworkUpdateTimer); frameworkUpdateTimer = null; }
+  closeTaskLogModal();
   if (dashboardRefreshTimer) { clearInterval(dashboardRefreshTimer); dashboardRefreshTimer = null; }
   if (typeof stopQrBindPoll === "function") stopQrBindPoll();
   document.getElementById("app-view").style.display = "none";
@@ -467,6 +468,7 @@ function nav(page, customUrl, customTitle) {
   if (currentPage === "marketplace" && target !== "marketplace") {
     if (marketTaskTimer) { clearInterval(marketTaskTimer); marketTaskTimer = null; }
     if (frameworkUpdateTimer) { clearInterval(frameworkUpdateTimer); frameworkUpdateTimer = null; }
+    closeTaskLogModal();
   }
   // 离开任意页面时停掉扫码绑定轮询：模态框固定定位不随导航消失，
   // 不清理会一直轮询 /api/qqofficial/qr/poll 并在成功后弹出编辑框
@@ -2373,6 +2375,20 @@ async function pollPipTask() {
       const isNearBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 50;
       if (isNearBottom) pre.scrollTop = pre.scrollHeight;
     }
+    /* pip 任务可选进度条：后端返回 progress 字段时显示，否则隐藏 */
+    const pwrap = document.getElementById("pip-progress-wrap");
+    if (pwrap) {
+      const pct = data.progress || 0;
+      if (pct > 0 || data.progress_label) {
+        pwrap.style.display = "";
+        const bar = document.getElementById("pip-progress-bar");
+        if (bar) bar.style.width = (pct || 0) + "%";
+        const lbl = document.getElementById("pip-progress-label");
+        if (lbl) lbl.textContent = data.progress_label || "";
+        const pctEl = document.getElementById("pip-progress-pct");
+        if (pctEl) pctEl.textContent = pct > 0 ? pct + "%" : "";
+      }
+    }
     myState.status = data.status || "running";
     myState.done = !!data.done;
     myState.success = !!data.success;
@@ -2783,8 +2799,66 @@ async function loadMarketplace() {
   }
 }
 
+/* ─── 统一任务日志弹窗（市场任务 / 框架更新共用） ─── */
+let taskLogState = null;
+
+function openTaskLogModal(taskId, title) {
+  const pre = document.getElementById("task-log-pre");
+  if (pre) pre.textContent = "";
+  const bar = document.getElementById("task-progress-bar");
+  if (bar) bar.style.width = "0%";
+  const label = document.getElementById("task-progress-label");
+  if (label) label.textContent = "";
+  const pct = document.getElementById("task-progress-pct");
+  if (pct) pct.textContent = "";
+  const titleEl = document.getElementById("task-log-title");
+  if (titleEl && title) titleEl.textContent = title;
+  const status = document.getElementById("task-log-status");
+  if (status) { status.textContent = t("task_log_modal.running"); status.className = "tag blue"; }
+  document.getElementById("task-log-modal").classList.add("show");
+  taskLogState = { taskId, done: false, success: false, msg: "", doneHandled: false };
+}
+
+function closeTaskLogModal() {
+  document.getElementById("task-log-modal").classList.remove("show");
+}
+
+function updateTaskLogModal(task) {
+  const pre = document.getElementById("task-log-pre");
+  if (pre && Array.isArray(task.log_lines)) {
+    pre.textContent = task.log_lines.join("\n");
+    const isNearBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 50;
+    if (isNearBottom) pre.scrollTop = pre.scrollHeight;
+  }
+  const bar = document.getElementById("task-progress-bar");
+  const label = document.getElementById("task-progress-label");
+  const pct = document.getElementById("task-progress-pct");
+  const progress = task.progress || 0;
+  if (bar) bar.style.width = progress + "%";
+  if (pct) pct.textContent = progress > 0 ? progress + "%" : "";
+  if (label) label.textContent = task.progress_label || "";
+  const status = document.getElementById("task-log-status");
+  if (status) {
+    if (task.done) {
+      if (task.success) {
+        status.textContent = t("task_log_modal.success");
+        status.className = "tag green";
+        if (bar) bar.style.width = "100%";
+        if (pct) pct.textContent = "100%";
+      } else {
+        status.textContent = t("task_log_modal.failed");
+        status.className = "tag red";
+      }
+    } else {
+      status.textContent = t("task_log_modal.running");
+      status.className = "tag blue";
+    }
+  }
+}
+
 function watchMarketTask(taskId, successMessage) {
   if (marketTaskTimer) clearInterval(marketTaskTimer);
+  openTaskLogModal(taskId, t("task_log_modal.market_task"));
   let running = false;
   const poll = async () => {
     if (running) return;
@@ -2792,20 +2866,23 @@ function watchMarketTask(taskId, successMessage) {
     try {
       const res = await api("GET", "/api/market/task/" + encodeURIComponent(taskId));
       const task = res.data || {};
+      updateTaskLogModal(task);
       if (!task.done) return;
       clearInterval(marketTaskTimer); marketTaskTimer = null;
       if (task.success) {
         toast(successMessage || task.msg || t("marketplace.task_success"));
         loadSubplugins(); loadCustomPages();
+        setTimeout(() => { if (taskLogState && !taskLogState.doneHandled) closeTaskLogModal(); }, 2000);
       } else {
         toast(task.msg || t("marketplace.task_failed"), true);
       }
+      if (taskLogState) taskLogState.doneHandled = true;
     } catch (e) {
       clearInterval(marketTaskTimer); marketTaskTimer = null;
       toast(e.message || t("marketplace.task_failed"), true);
     } finally { running = false; }
   };
-  marketTaskTimer = setInterval(poll, 900);
+  marketTaskTimer = setInterval(poll, 800);
   poll();
 }
 
@@ -3031,42 +3108,72 @@ async function checkFrameworkUpdate() {
     }
     const latest = data.latest || {};
     const version = latest.version || "?";
-    content.innerHTML = `${esc(t("marketplace.framework_available", { version }))} <button class="btn small" style="margin-left:8px" onclick="stageFrameworkUpdate()">${esc(t("marketplace.framework_stage_button"))}</button><div style="margin-top:7px;color:var(--muted)">${esc(t("marketplace.framework_restart_note"))}</div>`;
+    content.innerHTML = `${esc(t("marketplace.framework_available", { version }))} <button class="btn small" style="margin-left:8px" onclick="applyFrameworkUpdate()">${esc(t("marketplace.framework_apply_button"))}</button><div style="margin-top:7px;color:var(--muted)">${esc(t("marketplace.framework_reload_note"))}</div>`;
   } catch (e) {
     content.textContent = e.message || t("marketplace.framework_check_failed");
   }
 }
 
-async function stageFrameworkUpdate() {
-  if (!await customConfirm(t("marketplace.framework_stage_confirm"))) return;
+async function applyFrameworkUpdate() {
+  if (!await customConfirm(t("marketplace.framework_apply_confirm"))) return;
+  const content = document.getElementById("framework-update-content");
+  if (content) content.textContent = t("marketplace.framework_applying");
   try {
-    const res = await api("POST", "/api/updates/stage", {});
-    watchFrameworkUpdateTask(res.data.task_id);
-  } catch (e) { toast(e.message || t("marketplace.framework_stage_failed"), true); }
+    const res = await api("POST", "/api/updates/apply", {});
+    watchFrameworkApplyTask(res.data.task_id);
+  } catch (e) {
+    if (content) content.textContent = "";
+    toast(e.message || t("marketplace.framework_apply_failed"), true);
+  }
 }
 
-function watchFrameworkUpdateTask(taskId) {
+// 轮询热重载任务：任务完成 = 新 wheel 已就绪且热重载已调度。
+// 阶段 1 通过 task-log-modal 展示下载/校验/热重载日志与进度条；
+// 随后插件禁用自身、WebUI 短暂下线，新实例启动后自动恢复——
+// 阶段 2 反复探测 /api/overview，恢复后刷新页面加载新版本面板。
+function watchFrameworkApplyTask(taskId) {
   if (frameworkUpdateTimer) clearInterval(frameworkUpdateTimer);
+  openTaskLogModal(taskId, t("task_log_modal.framework_update"));
+  let phase = "task";
   let running = false;
   frameworkUpdateTimer = setInterval(async () => {
     if (running) return;
     running = true;
     try {
-      const res = await api("GET", "/api/market/task/" + encodeURIComponent(taskId));
-      const task = res.data || {};
-      if (!task.done) return;
-      clearInterval(frameworkUpdateTimer); frameworkUpdateTimer = null;
-      if (task.success) {
-        toast(t("marketplace.framework_stage_success"));
-        checkFrameworkUpdate();
-      } else {
-        toast(task.msg || t("marketplace.framework_stage_failed"), true);
+      if (phase === "task") {
+        const res = await api("GET", "/api/market/task/" + encodeURIComponent(taskId));
+        const task = res.data || {};
+        updateTaskLogModal(task);
+        if (!task.done) return;
+        if (!task.success) {
+          clearInterval(frameworkUpdateTimer); frameworkUpdateTimer = null;
+          toast(task.msg || t("marketplace.framework_apply_failed"), true);
+          checkFrameworkUpdate();
+          return;
+        }
+        phase = "revive";
+        const status = document.getElementById("task-log-status");
+        if (status) { status.textContent = t("task_log_modal.reloading"); status.className = "tag blue"; }
+        toast(t("marketplace.framework_reload_started"));
+        return;
       }
-    } catch (e) {
+      // 阶段 2：等待新实例的 WebUI 恢复（轮询会在下线期间持续报网络错误）
+      await api("GET", "/api/overview");
       clearInterval(frameworkUpdateTimer); frameworkUpdateTimer = null;
-      toast(e.message || t("marketplace.framework_stage_failed"), true);
+      toast(t("marketplace.framework_reload_done"));
+      setTimeout(() => location.reload(), 800);
+    } catch (e) {
+      if (phase === "task") {
+        clearInterval(frameworkUpdateTimer); frameworkUpdateTimer = null;
+        toast(e.message || t("marketplace.framework_apply_failed"), true);
+      }
+      // revive 阶段：面板尚未恢复属预期，继续等待
     } finally { running = false; }
-  }, 900);
+  }, 1500);
+  // 兜底：热重载异常卡死时 120 秒后停止轮询，避免定时器泄漏
+  setTimeout(() => {
+    if (frameworkUpdateTimer) { clearInterval(frameworkUpdateTimer); frameworkUpdateTimer = null; }
+  }, 120000);
 }
 
 /* ================================ 连接配置：适配器卡片（v1.2.0） ================================ */

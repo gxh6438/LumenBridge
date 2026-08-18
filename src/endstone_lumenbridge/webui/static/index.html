@@ -1536,7 +1536,7 @@ textarea.file-editor {
           <div class="card glass" id="dash-framework-update-box" style="padding:16px 18px">
             <div id="framework-update-content" data-i18n="marketplace.framework_check_hint">点击下方按钮检查 LumenBridge 框架是否有新版本。</div>
             <div style="margin-top:10px">
-              <button class="btn small" onclick="checkFrameworkUpdate()"><span class="action-icon" aria-hidden="true">⇧</span><span data-i18n="marketplace.check_framework_button">检查框架更新</span></button>
+              <button class="btn small" onclick="checkFrameworkUpdate()"><span data-i18n="marketplace.check_framework_button">检查框架更新</span></button>
             </div>
           </div>
         </div>
@@ -1980,6 +1980,15 @@ textarea.file-editor {
   <div class="modal glass" style="max-width:760px">
     <h3><span data-i18n="pip_log_modal.title">安装日志</span> <button class="close-x" onclick="closePipLogModal()">✕</button></h3>
     <div class="modal-body">
+      <div id="pip-progress-wrap" style="margin-bottom:12px;display:none">
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span id="pip-progress-label" style="font-size:13px;color:var(--muted)"></span>
+          <span id="pip-progress-pct" style="font-size:13px;color:var(--muted)"></span>
+        </div>
+        <div style="height:6px;background:var(--glass-border);border-radius:3px;overflow:hidden">
+          <div id="pip-progress-bar" style="height:100%;width:0%;background:var(--accent);border-radius:3px;transition:width .3s"></div>
+        </div>
+      </div>
       <pre id="pip-log-pre" class="pip-log-pre"></pre>
     </div>
     <div class="toolbar" style="margin:16px 0 0;justify-content:flex-end;align-items:center;gap:10px">
@@ -1987,6 +1996,29 @@ textarea.file-editor {
       <span style="flex:1"></span>
       <button class="btn small ghost" id="pip-log-bg-btn" onclick="backgroundPipLog()" data-i18n="pip_log_modal.background_running">后台运行</button>
       <button class="btn small" id="pip-log-close-btn" onclick="closePipLogModal()" data-i18n="common.close">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask" id="task-log-modal">
+  <div class="modal glass" style="max-width:760px">
+    <h3><span id="task-log-title" data-i18n="task_log_modal.title">任务进度</span> <button class="close-x" onclick="closeTaskLogModal()">✕</button></h3>
+    <div class="modal-body">
+      <div id="task-progress-wrap" style="margin-bottom:12px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span id="task-progress-label" style="font-size:13px;color:var(--muted)"></span>
+          <span id="task-progress-pct" style="font-size:13px;color:var(--muted)"></span>
+        </div>
+        <div style="height:6px;background:var(--glass-border);border-radius:3px;overflow:hidden">
+          <div id="task-progress-bar" style="height:100%;width:0%;background:var(--accent);border-radius:3px;transition:width .3s"></div>
+        </div>
+      </div>
+      <pre id="task-log-pre" class="pip-log-pre"></pre>
+    </div>
+    <div class="toolbar" style="margin:16px 0 0;justify-content:flex-end;align-items:center;gap:10px">
+      <span id="task-log-status" class="tag gray"></span>
+      <span style="flex:1"></span>
+      <button class="btn small" id="task-log-close-btn" onclick="closeTaskLogModal()" data-i18n="common.close">关闭</button>
     </div>
   </div>
 </div>

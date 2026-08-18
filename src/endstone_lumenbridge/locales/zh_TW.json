@@ -1045,10 +1045,6 @@
             "check_interval_seconds": {
                 "label": "更新檢查間隔（秒）",
                 "desc": "同一子外掛兩次自動市集檢查的最小間隔。"
-            },
-            "report_api_key": {
-                "label": "WebUI 檢舉代理金鑰",
-                "desc": "可選：需與 PHP 市集的 webui_report_api_key 相同，讓 WebUI 可安全轉送外掛檢舉。"
             }
         },
         "updates": {
@@ -1064,6 +1060,10 @@
             "timeout": {
                 "label": "更新檢查逾時（秒）",
                 "desc": "查詢框架最新版本的網路逾時。"
+            },
+            "auto_update": {
+                "label": "自動更新並熱重載",
+                "desc": "發現新版本時自動下載驗證，並停用自身→安裝新 wheel→啟用新實例，無需重啟伺服器。"
             }
         }
     },
@@ -1147,6 +1147,28 @@
         "hide": "隱藏",
         "poll_failed": "取得安裝進度失敗，請重新整理頁面重試"
     },
+    "task_log_modal": {
+        "title": "任務進度",
+        "market_task": "市集任務",
+        "framework_update": "框架更新",
+        "running": "進行中",
+        "success": "已完成",
+        "failed": "失敗",
+        "reloading": "正在熱重載..."
+    },
+    "task_log": {
+        "checking_updates": "正在檢查更新...",
+        "installing_plugin": "正在安裝外掛 {id}...",
+        "updating_plugin": "正在更新子外掛 {name}...",
+        "updating_deps": "正在更新子外掛 {name} 的依賴...",
+        "downloading": "下載中",
+        "installing_deps": "安裝依賴中",
+        "installing": "安裝中",
+        "staging_framework": "正在暫存框架更新...",
+        "applying_framework": "正在套用框架更新...",
+        "reloading": "熱重載中",
+        "done": "完成"
+    },
     "reload_prompt": {
         "title": "重載提示",
         "message": "依賴已安裝，是否立即重載子插件以生效？",
@@ -1191,12 +1213,14 @@
         "framework_unconfigured": "尚未設定版本更新 API。請在設定頁的「框架更新」填寫 API 位址。",
         "framework_latest": "目前已是最新版本 v{version}。",
         "framework_available": "發現 LumenBridge v{version} 新版本。",
-        "framework_stage_button": "安全暫存更新",
-        "framework_restart_note": "會下載、驗證並原子替換 plugins 目錄中的 wheel；完成後必須完整重啟 Endstone 才會載入新版本。",
-        "framework_stage_confirm": "確定暫存已驗證的 LumenBridge 新版本嗎？舊 wheel 將自動備份，完成後請完整重啟 Endstone。",
-        "framework_stage_success": "新版本已安全暫存。請完整重啟 Endstone 以載入新 wheel。",
+        "framework_apply_button": "一鍵更新並生效",
+        "framework_reload_note": "會下載、驗證並自動熱重載新版本：面板會短暫離線，數秒後自動恢復，無需重啟伺服器。",
+        "framework_apply_confirm": "確定更新到 LumenBridge 新版本嗎？將自動熱重載生效，面板會短暫離線後自動恢復。",
+        "framework_applying": "正在下載並驗證新版本…",
+        "framework_reload_started": "新版本已就緒，正在熱重載…面板稍後自動恢復",
+        "framework_reload_done": "熱重載完成，正在重新整理頁面…",
         "framework_check_failed": "框架更新檢查失敗",
-        "framework_stage_failed": "框架更新暫存失敗",
+        "framework_apply_failed": "框架更新失敗",
         "search_placeholder": "搜尋外掛名稱、簡介或標籤",
         "search_button": "搜尋",
         "loading_config": "正在讀取市集設定…",

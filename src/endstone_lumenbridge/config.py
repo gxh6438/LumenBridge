@@ -65,13 +65,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_download_bytes": 67108864,
         "check_on_start": True,
         "check_interval_seconds": 21600,
-        "report_api_key": "",              # 可选：与 PHP 市场 webui_report_api_key 一致
     },
 
     "updates": {
         "enable": True,
         "api_url": "https://market.mxcraft.vip",  # 只填站点根地址，自动补全 /api/v1/updates/lumenbridge
         "timeout": 30,
+        # 发现新版本时自动下载并热重载生效（禁用自身→安装新 wheel→启用新实例）
+        "auto_update": True,
     },
 
     "commands": {
@@ -198,7 +199,8 @@ def _validate_effective_config(config: dict[str, Any]) -> None:
 
 
 def _strip_deprecated_pip_fields(config: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-    """移除已废弃字段：pip.allow_all / allow_list（v1.1.0）与旧版连接键（v1.2.0）。
+    """移除已废弃字段：pip.allow_all / allow_list（v1.1.0）、旧版连接键（v1.2.0）
+    与 marketplace.report_api_key（点赞/举报已改为完全匿名会话，无需密钥）。
 
     旧配置或旧浏览器标签页仍可能在完整表单提交中携带这些键；其余未知键仍严格拒绝。
     v1.2.0 起连接键迁移到 connections.json，这里仅剥离不校验。
@@ -211,6 +213,10 @@ def _strip_deprecated_pip_fields(config: dict[str, Any]) -> tuple[dict[str, Any]
             if key in pip_config:
                 pip_config.pop(key, None)
                 changed = True
+    market_config = sanitized.get("marketplace")
+    if isinstance(market_config, dict) and "report_api_key" in market_config:
+        market_config.pop("report_api_key", None)
+        changed = True
     for key in LEGACY_CONNECTION_KEYS:
         if key in sanitized:
             sanitized.pop(key, None)

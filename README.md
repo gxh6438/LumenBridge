@@ -1,19 +1,8 @@
-<p align="center">
-  <img src="https://lumen.mxcraft.vip/pictures/logo.png" width="200" alt="LumenBridge Logo">
-</p>
+# LumenBridge
 
-<h1 align="center">LumenBridge</h1>
+**Endstone 群服互通框架 · OneBot v11 双向消息同步 · QQ 官方机器人 · 全平台中继**
 
-<p align="center">
-  <strong>Endstone 群服互通框架 · OneBot v11 双向消息同步 · QQ 官方机器人 · 全平台中继</strong>
-</p>
-
-<p align="center">
-  <a href="https://market.mxcraft.vip/">插件市场</a> ·
-  <a href="docs/LumenBridge使用文档.md">使用文档</a> ·
-  <a href="docs/LumenBridge子插件开发文档.md">开发文档</a> ·
-  <a href="#许可">MIT License</a>
-</p>
+[插件市场](https://market.mxcraft.vip/) · [使用文档](https://lumen.mxcraft.vip/getting-started/usage) · [开发文档](https://lumen.mxcraft.vip/developers/plugin-development) · [MIT License](#许可)
 
 ---
 
@@ -42,28 +31,6 @@ LumenBridge 的核心是一个**多适配器并行引擎**。每个适配器实�
 ### QQ 官方机器人全覆盖
 
 原生实现 QQ 开放平台网关协议，**46 种事件类型全覆盖**——群消息、私聊、频道消息、全部 notice 与扩展事件，无一遗漏。内置被动凭据池管理、主动消息补发机制与发送重试矩阵。扫码授权后 AppID 与 AppSecret 自动填入，无需手动复制粘贴。
-
-### 事件总线与去抖机制
-
-基于 `on` / `once` / `emit` 模型的事件总线，OneBot 事件按层级派发。事件分发器内置**指纹去抖**：同一事件（按类型 / 群 / 用户 / 操作者 / 时间戳组合）在 5 秒窗口内去重，跨适配器链路重复同样抑制。正则引擎的规则动作也按规则 ID + 事件指纹独立去抖，即使上游重复触发或规则库存在重复定义，动作只执行一次。
-
-### 安全加固体系
-
-| 防护层 | 机制 |
-| --- | --- |
-| ReDoS 防护 | 正则 pattern 长度限制、匹配文本截断、灾难性回溯启发式检测 |
-| 本地图片白名单 | 仅允许插件数据目录内的本地文件转 base64 发送 |
-| SSRF 防护 | 市场下载重定向逐跳校验，拒绝内网 / 回环 / 保留地址 |
-| ZIP 炸弹防护 | 子插件解压前预检：至多 2000 条目、单文件 64MB、总量 256MB |
-| 路径穿越修复 | `Path.resolve()` + `relative_to()` 严格包含判定 |
-| pip 选项注入防护 | 拒绝以 `-` 开头的参数、VCS URL、PEP 508 URL spec |
-| 核心依赖保护 | endstone / websockets / pip 等核心包禁止升级或卸载 |
-
-### 依赖管理
-
-子插件可声明第三方 pip 依赖，LumenBridge 通过 `PathFinder` 磁盘查找绕过 `sys.modules` 缓存，确保卸载后立即检测为缺失。`dry-run` 预检在安装前拦截会冲突核心依赖的包，`--break-system-packages` 自动注入 PEP 668 覆写，全程列表参数调用（无 `shell=True`）杜绝命令注入。
-
----
 
 ## 核心功能
 
@@ -95,7 +62,7 @@ LumenBridge 的核心是一个**多适配器并行引擎**。每个适配器实�
 
 ### 子插件体系
 
-完整的 Python 子插件 API，支持热重载、第三方 pip 依赖声明、i18n 国际化。子插件清单文件声明版本、优先级、最低框架版本与依赖列表。热重载时清理 `__pycache__` 与旧模块缓存，禁写字节码避免缓存错误复用。子插件可通过 `lumen.plugin.register_command()` 注册游戏内命令（首次注册后重启一次即生效）。
+完整的 Python 子插件 API，支持热重载、第三方 pip 依赖声明、i18n 国际化。已实现OneBot v11协议穿透，子插件可以获取OneBot v11所有事件！以及Endstone所有API！同时，LumenBridge内置官Bot事件翻译，OneBot插件接入官Bot无缝衔接！
 
 ### 插件市场
 
@@ -116,7 +83,7 @@ LumenBridge 的核心是一个**多适配器并行引擎**。每个适配器实�
 
 ### 安装
 
-将 `lumenbridge-1.0.0-py3-none-any.whl` 放入 Endstone 的 `plugins/` 目录，启动服务器即可。插件无任何外部 pip 依赖。
+将 `endstone_lumenbridge-1.0.0-py3-none-any.whl` 放入 Endstone 的 `plugins/` 目录，启动服务器即可。插件无任何外部 pip 依赖。
 
 ### 三步配置
 
@@ -126,7 +93,7 @@ LumenBridge 的核心是一个**多适配器并行引擎**。每个适配器实�
 
 ```text
 plugins/
-├── lumenbridge-1.0.0-py3-none-any.whl
+├── endstone_lumenbridge-1.0.0-py3-none-any.whl
 └── lumenbridge/
     ├── config.json          # 基础配置
     ├── connections.json     # 连接配置（适配器卡片）
@@ -167,7 +134,7 @@ def on_group_message(pack, reply):
 }
 ```
 
-详见 [子插件开发文档](docs/LumenBridge子插件开发文档.md)。
+详见 [子插件开发文档](https://lumen.mxcraft.vip/developers/plugin-development)。
 
 ---
 
@@ -175,10 +142,10 @@ def on_group_message(pack, reply):
 
 | 文档 | 说明 |
 | --- | --- |
-| [使用文档](docs/LumenBridge使用文档.md) | 安装、配置、日常使用全指南 |
-| [子插件开发文档](docs/LumenBridge子插件开发文档.md) | 子插件 API 完整参考与教程 |
-| [QQ 官方机器人适配指南](docs/QQ官方机器人适配器与子插件开发指南.md) | QQ 官方 bot 配置与事件详解 |
-| [QQ 官方机器人 API 参考](docs/QQ官方机器人子插件API参考.md) | QQ 官方 bot 子插件 API 速查 |
+| [使用文档](https://lumen.mxcraft.vip/getting-started/usage) | 安装、配置、日常使用全指南 |
+| [子插件开发文档](https://lumen.mxcraft.vip/developers/plugin-development) | 子插件 API 完整参考与教程 |
+| [QQ 官方机器人适配指南](https://lumen.mxcraft.vip/qq-bot/adapter-guide) | QQ 官方 bot 配置与事件详解 |
+| [QQ 官方机器人 API 参考](https://lumen.mxcraft.vip/qq-bot/api-reference) | QQ 官方 bot 子插件 API 速查 |
 
 ---
 

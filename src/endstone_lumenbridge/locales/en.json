@@ -1045,10 +1045,6 @@
             "check_interval_seconds": {
                 "label": "Update check interval (seconds)",
                 "desc": "Minimum interval between automatic market checks for the same plugin."
-            },
-            "report_api_key": {
-                "label": "WebUI report proxy key",
-                "desc": "Optional: match webui_report_api_key in the PHP market so WebUI can safely forward plugin reports."
             }
         },
         "updates": {
@@ -1064,6 +1060,10 @@
             "timeout": {
                 "label": "Update check timeout (seconds)",
                 "desc": "Network timeout for querying the latest framework version."
+            },
+            "auto_update": {
+                "label": "Auto-update with hot reload",
+                "desc": "Download and verify new releases automatically, then disable self → install the new wheel → enable the new instance. No server restart needed."
             }
         }
     },
@@ -1146,6 +1146,28 @@
         "hide": "Hide",
         "poll_failed": "Failed to fetch install progress. Please refresh and retry."
     },
+    "task_log_modal": {
+        "title": "Task progress",
+        "market_task": "Market task",
+        "framework_update": "Framework update",
+        "running": "Running",
+        "success": "Done",
+        "failed": "Failed",
+        "reloading": "Hot-reloading..."
+    },
+    "task_log": {
+        "checking_updates": "Checking for updates...",
+        "installing_plugin": "Installing plugin {id}...",
+        "updating_plugin": "Updating subplugin {name}...",
+        "updating_deps": "Updating dependencies for {name}...",
+        "downloading": "Downloading",
+        "installing_deps": "Installing dependencies",
+        "installing": "Installing",
+        "staging_framework": "Staging framework update...",
+        "applying_framework": "Applying framework update...",
+        "reloading": "Hot-reloading",
+        "done": "Done"
+    },
     "reload_prompt": {
         "title": "Reload prompt",
         "message": "Dependencies installed. Reload sub-plugins now to take effect?",
@@ -1190,12 +1212,14 @@
         "framework_unconfigured": "No version-update API is configured. Set it under Framework updates in Settings.",
         "framework_latest": "Already on the latest version v{version}.",
         "framework_available": "LumenBridge v{version} is available.",
-        "framework_stage_button": "Stage verified update",
-        "framework_restart_note": "The wheel will be downloaded, verified, and atomically placed in plugins. Fully restart Endstone to load it.",
-        "framework_stage_confirm": "Stage the verified LumenBridge update? The old wheel will be backed up; fully restart Endstone afterwards.",
-        "framework_stage_success": "The new version is safely staged. Fully restart Endstone to load it.",
+        "framework_apply_button": "Update & apply now",
+        "framework_reload_note": "The wheel will be downloaded, verified, and hot-reloaded automatically: the panel goes offline briefly and recovers in seconds. No server restart needed.",
+        "framework_apply_confirm": "Update LumenBridge to the new version? It takes effect via hot reload; the panel goes offline briefly and then recovers automatically.",
+        "framework_applying": "Downloading and verifying the new version…",
+        "framework_reload_started": "New version staged; hot-reloading… the panel will recover shortly",
+        "framework_reload_done": "Hot reload finished; refreshing the page…",
         "framework_check_failed": "Framework update check failed",
-        "framework_stage_failed": "Framework update staging failed",
+        "framework_apply_failed": "Framework update failed",
         "search_placeholder": "Search plugin names, summaries, or tags",
         "search_button": "Search",
         "loading_config": "Loading marketplace configuration…",

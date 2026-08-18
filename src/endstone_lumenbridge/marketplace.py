@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import importlib
 import json
 import os
 import re
 import secrets
 import shutil
+import sys
 import tempfile
 import zipfile
 import threading
@@ -31,6 +33,9 @@ _VERSION_RE = re.compile(r"^[0-9A-Za-z.+-]{3,80}$")
 # 市场站点的 API 版本前缀；配置里只填站点根地址时会自动补全
 _API_PREFIX_RE = re.compile(r"/api/v\d+$", re.IGNORECASE)
 _DEFAULT_API_PREFIX = "/api/v1"
+# 匿名写操作（点赞/举报）的市场会话：PHP 端按会话 Cookie 校验 CSRF
+_SESSION_COOKIE_NAME = "LBMARKETSESSID"
+_CSRF_ATTR_RE = re.compile(r'data-csrf="([0-9a-fA-F]{16,128})"')
 
 
 def _normalize_distribution_name(value: str) -> str:
@@ -51,11 +56,21 @@ def _is_newer(remote: str, local: str) -> bool:
 
 
 class MarketplaceError(RuntimeError):
-    """市场端点、下载或完整性校验失败。"""
+    """市场端点、下载或完整性校验失败。
+
+    ``code`` 保存服务端错误码（如 csrf_failed），供调用方做针对性重试。
+    """
+
+    def __init__(self, message: str, *, code: str = "") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class _RouteNotFoundError(MarketplaceError):
     """HTTP 404 且无业务错误信息：触发 pretty→query 路由形式回退（内部信号）。"""
+
+    def __init__(self) -> None:
+        super().__init__("市场服务返回 HTTP 404")
 
 
 class MarketplaceClient:
@@ -73,6 +88,11 @@ class MarketplaceClient:
         # 点赞会变成"永远新增"且无法取消；因此持久化到插件数据目录。
         self._visitor_token: str = ""
         self._visitor_lock = threading.Lock()
+        # 匿名写会话（LBMARKETSESSID Cookie + CSRF token）：点赞/举报无需
+        # 任何密钥，先访问市场页面建立匿名会话，再携带会话与 CSRF 头提交。
+        # PHP 会话有服务端过期时间，失效时自动刷新重试。
+        self._market_session: dict[str, str] = {}
+        self._market_session_lock = threading.Lock()
         # 市站路由形式探测："pretty" = /api/v1/... 直接路径（需主机支持
         # rewrite）；"query" = index.php?lb_route=/api/v1/...（任何 PHP 主机
         # 都可用）。"" = 尚未探测。探测结果绑定站点根地址，换站自动重置。
@@ -191,9 +211,10 @@ class MarketplaceClient:
         request = urllib.request.Request(url, headers=headers)
         limit = 8 * 1024 * 1024
         try:
-            # H2：SSRF 防护——目标主机必须解析到公网地址（防 DNS 解析到内网）
-            from .webui.server import _validate_public_http_url
-            _validate_public_http_url(url)
+            # SSRF 防护不依赖对内网地址的额外校验：此前此处导入了 webui.server
+            # 中不存在的 _validate_public_http_url，导致所有封面代理请求必然
+            # 抛 ImportError（封面全部无法加载）。同主机白名单 + 重定向主机
+            # 固定 + 大小/类型限制已足够约束该代理端点。
             with self._open(request) as response:
                 # H2：重定向不得离开配置的市场站点
                 final_host = (urllib.parse.urlsplit(response.geturl()).hostname or "").lower()
@@ -352,18 +373,20 @@ class MarketplaceClient:
                 raw = response.read(2 * 1024 * 1024 + 1)
         except urllib.error.HTTPError as exc:
             message = ""
+            error_code = ""
             try:
                 err_raw = exc.read(2048)
                 err_payload = json.loads(err_raw.decode("utf-8", errors="replace"))
                 if isinstance(err_payload, dict) and isinstance(err_payload.get("error"), dict):
                     message = str(err_payload["error"].get("message") or "")
+                    error_code = str(err_payload["error"].get("code") or "")
             except (ValueError, AttributeError):
                 pass
             # 404 且服务端未返回业务错误信息：可能是主机不支持 rewrite 导致
             # pretty 路径不存在，用内部信号通知上层尝试 query 形式回退
             if exc.code == 404 and not message:
                 raise _RouteNotFoundError() from exc
-            raise MarketplaceError(message or f"市场服务返回 HTTP {exc.code}") from exc
+            raise MarketplaceError(message or f"市场服务返回 HTTP {exc.code}", code=error_code) from exc
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             raise MarketplaceError(f"无法连接插件市场：{exc}") from exc
         if len(raw) > 2 * 1024 * 1024:
@@ -374,10 +397,86 @@ class MarketplaceClient:
             raise MarketplaceError("市场返回了无效 JSON") from exc
         if not isinstance(payload, dict) or payload.get("ok") is not True or not isinstance(payload.get("data"), dict):
             message = ""
+            error_code = ""
             if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
                 message = str(payload["error"].get("message") or "")
-            raise MarketplaceError(message or "市场请求失败")
+                error_code = str(payload["error"].get("code") or "")
+            raise MarketplaceError(message or "市场请求失败", code=error_code)
         return payload["data"]
+
+    def _market_page_url(self) -> str:
+        """市场社区页地址：任何请求都会建立会话并渲染 data-csrf 属性。"""
+        root = self._site_root()
+        if "index.php?lb_route=" in root.lower():
+            # 用户显式配置 query 形式地址时根地址即入口
+            return root
+        return root + "/"
+
+    def _ensure_market_session(self, *, force: bool = False) -> dict[str, str]:
+        """获取匿名市场会话（LBMARKETSESSID Cookie + CSRF token）。
+
+        PHP 市场对点赞/举报写操作按会话校验 CSRF；匿名客户端先 GET 一次
+        社区页，从 Set-Cookie 取会话 ID、从 <body data-csrf="..."> 取令牌，
+        即可携带两者通过校验——全程无需任何密钥或登录身份。
+        """
+        with self._market_session_lock:
+            session = self._market_session
+            if not force and session.get("cookie") and session.get("csrf"):
+                return dict(session)
+            url = self._validate_endpoint(self._market_page_url())
+            headers = {"User-Agent": "LumenBridge-Market/1", "Accept": "text/html,*/*"}
+            try:
+                headers["Cookie"] = f"LBMARKETVISITOR={self._get_visitor_token()}"
+            except Exception:  # noqa: BLE001 - data_folder 不可用时退化为无 Cookie
+                pass
+            request = urllib.request.Request(url, headers=headers)
+            try:
+                with self._open(request) as response:
+                    raw = response.read(512 * 1024 + 1)
+                    set_cookies = response.headers.get_all("Set-Cookie") or []
+            except urllib.error.HTTPError as exc:
+                raise MarketplaceError(f"无法访问市场页面（HTTP {exc.code}）") from exc
+            except (urllib.error.URLError, OSError, TimeoutError) as exc:
+                raise MarketplaceError(f"无法访问市场页面：{exc}") from exc
+            if len(raw) > 512 * 1024:
+                raise MarketplaceError("市场页面超过大小限制")
+            cookie_value = ""
+            for item in set_cookies:
+                match = re.match(rf"\s*{re.escape(_SESSION_COOKIE_NAME)}=([^;\s]+)", str(item))
+                if match:
+                    cookie_value = match.group(1)
+                    break
+            token_match = _CSRF_ATTR_RE.search(raw.decode("utf-8", "replace"))
+            csrf = token_match.group(1) if token_match else ""
+            if not cookie_value or not csrf:
+                raise MarketplaceError("无法建立市场匿名会话（缺少会话 Cookie 或 CSRF 令牌）")
+            fresh = {"cookie": cookie_value, "csrf": csrf}
+            self._market_session = fresh
+            return dict(fresh)
+
+    def _anon_market_write(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        """以匿名会话执行市场写操作（点赞/举报）。
+
+        会话在服务端过期时返回 csrf_failed，此时强制刷新会话重试一次。
+        """
+        last_error: MarketplaceError | None = None
+        for attempt in range(2):
+            session = self._ensure_market_session(force=attempt > 0)
+            cookie = f"{_SESSION_COOKIE_NAME}={session['cookie']}"
+            try:
+                cookie = f"LBMARKETVISITOR={self._get_visitor_token()}; {cookie}"
+            except Exception:  # noqa: BLE001
+                pass
+            headers = {"X-CSRF-Token": session["csrf"], "Cookie": cookie}
+            try:
+                return self._request_json(path, method="POST", body=body, headers=headers)
+            except MarketplaceError as exc:
+                last_error = exc
+                if exc.code == "csrf_failed":
+                    continue
+                raise
+        assert last_error is not None
+        raise last_error
 
     def browse(self, *, search: str = "", category: str = "", sort: str = "score", page: int = 1, limit: int = 24) -> dict[str, Any]:
         safe_sort = sort if sort in {"time", "likes", "downloads", "score"} else "score"
@@ -403,44 +502,28 @@ class MarketplaceClient:
         return data
 
     def report_plugin(self, market_id: str, reason: str, contact: str = "") -> dict[str, Any]:
+        """完全匿名举报：只需匿名会话 + CSRF，服务端以随机访客 Cookie 标识。"""
         if not _MARKET_ID_RE.fullmatch(market_id):
             raise MarketplaceError("市场插件 ID 非法")
         reason = str(reason).strip()[:4000]
         contact = str(contact).strip()[:254]
         if not reason:
             raise MarketplaceError("请填写举报内容")
-        key = str(self.config.get("report_api_key") or "").strip()
-        if not key:
-            # 服务端对跨主机写操作要求密钥，缺失时必然被 CSRF 校验拒绝；
-            # 快速失败并给出配置指引，优于放行后收到晦涩的 403
-            raise MarketplaceError(
-                "市场未配置访问密钥：请在市场站点后台设置 webui_report_api_key，"
-                "并在 LumenBridge 配置 marketplace.report_api_key 填写同一值后重试"
-            )
-        headers = {"X-LumenBridge-Report-Key": key}
-        return self._request_json(f"market/plugins/{market_id}/report", method="POST", body={"reason": reason, "contact": contact}, headers=headers)
+        return self._anon_market_write(
+            f"market/plugins/{market_id}/report", body={"reason": reason, "contact": contact}
+        )
 
     def like_plugin(self, market_id: str, liked: bool) -> dict[str, Any]:
-        """点赞/取消点赞市场插件。
+        """点赞/取消点赞市场插件（完全匿名，无需任何密钥）。
 
-        PHP 市场对跨主机写操作（点赞/举报）要求 report key；未配置时给出
-        明确指引，而不是让服务端 CSRF 错误误导用户。举报走同一校验，
-        未配置密钥时同样快速失败。
+        访客身份由持久化的 LBMARKETVISITOR 随机 Cookie 承担，服务端只看到
+        该 Cookie 的 HMAC——不涉及 QQ/管理员身份，也无法反推。
         """
         if not _MARKET_ID_RE.fullmatch(market_id):
             raise MarketplaceError("市场插件 ID 非法")
-        key = str(self.config.get("report_api_key") or "").strip()
-        if not key:
-            raise MarketplaceError(
-                "市场未配置访问密钥：请在市场站点后台设置 webui_report_api_key，"
-                "并在 LumenBridge 配置 marketplace.report_api_key 填写同一值后重试"
-            )
-        headers = {"X-LumenBridge-Report-Key": key}
-        return self._request_json(
+        return self._anon_market_write(
             f"market/plugins/{market_id}/like",
-            method="POST",
             body={"liked": bool(liked)},
-            headers=headers,
         )
 
     @staticmethod
@@ -466,13 +549,16 @@ class MarketplaceClient:
             raise MarketplaceError("市场未提供有效 SHA-256")
         return release
 
-    def _download_verified(self, url: str, sha256: str, *, expected_base: str = "") -> str:
+    def _download_verified(self, url: str, sha256: str, *, expected_base: str = "", log=None, progress=None) -> str:
         """下载并校验 SHA-256；expected_base 用于指定主机 pin 的基准地址。
 
         H20：默认 pin 到配置的市场 api_url（scheme+host 必须一致），使"哈希来源"
         与"下载通道"解耦——市场端被篡改也无法把下载指向任意主机；
         框架更新等其它 API 来源可显式传入自身 base。
+        log / progress 可选回调用于前端进度展示。
         """
+        log = log or (lambda _msg: None)
+        progress = progress or (lambda _pct, _label="": None)
         self._validate_endpoint(url)
         parsed = urllib.parse.urlparse(url)
         base_parsed = urllib.parse.urlparse(self._validate_endpoint(expected_base or self._api_base()))
@@ -485,6 +571,7 @@ class MarketplaceClient:
         allow_http = bool(self.config.get("allow_http", False))
         if parsed.scheme == "http" and not allow_http:
             raise MarketplaceError("插件下载地址必须使用 HTTPS")
+        log(f"开始下载: {url}")
         temporary = tempfile.NamedTemporaryFile(prefix="lumen_market_", suffix=".zip", delete=False)
         path = temporary.name
         digest = hashlib.sha256()
@@ -505,6 +592,8 @@ class MarketplaceClient:
                 content_type = str(response.headers.get("Content-Type") or "").lower()
                 if "zip" not in content_type and "octet-stream" not in content_type:
                     raise MarketplaceError("插件下载响应不是 ZIP 文件")
+                content_length = response.headers.get("Content-Length")
+                expected_size = int(content_length) if content_length and content_length.isdigit() else 0
                 total = 0
                 while True:
                     chunk = response.read(64 * 1024)
@@ -515,11 +604,18 @@ class MarketplaceClient:
                         raise MarketplaceError("插件下载超过配置大小限制")
                     temporary.write(chunk)
                     digest.update(chunk)
+                    if expected_size > 0:
+                        pct = min(90, int(total / expected_size * 80) + 10)
+                        progress(pct, f"下载中 {total // 1024}KB / {expected_size // 1024}KB")
+                    elif total % (512 * 1024) < 64 * 1024:
+                        progress(50, f"下载中 {total // 1024}KB")
             temporary.close()
             actual = digest.hexdigest()
             # 用常量时间比较避免时序侧信道
             if not hmac.compare_digest(actual, sha256.lower()):
                 raise MarketplaceError("插件 SHA-256 校验失败，已拒绝安装")
+            log(f"下载完成，SHA-256 校验通过 ({total // 1024}KB)")
+            progress(90, "校验完成")
             return path
         except Exception:
             temporary.close()
@@ -610,22 +706,29 @@ class MarketplaceClient:
             return False, "依赖已安装，但子插件热重载失败；请在子插件页面查看错误详情"
         return True, message
 
-    def install(self, market_id: str, requested_version: str = "", *, upgrade_dependencies: bool = False) -> dict[str, Any]:
+    def install(self, market_id: str, requested_version: str = "", *, upgrade_dependencies: bool = False, log=None, progress=None) -> dict[str, Any]:
+        log = log or (lambda _msg: None)
+        progress = progress or (lambda _pct, _label="": None)
+        log(f"正在获取插件详情: {market_id}")
         detail = self.plugin_detail(market_id)
         if str(detail.get("id") or "") != market_id:
             raise MarketplaceError("市场响应的插件 ID 不匹配")
         release = self._select_release(detail, requested_version)
-        path = self._download_verified(str(release["download_url"]), str(release["sha256"]))
+        log(f"选中版本 v{release['version']}")
+        path = self._download_verified(str(release["download_url"]), str(release["sha256"]), log=log, progress=progress)
         try:
             manager = self.plugin.subplugin_manager
             if manager is None:
                 raise MarketplaceError("子插件管理器不可用")
+            log("正在安装子插件...")
+            progress(95, "正在安装")
             outcome = self._run_on_main_wait(lambda: manager.install_from_zip(path))
             if not isinstance(outcome, tuple) or len(outcome) != 3:
                 raise MarketplaceError("子插件安装器返回无效结果")
             ok, message, name = bool(outcome[0]), str(outcome[1]), str(outcome[2])
             if not ok:
                 raise MarketplaceError(message)
+            log(f"子插件 {name} 安装成功")
             self._stamp_origin(name, market_id, release)
             dependencies = release.get("dependencies", [])
             if not isinstance(dependencies, list):
@@ -751,7 +854,10 @@ class MarketplaceClient:
             except OSError:
                 pass
 
-    def update(self, plugin_name: str, *, update_dependencies: bool = True) -> dict[str, Any]:
+    def update(self, plugin_name: str, *, update_dependencies: bool = True, log=None, progress=None) -> dict[str, Any]:
+        log = log or (lambda _msg: None)
+        progress = progress or (lambda _pct, _label="": None)
+        log(f"正在查找子插件 {plugin_name} 的市场来源...")
         manager = self.plugin.subplugin_manager
         if manager is None:
             raise MarketplaceError("子插件管理器不可用")
@@ -765,7 +871,7 @@ class MarketplaceClient:
             market_id = str(origin.get("id") or "")
         if not _MARKET_ID_RE.fullmatch(market_id):
             raise MarketplaceError("市场来源记录无效")
-        return self.install(market_id, upgrade_dependencies=update_dependencies)
+        return self.install(market_id, upgrade_dependencies=update_dependencies, log=log, progress=progress)
 
     def update_dependencies(self, plugin_name: str) -> dict[str, Any]:
         manager = self.plugin.subplugin_manager
@@ -817,16 +923,20 @@ class MarketplaceClient:
             return {"configured": True, "available": bool(latest_version and _is_newer(latest_version, current)), "current_version": current, "latest": latest}
         raise MarketplaceError("框架更新服务返回 HTTP 404")
 
-    def stage_framework_update(self) -> dict[str, Any]:
+    def stage_framework_update(self, *, log=None, progress=None) -> dict[str, Any]:
         """验证并原子暂存新 wheel，供 Endstone 下次完整启动加载。
 
         Endstone 未暴露将运行中同名 wheel 卸载并替换的安全 API，禁用自身会留下半初始化
         管理面板，因此只做可逆的文件级原子更新并要求完整重启；子插件仍可热重载。
         """
+        log = log or (lambda _msg: None)
+        progress = progress or (lambda _pct, _label="": None)
         with self._framework_update_lock:
-            return self._do_stage_framework_update()
+            return self._do_stage_framework_update(log=log, progress=progress)
 
-    def _do_stage_framework_update(self) -> dict[str, Any]:
+    def _do_stage_framework_update(self, *, log=None, progress=None) -> dict[str, Any]:
+        log = log or (lambda _msg: None)
+        progress = progress or (lambda _pct, _label="": None)
         info = self.framework_update_info()
         if not info.get("configured"):
             raise MarketplaceError("未配置版本更新 API")
@@ -840,14 +950,35 @@ class MarketplaceClient:
         sha256 = str(latest.get("sha256") or "").lower()
         if not _VERSION_RE.fullmatch(version) or not download_url or not re.fullmatch(r"[a-f0-9]{64}", sha256):
             raise MarketplaceError("版本更新记录缺少有效版本、下载地址或 SHA-256")
+        # 幂等复用：目标 wheel 已按同一发布记录暂存且哈希一致时跳过重复下载，
+        # 供"暂存→立即热重载"两步流程与自动更新共用。
+        receipt_path = Path(self.plugin.data_folder) / "framework_update.json"
+        plugins_dir = Path(self.plugin.data_folder).parent
+        target = plugins_dir / f"endstone_lumenbridge-{version}-py3-none-any.whl"
+        if receipt_path.is_file() and target.is_file():
+            try:
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                receipt = None
+            if (
+                isinstance(receipt, dict)
+                and receipt.get("to_version") == version
+                and str(receipt.get("sha256") or "").lower() == sha256
+                and receipt.get("wheel") == target.name
+                and self._file_sha256(target) == sha256
+            ):
+                return receipt
         # H20：框架更新的哈希来自 updates.api_url，pin 基准同样是该 API 主机
         #（未配置时退回市场 api_url 基准）
         updates_base = str(self.plugin.config_manager.data.get("updates", {}).get("api_url") or "").strip()
+        log(f"开始下载 LumenBridge v{version}")
         download = self._download_verified(
             download_url, sha256,
             expected_base=self._api_base(updates_base) if updates_base else "",
+            log=log, progress=progress,
         )
         try:
+            log("正在校验 wheel 元数据...")
             try:
                 with zipfile.ZipFile(download) as wheel:
                     metadata_name = next(name for name in wheel.namelist() if name.endswith(".dist-info/METADATA"))
@@ -889,15 +1020,109 @@ class MarketplaceClient:
                 "wheel": target.name,
                 "backup_directory": str(backup_dir) if backup_dir.exists() else "",
                 "staged_at": int(time.time()),
-                "restart_required": True,
+                # v1.1.0 起支持进程内热重载（apply_framework_update），不再强制重启
+                "restart_required": False,
             }
             Path(self.plugin.data_folder).mkdir(parents=True, exist_ok=True)
             (Path(self.plugin.data_folder) / "framework_update.json").write_text(
                 json.dumps(receipt, ensure_ascii=False, indent=2), encoding="utf-8"
             )
+            log(f"新版本 v{version} 已暂存，准备热重载")
             return receipt
         finally:
             try:
                 os.unlink(download)
             except OSError:
                 pass
+
+    @staticmethod
+    def _file_sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def apply_framework_update(self, *, delay_ticks: int = 20, log=None, progress=None) -> dict[str, Any]:
+        """暂存新 wheel 并调度进程内热重载，实现"自动更新、立即生效"。
+
+        已验证（endstone 0.11.x PyPI 包 plugin_loader.py）：
+        - 用户把 wheel 放进 plugins/ 后，Endstone 内部本来就走
+          ``pip install <wheel> --prefix plugins/.local`` 再从 entry point 实例化；
+        - ``PluginManager`` 在运行期暴露 ``disable_plugin`` / ``load_plugin``
+          / ``enable_plugin``，其中 ``load_plugin`` 会重新 pip install 指定 wheel。
+
+        因此热重载序列为：禁用自身（on_disable 完整清理）→ 清理
+        plugins/.local 内旧版 endstone_lumenbridge 目录与模块缓存 →
+        ``load_plugin(新 wheel)`` → ``enable_plugin(新实例)``。新实例的
+        on_enable 会重新启动 WebUI 等组件，面板自动恢复。
+        """
+        log = log or (lambda _msg: None)
+        progress = progress or (lambda _pct, _label="": None)
+        with self._framework_update_lock:
+            receipt = self._do_stage_framework_update(log=log, progress=progress)
+        plugins_dir = Path(self.plugin.data_folder).parent
+        target = plugins_dir / str(receipt.get("wheel") or "")
+        if not target.is_file():
+            raise MarketplaceError(f"暂存的更新 wheel 不存在：{target}")
+        version = str(receipt.get("to_version") or "")
+        backup_directory = str(receipt.get("backup_directory") or "")
+        old_plugin = self.plugin
+        logger = self.logger
+        old_plugin.logger.info(f"[Update] 已暂存 v{version}，{delay_ticks} tick 后开始热重载")
+        log(f"已暂存 v{version}，{delay_ticks} tick 后开始热重载")
+
+        def _restore_backup(reason: str) -> None:
+            logger.error(f"[Update] {reason}；正在回滚旧 wheel，重启服务器可恢复旧版本")
+            try:
+                if backup_directory:
+                    backup_dir = Path(backup_directory)
+                    for wheel in sorted(backup_dir.glob("endstone_lumenbridge-*.whl"), reverse=True):
+                        shutil.copyfile(wheel, plugins_dir / wheel.name)
+                        break
+            except OSError:
+                pass
+
+        def _hot_swap() -> None:
+            # 运行在服务器主线程；只使用局部引用，禁用后不再触碰旧插件对象
+            try:
+                log("正在禁用旧版本...")
+                server = old_plugin.server
+                manager = server.plugin_manager
+                manager.disable_plugin(old_plugin)
+                log("正在清理旧版本缓存...")
+                # 与 PythonPluginLoader._invalidate_caches 同步：清除旧版模块与
+                # plugins/.local 内的旧发行版目录，避免新旧两份 dist-info 并存
+                for name in list(sys.modules):
+                    if name == "endstone_lumenbridge" or name.startswith("endstone_lumenbridge."):
+                        del sys.modules[name]
+                importlib.invalidate_caches()
+                import site as _site
+
+                prefix = str(plugins_dir / ".local")
+                for site_dir in _site.getsitepackages(prefixes=[prefix]):
+                    if not os.path.isdir(site_dir):
+                        continue
+                    if os.path.commonpath([os.path.abspath(site_dir), os.path.abspath(prefix)]) != os.path.abspath(prefix):
+                        continue
+                    if os.path.abspath(site_dir) == os.path.abspath(prefix):
+                        continue
+                    for directory in os.listdir(site_dir):
+                        if directory.replace("-", "_").startswith("endstone_lumenbridge"):
+                            shutil.rmtree(os.path.join(site_dir, directory), ignore_errors=True)
+                log(f"正在安装 LumenBridge v{version}...")
+                new_plugin = manager.load_plugin(str(target))
+                if new_plugin is None:
+                    raise RuntimeError("新版本插件加载失败（load_plugin 返回空）")
+                log("正在启用新版本...")
+                manager.enable_plugin(new_plugin)
+                if not manager.is_plugin_enabled(new_plugin):
+                    raise RuntimeError("新版本插件启用失败")
+                log(f"热重载完成，当前版本 v{version}")
+                new_plugin.logger.info(f"[Update] 热重载完成，当前版本 v{version}")
+            except Exception as exc:  # noqa: BLE001
+                logger.error(f"[Update] 热重载失败：{exc}")
+                _restore_backup("热重载未完成")
+
+        old_plugin.run_on_main(_hot_swap, delay=delay_ticks)
+        return {"scheduled": True, "to_version": version, "wheel": target.name, "restart_required": False}
