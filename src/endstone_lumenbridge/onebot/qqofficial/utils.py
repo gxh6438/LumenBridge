@@ -12,11 +12,33 @@ from typing import Any
 
 from .constants import LOCAL_MEDIA_MAX, MEDIA_FILE_TYPE
 
-# <@!xxx> / <@xxx> at 机器人的内联标记
+# 入站：官方推送的 @ 内联标记（旧协议 <@!openid> / <@openid>）
 MENTION_RE = re.compile(r"<@!?[A-Za-z0-9_=-]+>\s*")
-# 出站 @ 标记（extract_payload 生成）：官方仅在 markdown（msg_type=2）中
-# 解析为真实提及，sender 据此切换消息载体
-OUT_MENTION_RE = re.compile(r"<@!?[A-Za-z0-9_=-]+>")
+# 入站：官方新文本链 <qqbot-at-user id="openid"/>。官方文档（文本交互）已公告
+# 旧协议 <@userid> 即将弃用；腾讯若迁移推送格式，入站解析按此兼容
+QQBOT_AT_RE = re.compile(r'<qqbot-at-user\s+id="([^"]*)"\s*/?>\s*')
+# 出站 @ 标记：markdown 载体（msg_type=2）+ 官方新格式文本链
+# <qqbot-at-user id="openid" /> 是经 Gensokyo-ForSpark 实测可渲染真实 @ 的
+# 组合（at_markdown 功能，2026-08-19 实测：纯文本 + 文本链、markdown +
+# 频道模板 <at id=""> 均显示原文；「官方开发者实测 markdown 消息可渲染
+# 真 at」）。用官方最新格式，旧协议 <@userid> 弃用不受影响。markdown 被
+# 拒（能力未开通）时 sender 自动降级纯文本发送（该场景 @ 不渲染，保正文）。
+# 格式转换器用（不吞尾随空白，与剥离用的 MENTION_RE / QQBOT_AT_RE 区分）：
+# 旧协议 <@!id> / <@id>（已弃用）、旧社区写法 <at id="id"></at> 统一归一
+# 为官方文本链标准格式（自闭合、斜杠前带空格）
+_QQBOT_AT_CONV_RE = re.compile(r'<qqbot-at-user\s+id="([^"]*)"\s*/?>')
+_AT_MD_CONV_RE = re.compile(r'<at\s+id="([^"]*)"\s*>\s*</at>')
+_AT_LEGACY_CONV_RE = re.compile(r"<@!?([A-Za-z0-9_=-]+)>")
+# 出站 @ 标记检测：sender 据此切换 markdown 载体；三种写法均检测，
+# 防转换器遗漏的旁路标记
+OUT_MENTION_RE = re.compile(
+    r'<qqbot-at-user\s+id="[^"]+"\s*/?>'
+    r'|<at\s+id="[^"]+"\s*>\s*</at>'
+    r'|<@!?[A-Za-z0-9_=-]+>'
+)
+# markdown 载体下需转义的特殊字符（@ 标记先提取占位再转义回填）
+_MD_ESCAPE_RE = re.compile(r"([\\`*_{}#\[\]<>~])")
+_MD_UNESCAPE_RE = re.compile(r"\\([\\`*_{}#\[\]<>~])")
 # QQ 官方表情标记 <faceType=1,id=...,ext="..."> → [表情]
 FACE_RE = re.compile(r"<faceType=\d+[^>]*>")
 
@@ -40,16 +62,24 @@ def biz_code(err: ApiHTTPError) -> int:
 
 
 def plain_content(content: Any) -> str:
-    """清理官方消息 content：去掉 @机器人 标记与表情标记，压缩空白。"""
+    """清理官方消息 content：去掉 @ 标记（新旧格式）与表情标记，压缩空白。"""
     text = str(content or "")
     text = MENTION_RE.sub("", text)
+    text = QQBOT_AT_RE.sub("", text)
     text = FACE_RE.sub("[表情]", text)
     return text.strip()
 
 
-# content 内联标记：@提及（含其尾随空白，供剥离 bot 触发标记用）或表情标记
-_INLINE_TOKEN_RE = re.compile(r"<@!?([A-Za-z0-9_=-]+)>"
-                               r"(\s*)|<faceType=\d+[^>]*>")
+# content 内联标记：@提及（含其尾随空白，供剥离 bot 触发标记用）或表情标记。
+# @提及兼容两种推送格式：旧协议 <@!openid> 与新官方文本链 <qqbot-at-user id=""/>
+#（组 1/2 为旧协议 id 与尾空白，组 3/4 为新格式 id 与尾空白）
+_INLINE_TOKEN_RE = re.compile(
+    r"<@!?([A-Za-z0-9_=-]+)>"
+    r"(\s*)"
+    r'|<qqbot-at-user\s+id="([^"]*)"\s*/?>'
+    r"(\s*)"
+    r"|<faceType=\d+[^>]*>"
+)
 
 
 def content_segments(content: Any, self_id: str = "") -> tuple[list[dict[str, Any]], str]:
@@ -76,12 +106,13 @@ def content_segments(content: Any, self_id: str = "") -> tuple[list[dict[str, An
     pos = 0
     for m in _INLINE_TOKEN_RE.finditer(text):
         buf.append(text[pos:m.start()])  # 标记之前的普通文本
-        if m.group(1) is not None:  # @提及：先收口前文再插入 at 段（顺序保持的关键）
+        if m.group(1) is not None or m.group(3) is not None:
+            # @提及（旧协议 / 新官方文本链）：先收口前文再插入 at 段（顺序保持的关键）
             _flush()
-            uid = m.group(1) or ""
+            uid = m.group(1) or m.group(3) or ""
             if uid and uid != str(self_id or ""):
                 segments.append({"type": "at", "data": {"qq": uid}})
-                ws = m.group(2) or ""
+                ws = m.group(2) or m.group(4) or ""
                 if ws:
                     buf.append(ws)  # 保持 @ 后原有间距
             # @机器人自身：token 与其后空白一并丢弃
@@ -94,12 +125,95 @@ def content_segments(content: Any, self_id: str = "") -> tuple[list[dict[str, An
 
 
 def mention_segments(content: Any) -> list[dict[str, Any]]:
-    """提取官方消息中的 <@!xxx> / <@xxx> 提及为 at 消息段（id 即 openid/AppID）。"""
+    """提取官方消息中的 @ 提及为 at 消息段（id 即 openid/AppID）。
+
+    兼容旧协议 <@!xxx> / <@xxx> 与新官方文本链 <qqbot-at-user id="xxx"/>，
+    复用 _INLINE_TOKEN_RE 按出现顺序统一提取（分别扫描两种格式会乱序）。
+    """
     text = str(content or "")
     segments: list[dict[str, Any]] = []
-    for match in re.finditer(r"<@!?([A-Za-z0-9_=-]+)>", text):
-        segments.append({"type": "at", "data": {"qq": match.group(1)}})
+    for m in _INLINE_TOKEN_RE.finditer(text):
+        uid = (m.group(1) or m.group(3) or "").strip()
+        if uid:
+            segments.append({"type": "at", "data": {"qq": uid}})
     return segments
+
+
+# 合法 openid / unionid 字符集（32 位 hex 为主，防御性放宽到 20-64 位）
+_OPENID_RE = re.compile(r"[A-Fa-f0-9_-]{20,64}")
+
+
+def normalize_target(target: Any) -> str:
+    """规范化出站目标（群 / 用户 openid）。
+
+    用户在 WebUI 群列表里可能填带备注的值（如 "BBC E1B33508D3DAA..."），
+    带空格 / 前缀的 openid 会让 REST 路径异常（/v2/groups/BBC E1B3.../
+    messages）。提取首个合法 openid 片段；无匹配时仅去空白原样返回
+    （保持旧行为，交给官方侧报错暴露配置问题）。
+    """
+    text = str(target or "").strip()
+    if not text:
+        return text
+    if _OPENID_RE.fullmatch(text):
+        return text
+    match = _OPENID_RE.search(text)
+    return match.group(0) if match else text.replace(" ", "")
+
+
+def normalize_at_markers(content: Any) -> str:
+    """出站格式转换器：任意风格的 @ 标记统一转为官方文本链标准格式。
+
+    <qqbot-at-user id="id" />（自闭合、斜杠前带空格）配合 markdown 载体
+    （msg_type=2）是经 Gensokyo-ForSpark 实测可渲染真实 @ 的组合；旧协议
+    <@!id> / <@id>（已弃用）与旧社区写法 <at id=""></at> 一并归一化。
+    转换只换标记壳、id 原样保留（openid / unionid 均可，由官方侧解析）；
+    已是标准格式的标记不受影响（幂等）；空 id 的占位标记整体丢弃。
+    """
+
+    def _tag(uid: str) -> str:
+        return f'<qqbot-at-user id="{uid}" />' if uid else ""
+
+    text = _QQBOT_AT_CONV_RE.sub(lambda m: _tag(m.group(1)), str(content or ""))
+    text = _AT_MD_CONV_RE.sub(lambda m: _tag(m.group(1)), text)
+    return _AT_LEGACY_CONV_RE.sub(lambda m: _tag(m.group(1)), text)
+
+
+def escape_markdown_text(content: Any) -> str:
+    """markdown 载体下转义文本的格式特殊字符，@ 标记除外。
+
+    切到 markdown 载体后，普通文本里的 * # > _ < 等会被客户端解析成
+    格式（如「绑定白名单<你的游戏ID>」的尖括号会被当 HTML 标签吞掉）。
+    先把 @ 标记（官方文本链）提取为占位符，再转义其余文本，最后回填。
+    """
+    text = str(content or "")
+    tokens: list[str] = []
+
+    def _stash(m: "re.Match[str]") -> str:
+        tokens.append(m.group(0))
+        return f"\x00{len(tokens) - 1}\x00"
+
+    stashed = _QQBOT_AT_CONV_RE.sub(_stash, text)
+    escaped = _MD_ESCAPE_RE.sub(r"\\\1", stashed)
+    for i, tok in enumerate(tokens):
+        escaped = escaped.replace(f"\x00{i}\x00", tok)
+    return escaped
+
+
+def markdown_to_plain_text(content: Any) -> str:
+    """markdown 载体降级纯文本通路：反转义 + @ 标记还原为可读文本。
+
+    markdown 能力未开通被拒时降级纯文本发送；纯文本通道 @ 不渲染
+    （Gensokyo 实测显示原文），官方文本链标记还原为 @Openid前8位
+    可读文本（学 Gensokyo 兜底，避免整段标记原样刷在群里），
+    并反转义 markdown 转义字符（去掉 \\ 前缀）。
+    """
+
+    def _to_nick(m: "re.Match[str]") -> str:
+        uid = m.group(1)
+        return f"@Openid{uid[:8]}" if len(uid) >= 8 else ""
+
+    text = _QQBOT_AT_CONV_RE.sub(_to_nick, str(content or ""))
+    return _MD_UNESCAPE_RE.sub(r"\1", text)
 
 
 def read_local_media(path: str) -> bytes | None:
@@ -131,32 +245,36 @@ def extract_payload(message: Any) -> tuple[str, dict[str, Any] | None]:
 
     富媒体描述：{"type": "image"|"video"|"record", "url": str|None, "data": bytes|None}
     首个富媒体段生效（官方单条消息仅支持一个媒体）。
+    出站 @ 统一归一化：at 段与文本中的 @ 标记字面量（<@!id> / <@id> /
+    <at id=""></at> 等）经 normalize_at_markers 转换为官方文本链标准格式
+    <qqbot-at-user id="openid" />；sender 检测后切换 markdown 载体发送
+    （Gensokyo-ForSpark 实测可渲染组合）。
     """
     # 单个消息段 dict（如 {"type": "text", ...}）等价于单元素列表，
     # 否则会走 str(dict) 分支把整段序列化成 repr 字符串发给用户
     if isinstance(message, dict):
         message = [message]
     if isinstance(message, str) or not isinstance(message, (list, tuple)):
-        return str(message or ""), None
+        return normalize_at_markers(str(message or "")), None
     parts: list[str] = []
     media: dict[str, Any] | None = None
     for seg in message:
         if isinstance(seg, str):
-            parts.append(seg)
+            parts.append(normalize_at_markers(seg))
             continue
         if not isinstance(seg, dict):
             continue
         stype = str(seg.get("type") or "")
         data = seg.get("data") or {}
         if stype == "text":
-            parts.append(str(data.get("text", "")))
+            parts.append(normalize_at_markers(str(data.get("text", ""))))
         elif stype == "at":
-            # 官方 <@!openid> 内联标记仅在 markdown 消息（msg_type=2）中
-            # 渲染为真实 @（纯文本会原样显示标记）；sender 检测到该标记后
-            # 自动切换 markdown 载体发送。"all"（@全体）官方不支持，丢弃
+            # at 段 → 官方文本链 <qqbot-at-user id="openid" />（见
+            # normalize_at_markers 说明，配合 markdown 载体渲染）；
+            # "all"（@全体）官方不支持，丢弃
             at_id = str(data.get("qq") or "").strip()
             if at_id and at_id != "all":
-                parts.append(f"<@!{at_id}>")
+                parts.append(f'<qqbot-at-user id="{at_id}" />')
         elif stype in MEDIA_FILE_TYPE and media is None:
             url = str(data.get("url") or "").strip()
             file_ref = str(data.get("file") or data.get("path") or "").strip()

@@ -22,7 +22,7 @@ def replace_placeholders(template: str, *args: Any) -> str:
     """按顺序替换模板中的 %s 占位符"""
     if not isinstance(template, str):
         return ""
-    params = list(args[0]) if len(args) == 1 and isinstance(args[0], (list, tuple)) else list(args)
+    params = list(args)
     index = 0
 
     def _sub(_match: re.Match) -> str:
@@ -76,35 +76,9 @@ class ChatSyncModule:
         return _default_sync()
 
     def _group_allowed(self, pack: dict[str, Any]) -> bool:
-        """来源群是否允许互通：属于来源适配器或任一适配器的群列表。
-
-        未填写任何群 openid / 群 QQ 号时默认对所有群生效；QQ 官方适配器的
-        群标识是 group_openid 字符串，统一用字符串比较。
-        """
-        gid = pack.get("group_id")
-        if gid is None:
-            return False
-        key = str(gid)
-        connections = getattr(self.plugin, "connections", None)
-        if connections is not None:
-            configured = connections.all_group_keys()
-            if not configured:
-                # 没有任何适配器填写群号 → 默认所有群生效
-                return True
-            if key in configured:
-                return True
-            adapter_id = str(pack.get("_lumen_adapter_id", "") or "")
-            cfg = connections.get(adapter_id) if adapter_id else None
-            if cfg is not None:
-                groups = connections.parse_groups_loose(cfg.get("main_group"))
-                if (key in groups) or not groups:
-                    return True
-            return False
-        cm = self.plugin.config_manager
-        if cm is None:
-            return False
-        main_groups = {str(g) for g in (cm.main_groups or [])}
-        return key in main_groups or not main_groups
+        """来源群是否允许互通：与 plugin.group_allowed 统一口径，
+        避免两份分叉实现在同一事件上判定相反。"""
+        return self.plugin.group_allowed(pack)
 
     # ------------------------------------------------------------------ 入站
     def _format_segments(
@@ -125,7 +99,7 @@ class ChatSyncModule:
             data = seg.get("data") if isinstance(seg.get("data"), dict) else {}
             if seg_type == "text":
                 parts.append(
-                    replace_placeholders(conf.get("text_format", "%s"), data.get("text", ""))
+                    replace_placeholders(conf.get("text_format", "%s"), data.get("text") or "")
                 )
             elif seg_type == "image":
                 parts.append(conf.get("image_format", "[图片]"))
@@ -157,8 +131,10 @@ class ChatSyncModule:
         if not self._group_allowed(pack):
             return
 
-        sender = pack.get("sender") or {}
-        sender_name = sender.get("card") or sender.get("nickname") or str(pack.get("user_id"))
+        sender = pack.get("sender") if isinstance(pack.get("sender"), dict) else {}
+        sender_name = (
+            sender.get("card") or sender.get("nickname") or str(pack.get("user_id") or "") or ""
+        )
         content = self._format_segments(
             pack.get("message", pack.get("raw_message", "")), conf, pack
         )
@@ -172,7 +148,8 @@ class ChatSyncModule:
         except (TypeError, ValueError):
             max_len = 256
         if len(content) > max_len:
-            content = content[:max_len] + "..."
+            # 截断含 "..." 后总长不超过 max_len；max_len 过小时退化为硬截断
+            content = content[: max_len - 3] + "..." if max_len > 3 else content[:max_len]
 
         # 群 → 服方向：仅过滤昵称 / 消息内容注入的 MC 颜色码（§），
         # 模板 chat_to_server_format 自带的颜色码（如 §b）是用户配置，必须保留
@@ -195,7 +172,7 @@ class ChatSyncModule:
         """按各适配器自己的群服互通配置广播游戏事件。"""
         connections = getattr(self.plugin, "connections", None)
         hub = self.hub
-        targets: list[tuple[Any, dict[str, Any], list[int]]] = []
+        targets: list[tuple[Any, dict[str, Any], list[Any]]] = []
         if connections is not None:
             # adapters_view() 持锁返回列表快照，避免迭代期间并发 CRUD 修改列表
             for cfg in connections.adapters_view():
@@ -210,30 +187,42 @@ class ChatSyncModule:
         else:  # 兼容路径：无连接管理器时退回单适配器
             primary = hub.primary() if hasattr(hub, "primary") else hub
             if primary is not None:
-                targets.append((primary, self._sync_config(), list(getattr(primary, "groups", None) or []) or [-1]))
+                targets.append((primary, self._sync_config(), list(getattr(primary, "groups", None) or [])))
 
         for adapter, sync, groups in targets:
             if not sync.get(enable_key, True):
                 continue
             line = replace_placeholders(sync.get(fmt_key, fallback), *args)
+            # 单个目标发送失败只记日志，不中断其余适配器/群的广播
             if groups:
                 for gid in groups:
-                    adapter.send_group_msg(gid, line)
-            elif getattr(adapter, "adapter_type", "") == "astrbot":
+                    try:
+                        adapter.send_group_msg(gid, line)
+                    except Exception as e:  # noqa: BLE001
+                        self.logger.warning(f"broadcast to {gid} failed: {e}")
+            else:
+                self._broadcast_without_groups(adapter, line)
+
+    def _broadcast_without_groups(self, adapter: Any, line: str) -> None:
+        """无配置群列表适配器的广播目标选择。"""
+        try:
+            if getattr(adapter, "adapter_type", "") == "astrbot":
                 # AstrBot 适配器：群号在其插件端（UMO）配置，这里发虚拟群 0
                 adapter.send_group_msg(0, line)
+                return
+            # 无配置群列表的适配器（如 QQ 官方）：询问其广播目标。
+            # QQ 官方无群列表 API，broadcast_groups 返回动态发现的群
+            #（「未填群 openid = 全局转发」）；无任何目标时跳过，
+            # 绝不发往不存在的虚拟群 0（官方侧即 HTTP 400）
+            broadcast = getattr(adapter, "broadcast_groups", None)
+            discovered = list(broadcast()) if callable(broadcast) else []
+            if discovered:
+                for gid in discovered:
+                    adapter.send_group_msg(gid, line)
             else:
-                # 无配置群列表的适配器（如 QQ 官方）：询问其广播目标。
-                # QQ 官方无群列表 API，broadcast_groups 返回动态发现的群
-                #（「未填群 openid = 全局转发」）；无任何目标时跳过，
-                # 绝不发往不存在的虚拟群 0（官方侧即 HTTP 400）
-                broadcast = getattr(adapter, "broadcast_groups", None)
-                discovered = list(broadcast()) if callable(broadcast) else []
-                if discovered:
-                    for gid in discovered:
-                        adapter.send_group_msg(gid, line)
-                else:
-                    self.logger.warning(_t("chatsync.no_broadcast_target", adapter=adapter.display_name))
+                self.logger.warning(_t("chatsync.no_broadcast_target", adapter=adapter.display_name))
+        except Exception as e:  # noqa: BLE001
+            self.logger.warning(f"broadcast via {getattr(adapter, 'display_name', adapter)} failed: {e}")
 
     def on_player_chat(self, player_name: str, message: str) -> None:
         self._broadcast(

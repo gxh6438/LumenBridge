@@ -105,7 +105,8 @@ class AdapterHub:
                 groups=ConnectionManager.parse_groups_loose(cfg.get("main_group")),
                 connect_interval=connect_interval,
                 extra_intents=extra_intents,
-                suppress_connection_log=bool(cfg.get("suppress_connection_log", False)),
+                # 后台静默日志：默认开启（存量卡片缺键时同样按开启处理）
+                suppress_connection_log=bool(cfg.get("suppress_connection_log", True)),
             )
             adapter.config_snapshot = cfg
             return adapter
@@ -179,13 +180,16 @@ class AdapterHub:
                 self._warned_no_adapters = False
 
     def stop_all(self) -> None:
+        # 与 sync_from_manager 同理：stop() 可能阻塞数秒，
+        # 锁内只拷贝并清空，锁外逐个停止，避免阻塞 API 门面请求
         with self._lock:
-            for adapter_id, adapter in list(self._adapters.items()):
-                try:
-                    adapter.stop()
-                except Exception as e:
-                    self.logger.error(_t("hub.stop_failed", name=adapter_id, error=e))
+            adapters = list(self._adapters.items())
             self._adapters.clear()
+        for adapter_id, adapter in adapters:
+            try:
+                adapter.stop()
+            except Exception as e:
+                self.logger.error(_t("hub.stop_failed", name=adapter_id, error=e))
 
     def restart_all(self) -> None:
         """全量重建（配置结构变化时使用）。"""
@@ -222,9 +226,10 @@ class AdapterHub:
     @property
     def mode_name(self) -> str:
         online = self.connected()
-        if not online:
-            return self.all()[0].mode_name if self.all() else _t("adapter.mode_forward")
-        return " / ".join(sorted({a.mode_name for a in online}))
+        if online:
+            return " / ".join(sorted({a.mode_name for a in online}))
+        adapters = self.all()
+        return adapters[0].mode_name if adapters else _t("adapter.mode_forward")
 
     def status(self) -> list[dict[str, Any]]:
         """供 WebUI / 命令展示的运行状态列表。"""
@@ -283,22 +288,26 @@ class AdapterHub:
         matches = [a for a in connected if key in {str(g) for g in a.groups}]
         if matches:
             return matches
-        official = [a for a in connected if self._is_official(a)]
         if key.isdigit():
             return [a for a in connected if not self._is_official(a)]
-        return official
+        return [a for a in connected if self._is_official(a)]
 
     def _route_private(self, user_id: Any) -> list[OneBotAdapter]:
         """私聊路由：数字 QQ 号走个人号域，openid 走官方域。"""
         key = str(user_id).strip()
-        official = [a for a in self.connected() if self._is_official(a)]
+        connected = self.connected()
         if key.isdigit():
-            return [a for a in self.connected() if not self._is_official(a)]
-        return official
+            return [a for a in connected if not self._is_official(a)]
+        return [a for a in connected if self._is_official(a)]
 
     def _targets(self, name: str, args: tuple) -> list[OneBotAdapter]:
         if name in _GROUP_ROUTED_METHODS and args:
-            return self._route_by_group(args[0])
+            routed = self._route_by_group(args[0])
+            if name.startswith("get_"):
+                # 查询类方法只取一个目标：多适配器命中时避免
+                # 同一 callback 被触发多次
+                return routed[:1]
+            return routed
         return self.connected()
 
     def send_pack(self, pack: dict[str, Any]) -> None:
@@ -313,7 +322,8 @@ class AdapterHub:
         timeout: float = 10.0,
     ) -> None:
         adapter = self.primary()
-        if adapter is None:
+        # 无在线实例时立即回 None，不等满超时
+        if adapter is None or not adapter.is_connected:
             if callback:
                 callback(None)
             return
@@ -327,7 +337,7 @@ class AdapterHub:
         timeout: float = 10.0,
     ) -> None:
         adapter = self.primary()
-        if adapter is None:
+        if adapter is None or not adapter.is_connected:
             if callback:
                 callback(None)
             return
@@ -346,6 +356,22 @@ class AdapterHub:
         for adapter in self._route_by_group(group_id):
             adapter.send_group_msg(group_id, message)
 
+    @staticmethod
+    def _fail_callback(args: tuple, kwargs: dict) -> None:
+        """无可用适配器时按查询回调约定回 None。
+
+        回调可能在 args 任意位置（部分方法带默认尾参，如
+        get_record(file, callback, out_format="mp3")），按位置扫描。
+        """
+        callback = next((a for a in args if callable(a)), None)
+        if callback is None:
+            callback = next((v for v in kwargs.values() if callable(v)), None)
+        if callback is not None:
+            try:
+                callback(None)
+            except Exception:
+                pass
+
     def __getattr__(self, name: str) -> Any:
         """未显式实现的方法按语义代理到适配器集合，保证 OneBot 全 API 可用。
 
@@ -359,16 +385,16 @@ class AdapterHub:
         def _delegate(*args: Any, **kwargs: Any) -> Any:
             if name in _PRIMARY_METHODS:
                 adapter = self.primary()
-                if adapter is None:
-                    if name.startswith("get_") and args and callable(args[-1]):
-                        args[-1](None)
+                if adapter is None or not adapter.is_connected:
+                    if name.startswith("get_"):
+                        self._fail_callback(args, kwargs)
                     return None
                 return getattr(adapter, name)(*args, **kwargs)
             targets = self._targets(name, args)
             if not targets:
                 # 无连接时保持与单适配器断线一致的行为：查询回调直接给 None
-                if name.startswith("get_") and args and callable(args[-1]):
-                    args[-1](None)
+                if name.startswith("get_"):
+                    self._fail_callback(args, kwargs)
                 return None
             results = [getattr(a, name)(*args, **kwargs) for a in targets]
             if len(results) == 1:

@@ -33,7 +33,10 @@ class EventBus:
     def once(self, event: str, handler: Callable[..., Any]) -> Callable[..., Any]:
         """注册一次性事件监听器，触发一次后自动移除"""
         with self._lock:
-            self._once_listeners[event].append(handler)
+            # 与 on() 一致去重：同一 handler 重复 once 只注册一次，
+            # 避免重载流程叠加注册后回调被连续触发多次
+            if handler not in self._once_listeners[event]:
+                self._once_listeners[event].append(handler)
         return handler
 
     def off(self, event: str, handler: Callable[..., Any]) -> None:

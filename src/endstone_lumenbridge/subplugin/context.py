@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 # Python API 不支持运行期注册新命令，BDS 命令表在插件加载时冻结。子插件命令
 # 由此面板在服务器启动时并入 LumenBridgePlugin.commands 预声明（见
 # plugin._merge_subplugin_command_palette），运行期仅做 handler 绑定。
-COMMAND_PALETTE_PATH = Path("plugins/lumenbridge/command_palette.json")
+COMMAND_PALETTE_PATH = Path("plugins/lumenbridge/data/command_palette.json")
 
 # 低危项：command_palette.json 读-改-写锁。多个子插件并发注册命令时，
 # 无锁的 read → merge → write 会互相覆盖丢失对方的条目

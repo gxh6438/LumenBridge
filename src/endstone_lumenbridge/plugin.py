@@ -305,6 +305,9 @@ class LumenBridgePlugin(Plugin):
         self.whitelist_module = None
         self.regex_module = None
         self.marketplace = None
+        # 失效 pip manager 缓存：禁用→启用复用同一实例时会持有旧 config_manager.data
+        with self._pip_manager_lock:
+            self._pip_manager = None
         self._tee_logger = None
         self._raw_logger = None
         self.logger.info(_t("plugin.disabled"))
@@ -422,7 +425,8 @@ class LumenBridgePlugin(Plugin):
                 "nickname": nickname or str(prev.get("nickname") or ""),
                 "avatar_url": self._qq_avatar_url(qq),
                 "app_id": str(data.get("app_id") or prev.get("app_id") or ""),
-                "connected": True,
+                # 沿用实时连接状态：回调到达瞬间断线时不会被硬编码 True 覆盖
+                "connected": bool(getattr(adapter, "is_connected", False)),
                 "source": "onebot",
             }
 
@@ -474,6 +478,11 @@ class LumenBridgePlugin(Plugin):
                 for sp in self.subplugin_manager.subplugins.values():
                     if sp.loaded and sp.context:
                         sp.context.web._flush_pending()
+            self.webui.start()
+            return
+        # 曾被 disable 停掉的实例：refresh_config 只刷新参数不重启监听，
+        # 必须显式 start（stop 已置空 httpd，start 可安全复用实例）
+        if not self.webui.is_running:
             self.webui.start()
             return
         self.webui.refresh_config()
@@ -539,11 +548,8 @@ class LumenBridgePlugin(Plugin):
         key = str(gid)
         connections = self.connections
         if connections is None:
-            cm = self.config_manager
-            if cm is None:
-                return False
-            main_groups = {str(g) for g in (cm.main_groups or [])}
-            return key in main_groups or not main_groups
+            # 连接管理器未就绪（加载中/已卸载）时不处理任何群消息
+            return False
         configured = connections.all_group_keys()
         if not configured:
             # 没有任何适配器填写群号 → 默认所有群生效
@@ -743,6 +749,20 @@ class LumenBridgePlugin(Plugin):
                     self._pip_manager = None
                 count = self.regex_module.reload_rules() if self.regex_module else 0
                 sub_count = self.subplugin_manager.reload_all() if self.subplugin_manager else 0
+                # 市场/更新检查线程只在启动时拉起；reload 后按最新配置补启，
+                # 使启动时禁用、后续改开的 marketplace/updates 也能生效
+                # （线程内部按 enable 实时判断，重复补启无副作用）
+                if self.marketplace is not None:
+                    market_cfg = self.config_manager.data.get("marketplace", {})
+                    updates_cfg = self.config_manager.data.get("updates", {})
+                    market_check = isinstance(market_cfg, dict) and bool(market_cfg.get("enable")) and bool(market_cfg.get("check_on_start", True))
+                    auto_update = isinstance(updates_cfg, dict) and bool(updates_cfg.get("enable", True)) and bool(updates_cfg.get("auto_update", True))
+                    if market_check or auto_update:
+                        threading.Thread(
+                            target=self._check_market_updates_background,
+                            name="LumenBridge-MarketCheck",
+                            daemon=True,
+                        ).start()
                 sender.send_message(
                     f"{ColorFormat.GREEN}{_t('plugin.command.reload_success', rules=count, subplugins=sub_count)}"
                     f"{ColorFormat.RESET}"
@@ -765,7 +785,13 @@ class LumenBridgePlugin(Plugin):
                 return True
             if self.adapter and self.adapter.is_connected:
                 text = args[1]
-                groups = self.config_manager.main_groups
+                # 全部适配器的群标识并集（含 QQ 官方 openid），
+                # 与 group_allowed 口径一致；hub 会按群路由到对应适配器
+                groups = (
+                    self.connections.all_group_keys()
+                    if self.connections
+                    else [str(g) for g in self.config_manager.main_groups]
+                )
                 if not groups:
                     sender.send_message(f"{ColorFormat.RED}{_t('plugin.command.say_no_group')}{ColorFormat.RESET}")
                     return True
@@ -796,8 +822,13 @@ class LumenBridgePlugin(Plugin):
             return mgr
 
     def _handle_pip_command(self, sender: CommandSender, args: list[str]) -> bool:
-        """处理 /lumen pip install|list|uninstall 子命令。"""
-        sub = args[0].lower() if args else "list"
+        """处理 /lumen pip install|list|uninstall 子命令。
+
+        BDS 命令声明的 [message: message] 是贪心参数，"install xxx" 会作为
+        单个字符串到达，必须按空白展开后再解析子动作与包名。
+        """
+        tokens = [tok for arg in args for tok in str(arg).split()]
+        sub = tokens[0].lower() if tokens else "list"
         mgr = self._get_pip_manager()
         if mgr is None:
             sender.send_message(f"{ColorFormat.RED}{_t('pip.manager_unavailable')}{ColorFormat.RESET}")
@@ -807,10 +838,10 @@ class LumenBridgePlugin(Plugin):
             return True
 
         if sub == "install":
-            if len(args) < 2:
+            if len(tokens) < 2:
                 sender.send_message(f"{ColorFormat.RED}{_t('pip.cmd_install_usage')}{ColorFormat.RESET}")
                 return True
-            target = args[1]
+            target = tokens[1]
             # 先尝试当作子插件名取其声明的依赖，否则当作包名
             packages: list[str] = []
             if self.subplugin_manager:
@@ -819,16 +850,20 @@ class LumenBridgePlugin(Plugin):
                 if sp and sp.manifest.get("dependencies"):
                     packages = list(sp.manifest["dependencies"])
             if not packages:
-                packages = args[1:]
+                packages = tokens[1:]
 
             sender.send_message(f"{ColorFormat.GOLD}{_t('pip.cmd_installing', packages=' '.join(packages))}{ColorFormat.RESET}")
 
             # 异步执行安装避免阻塞命令调用线程；结果通过 run_on_main 回传主线程
             def _async_install() -> None:
                 log_lines: list[str] = []
-                # 持 _pip_serial_lock：与 WebUI 安装/卸载、marketplace 依赖安装互斥，避免并发写损坏元数据
-                with self._pip_serial_lock:
-                    success, msg = mgr.install(packages, on_log=lambda line: log_lines.append(line))
+                try:
+                    # 持 _pip_serial_lock：与 WebUI 安装/卸载、marketplace 依赖安装互斥，避免并发写损坏元数据
+                    with self._pip_serial_lock:
+                        success, msg = mgr.install(packages, on_log=lambda line: log_lines.append(line))
+                except Exception as e:  # noqa: BLE001
+                    self.logger.exception("pip install thread error")
+                    success, msg = False, str(e)
 
                 def _send_result() -> None:
                     for line in log_lines:
@@ -845,29 +880,40 @@ class LumenBridgePlugin(Plugin):
                             rcolor = ColorFormat.GREEN if ok else ColorFormat.RED
                             sender.send_message(f"{rcolor}{reload_msg}{ColorFormat.RESET}")
 
-                self.run_on_main(_send_result)
+                try:
+                    self.run_on_main(_send_result)
+                except Exception:  # noqa: BLE001
+                    # 插件已停用、调度器不可用时线程不得静默死亡，留日志供排查
+                    self.logger.exception("pip install result dispatch failed")
 
             threading.Thread(target=_async_install, name="LumenBridge-pip-install", daemon=True).start()
             return True
 
         if sub == "uninstall":
-            if len(args) < 2:
+            if len(tokens) < 2:
                 sender.send_message(f"{ColorFormat.RED}{_t('pip.cmd_uninstall_usage')}{ColorFormat.RESET}")
                 return True
-            package = args[1]
+            package = tokens[1]
 
             # 卸载同步执行会阻塞命令调用线程，与 install 分支一致改为后台
             # daemon 线程执行，结果经 run_on_main 回发主线程
             def _async_uninstall() -> None:
-                # 持 _pip_serial_lock：与 install 路径互斥，避免并发卸载/安装损坏环境
-                with self._pip_serial_lock:
-                    success, msg = mgr.uninstall(package)
+                try:
+                    # 持 _pip_serial_lock：与 install 路径互斥，避免并发卸载/安装损坏环境
+                    with self._pip_serial_lock:
+                        success, msg = mgr.uninstall(package)
+                except Exception as e:  # noqa: BLE001
+                    self.logger.exception("pip uninstall thread error")
+                    success, msg = False, str(e)
 
                 def _send_result() -> None:
                     color = ColorFormat.GREEN if success else ColorFormat.RED
                     sender.send_message(f"{color}{msg}{ColorFormat.RESET}")
 
-                self.run_on_main(_send_result)
+                try:
+                    self.run_on_main(_send_result)
+                except Exception:  # noqa: BLE001
+                    self.logger.exception("pip uninstall result dispatch failed")
 
             threading.Thread(target=_async_uninstall, name="LumenBridge-pip-uninstall", daemon=True).start()
             return True

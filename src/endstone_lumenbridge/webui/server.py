@@ -1724,10 +1724,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
             if client is None or not client.enabled:
                 return self._send_json({"code": 403, "msg": "插件市场未配置或未启用"}, 403)
             name = m.group(1)
+            body = self._read_body() or {}
+            requested_version = str(body.get("version", "")).strip() if isinstance(body, dict) else ""
             def _run_plugin_update(log, progress):
                 log(_t("task_log.updating_plugin", name=name))
                 progress(20, _t("task_log.downloading"))
-                result = client.update(name, update_dependencies=True, log=log, progress=progress)
+                result = client.update(name, requested_version, update_dependencies=True, log=log, progress=progress)
                 progress(100, _t("task_log.done"))
                 return result
             task_id = self.webui._start_market_task("plugin_update", _run_plugin_update)
@@ -1744,7 +1746,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             def _run_deps_update(log, progress):
                 log(_t("task_log.updating_deps", name=name))
                 progress(30, _t("task_log.installing_deps"))
-                result = client.update_dependencies(name)
+                result = client.update_dependencies(name, log=log, progress=progress)
                 progress(100, _t("task_log.done"))
                 return result
             task_id = self.webui._start_market_task("dependencies_update", _run_deps_update)

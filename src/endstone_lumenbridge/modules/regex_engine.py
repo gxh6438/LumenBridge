@@ -136,7 +136,8 @@ class RegexEngineModule:
         self.bus = plugin.bus
         self.adapter = plugin.adapter
 
-        self.path = Path(plugin.data_folder) / "rules.json"
+        # 运行数据统一存放于 data/ 子目录（见迁移脚本 migrate_storage.py）
+        self.path = Path(plugin.data_folder) / "data" / "rules.json"
         self.rules: list[dict[str, Any]] = self._load_rules()
         self.custom_actions: dict[str, Callable[..., Any]] = {}
 

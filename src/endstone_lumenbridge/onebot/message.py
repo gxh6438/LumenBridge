@@ -91,14 +91,17 @@ def record(file: str) -> Segment:
 
 
 def format_message(msg: Any) -> list[Segment]:
-    """统一格式化入口：字符串自动转 text 段，单段自动包装为列表"""
+    """统一格式化入口：字符串自动转 text 段，单段自动包装为列表。
+
+    None / 非法类型的段直接丢弃，避免序列化出 null 段被协议端拒绝。
+    """
     if not isinstance(msg, list):
         msg = [msg]
     result: list[Segment] = []
     for seg in msg:
         if isinstance(seg, str):
             result.append(text(seg))
-        else:
+        elif isinstance(seg, dict):
             result.append(seg)
     return result
 

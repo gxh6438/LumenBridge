@@ -30,8 +30,11 @@ let pipPollTimer = null;
 let reloadPromptState = null;  // { subpluginName, isConfig }
 let subpluginDepsCache = {};   // 子插件名 -> 缺失依赖列表
 let subpluginErrorCache = {};  // 子插件名 -> 错误信息全文
+let subpluginMarketCache = {}; // 子插件名 -> { market, version, hasError, hasMissing }，更新流程复用
 let editingDepsPlugin = "";
 let configNavObserver = null;
+let spMoreMenuState = null;    // { name, btn } 当前打开的 ⋯ 菜单
+let marketUpdateState = null;  // { name, marketId, detail, currentVersion, selectedVersion } 市场更新流程状态
 const CONFIG_RELOAD_PREFIXES = ["connection.", "pip.", "commands."];
 const CONFIG_RELOAD_EXACT = ["webui.enable", "webui.host", "webui.port", "language"];
 
@@ -1197,6 +1200,30 @@ document.addEventListener("click", (e) => {
 
 /* 事件委托：处理原本以 esc 字符串拼接进 onclick 的按钮，避免 XSS */
 document.addEventListener("click", (e) => {
+  /* 子插件 ⋯ 更多菜单项：先于其它处理（菜单在卡片外层，不命中卡片选择器） */
+  const spMenuItem = e.target.closest(".sp-menu-item[data-action]");
+  if (spMenuItem) {
+    const action = spMenuItem.dataset.action || "";
+    const name = spMenuItem.dataset.name || "";
+    closeSpMoreMenu();
+    dispatchSpAction(action, name);
+    return;
+  }
+  /* ⋯ 按钮本身：切换菜单开合；点击后立即 return，避免下方"点外部关闭"逻辑误关 */
+  const spMoreBtn = e.target.closest(".sp-more-btn[data-name]");
+  if (spMoreBtn) {
+    toggleSpMoreMenu(spMoreBtn);
+    return;
+  }
+  /* 子插件描述「展开」按钮：滑出浮层显示全文（不撑大卡片） */
+  const spDescBtn = e.target.closest(".sp-desc-expand[data-sp-name]");
+  if (spDescBtn) {
+    toggleSpDescPopover(spDescBtn);
+    return;
+  }
+  /* 点击菜单与按钮之外的任意位置：收起菜单 */
+  if (spMoreMenuState) closeSpMoreMenu();
+  if (spDescPopoverState) closeSpDescPopover();
   const pipBtn = e.target.closest(".pip-uninstall-btn");
   if (pipBtn) { pipUninstall(pipBtn.dataset.name || ""); return; }
   const wlBtn = e.target.closest(".wl-unbind-btn");
@@ -1236,19 +1263,7 @@ document.addEventListener("click", (e) => {
   /* 子插件卡片操作按钮：data-action + data-name 分发到原处理函数 */
   const spActionBtn = e.target.closest(".sp-action-btn[data-action]");
   if (spActionBtn) {
-    const spName = spActionBtn.dataset.name || "";
-    switch (spActionBtn.dataset.action) {
-      case "reload": reloadSingleSubplugin(spName); break;
-      case "config": openPluginConfig(spName); break;
-      case "update": openUpdateModal(spName); break;
-      case "market-update": updateMarketPlugin(spName); break;
-      case "update-deps": updateSubpluginDependencies(spName); break;
-      case "install-deps": installSubpluginDeps(spName); break;
-      case "files": openFilesModal(spName); break;
-      case "copy-error": copySubpluginError(spName); break;
-      case "error-detail": toggleSubpluginErrorDetail(spActionBtn); break;
-      case "uninstall": uninstallPlugin(spName); break;
-    }
+    dispatchSpAction(spActionBtn.dataset.action || "", spActionBtn.dataset.name || "");
     return;
   }
   /* 市场卡片：安装按钮优先于卡片整体点击（原 stopPropagation 语义） */
@@ -1262,6 +1277,9 @@ document.addEventListener("click", (e) => {
   /* 点赞按钮优先于卡片/弹窗整体点击 */
   const marketLikeBtn = e.target.closest(".market-like-btn[data-id]");
   if (marketLikeBtn) { toggleMarketLike(marketLikeBtn); return; }
+  /* 市场更新弹窗：版本条目点击切换选中 */
+  const marketVerItem = e.target.closest("#market-update-content .market-ver-item[data-version]");
+  if (marketVerItem) { selectMarketVersion(marketVerItem.dataset.version || ""); return; }
   const marketCard = e.target.closest(".market-card[data-id]");
   if (marketCard) { openMarketDetail(marketCard.dataset.id || ""); return; }
 });
@@ -1734,6 +1752,145 @@ async function unbind(qq) {
 }
 
 
+/* ─── 子插件卡片操作分发：主按钮与 ⋯ 菜单项共用 ─── */
+function dispatchSpAction(action, name) {
+  switch (action) {
+    case "reload": reloadSingleSubplugin(name); break;
+    case "config": openPluginConfig(name); break;
+    case "update": openUpdateFlow(name); break;
+    case "update-deps": updateSubpluginDependencies(name); break;
+    case "install-deps": installSubpluginDeps(name); break;
+    case "files": openFilesModal(name); break;
+    case "copy-error": copySubpluginError(name); break;
+    case "error-detail": toggleSubpluginErrorDetail(name); break;
+    case "uninstall": uninstallPlugin(name); break;
+  }
+}
+
+/* ─── 子插件 ⋯ 更多菜单（fixed 定位浮层，z-index:400 置于一切之上） ─── */
+const SP_MENU_ICONS = {
+  files: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
+  "update-deps": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>',
+  "copy-error": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+  "error-detail": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>',
+  uninstall: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
+};
+
+function buildSpMoreMenuItems(name) {
+  const cached = subpluginMarketCache[name] || {};
+  const items = [];
+  const item = (action, label, danger) =>
+    `<button type="button" class="sp-menu-item menu-item${danger ? " danger" : ""}" data-action="${esc(action)}" data-name="${esc(name)}" role="menuitem">
+      ${SP_MENU_ICONS[action] || ""}<span>${esc(label)}</span>
+    </button>`;
+  items.push(item("files", t("subplugins.files_button")));
+  // 仅声明了依赖的子插件才提供「更新依赖」，无依赖不显示
+  if ((cached.dependencies || []).length) items.push(item("update-deps", t("marketplace.update_deps_button")));
+  if (cached.hasError || cached.hasMissing) items.push(item("copy-error", t("subplugins.copy_error")));
+  if (cached.hasError) items.push(item("error-detail", t("subplugins.view_error_detail")));
+  items.push('<div class="menu-sep"></div>');
+  items.push(item("uninstall", t("subplugins.uninstall_button"), true));
+  return items.join("");
+}
+
+function positionSpMoreMenu(menu, btn) {
+  // fixed 定位跟随按钮；视口边缘自动翻转/收窄，滚动或缩放时直接收起
+  const rect = btn.getBoundingClientRect();
+  menu.style.visibility = "hidden";
+  menu.classList.add("show");
+  const mw = menu.offsetWidth;
+  const mh = menu.offsetHeight;
+  let left = Math.min(rect.right - mw, window.innerWidth - mw - 8);
+  left = Math.max(8, left);
+  let top = rect.bottom + 6;
+  if (top + mh > window.innerHeight - 8) top = Math.max(8, rect.top - mh - 6);
+  menu.style.left = left + "px";
+  menu.style.top = top + "px";
+  menu.style.visibility = "";
+}
+
+function toggleSpMoreMenu(btn) {
+  const menu = document.getElementById("sp-more-menu");
+  if (!menu || !btn) return;
+  const name = btn.dataset.name || "";
+  if (spMoreMenuState && spMoreMenuState.name === name) {
+    closeSpMoreMenu();
+    return;
+  }
+  closeSpMoreMenu();
+  menu.innerHTML = buildSpMoreMenuItems(name);
+  spMoreMenuState = { name, btn };
+  btn.classList.add("active");
+  positionSpMoreMenu(menu, btn);
+}
+
+function closeSpMoreMenu() {
+  const menu = document.getElementById("sp-more-menu");
+  if (menu) menu.classList.remove("show");
+  if (spMoreMenuState && spMoreMenuState.btn) spMoreMenuState.btn.classList.remove("active");
+  spMoreMenuState = null;
+}
+
+/* 滚动 / 缩放 / ESC 时收起 ⋯ 菜单（fixed 浮层不随内容滚动，留在原地会错位） */
+window.addEventListener("scroll", closeSpMoreMenu, { passive: true, capture: true });
+window.addEventListener("resize", closeSpMoreMenu);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && spMoreMenuState) closeSpMoreMenu();
+});
+
+/* ─── 子插件描述展开浮层：卡片内固定两行截断，全文以滑动浮层展示 ─── */
+let spDescPopoverState = null;
+
+function toggleSpDescPopover(btn) {
+  const pop = document.getElementById("sp-desc-popover");
+  if (!pop || !btn) return;
+  const name = btn.dataset.spName || "";
+  if (spDescPopoverState && spDescPopoverState.name === name) {
+    closeSpDescPopover();
+    return;
+  }
+  closeSpDescPopover();
+  const desc = btn.closest(".sp-desc-row")?.querySelector(".sp-desc");
+  pop.textContent = (desc && desc.textContent) || "";
+  spDescPopoverState = { name, btn };
+  btn.classList.add("active");
+  // fixed 定位跟随按钮，视口边缘自动翻转
+  pop.classList.add("show");
+  const rect = btn.getBoundingClientRect();
+  pop.style.visibility = "hidden";
+  const pw = pop.offsetWidth;
+  const ph = pop.offsetHeight;
+  let left = Math.min(rect.left, window.innerWidth - pw - 8);
+  left = Math.max(8, left);
+  let top = rect.bottom + 6;
+  if (top + ph > window.innerHeight - 8) top = Math.max(8, rect.top - ph - 6);
+  pop.style.left = left + "px";
+  pop.style.top = top + "px";
+  pop.style.visibility = "";
+}
+
+function closeSpDescPopover() {
+  const pop = document.getElementById("sp-desc-popover");
+  if (pop) pop.classList.remove("show");
+  if (spDescPopoverState && spDescPopoverState.btn) spDescPopoverState.btn.classList.remove("active");
+  spDescPopoverState = null;
+}
+
+window.addEventListener("scroll", closeSpDescPopover, { passive: true, capture: true });
+window.addEventListener("resize", closeSpDescPopover);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && spDescPopoverState) closeSpDescPopover();
+});
+
+/* 渲染后检测描述是否被截断：溢出才显示「展开」小按钮 */
+function markOverflowSpDescs() {
+  document.querySelectorAll("#sp-list .sp-desc-row").forEach((row) => {
+    const desc = row.querySelector(".sp-desc");
+    if (!desc) return;
+    row.classList.toggle("overflow", desc.scrollHeight > desc.clientHeight + 2);
+  });
+}
+
 async function loadSubplugins(opts) {
   const feedback = !!(opts && opts.feedback);
   if (feedback) toast(t("subplugins.refreshing"));
@@ -1774,6 +1931,14 @@ async function loadSubplugins(opts) {
       delete subpluginErrorCache[p.name];
       if (hasMissing) subpluginDepsCache[p.name] = depsList;
       if (p.error) subpluginErrorCache[p.name] = p.error;
+      // 缓存市场来源与版本信息，更新流程（市场/手动选择）直接复用，避免再次请求列表
+      subpluginMarketCache[p.name] = {
+        market: marketOrigin,
+        version: String(p.version || ""),
+        dependencies: Array.isArray(p.dependencies) ? p.dependencies : [],
+        hasError: !!p.error,
+        hasMissing,
+      };
 
       const missingBadge = hasMissing
         ? `<span class="tag red">${esc(t("subplugins.missing_deps_badge"))}</span>`
@@ -1783,22 +1948,17 @@ async function loadSubplugins(opts) {
         ? `<div class="error-detail" style="display:none;margin-top:10px;color:var(--red);font-family:monospace;font-size:12px;white-space:pre-wrap;max-height:260px;overflow:auto">${esc(p.error)}</div>`
         : "";
 
+      // 主操作只保留「重载 / 更新 / 配置 / 装依赖」，其余收进 ⋯ 菜单，避免按钮过载
       // data-* 属性 + 全局事件委托，避免把插件名拼进 onclick 导致 JS 字符串逃逸
       const actions = [];
       const spAction = (label, action, cls = "white") =>
         `<button class="btn small ${cls} sp-action-btn" data-action="${esc(action)}" data-name="${esc(p.name)}">${esc(label)}</button>`;
       actions.push(spAction(t("subplugins.reload_one_button"), "reload", ""));
-      if (hasConfig) actions.push(spAction(t("subplugins.config_button"), "config"));
       actions.push(spAction(t("subplugins.update_button"), "update"));
-      if (marketUpdate.available) actions.push(spAction(t("marketplace.update_button"), "market-update"));
-      if (marketOrigin) actions.push(spAction(t("marketplace.update_deps_button"), "update-deps"));
+      if (hasConfig) actions.push(spAction(t("subplugins.config_button"), "config"));
       if (hasMissing) actions.push(spAction(t("pip_page.subplugin_install_deps"), "install-deps"));
-      actions.push(spAction(t("subplugins.files_button"), "files"));
-      if (hasMissing || p.error) actions.push(spAction(t("subplugins.copy_error"), "copy-error"));
-      if (p.error) actions.push(spAction(t("subplugins.view_error_detail"), "error-detail"));
-      actions.push(spAction(t("subplugins.uninstall_button"), "uninstall", "danger"));
 
-      return `<div class="subplugin-card glass">
+      return `<div class="subplugin-card glass" data-sp-name="${esc(p.name)}">
         <div class="sp-head">
           <span class="name">${esc(p.name)}</span>
           <span class="tag blue">v${esc(p.version)}</span>
@@ -1808,16 +1968,25 @@ async function loadSubplugins(opts) {
           ${updateBadge}
           ${missingBadge}
         </div>
-        <div class="sp-desc">${esc(p.description || t("subplugins.no_description"))}</div>
+        <div class="sp-desc-row">
+          <div class="sp-desc">${esc(p.description || t("subplugins.no_description"))}</div>
+          <button class="sp-desc-expand" type="button" data-sp-name="${esc(p.name)}" title="${esc(t("subplugins.show_full_desc"))}" aria-label="${esc(t("subplugins.show_full_desc"))}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+        </div>
         ${errorDetail}
         <div class="sp-actions">
           <span class="spacer"></span>
           ${actions.join("")}
+          <button class="sp-more-btn" type="button" data-name="${esc(p.name)}" title="${esc(t("subplugins.more_actions"))}" aria-label="${esc(t("subplugins.more_actions"))}">
+            <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
+          </button>
           <div class="switch"><input type="checkbox" id="sp-${esc(encodedName)}" class="sp-toggle" data-name="${esc(p.name)}" ${p.load ? "checked" : ""}>
             <label class="track" for="sp-${esc(encodedName)}"></label></div>
         </div>
       </div>`;
     }).join("");
+    requestAnimationFrame(markOverflowSpDescs);
     if (feedback) toast(t("subplugins.refresh_success"));
   } catch (e) { toast(t("subplugins.load_failed", { error: e.message }), true); }
 }
@@ -2615,14 +2784,14 @@ function copySubpluginError(name) {
   toast(t("subplugins.error_copied"));
 }
 
-function toggleSubpluginErrorDetail(btn) {
-  const card = btn.closest(".subplugin-card");
+function toggleSubpluginErrorDetail(name) {
+  // 通过 data-sp-name 定位卡片（⋯ 菜单在卡片外部，不能再用 closest）
+  const card = document.querySelector(`.subplugin-card[data-sp-name="${cssEscape(name)}"]`);
   if (!card) return;
   const detail = card.querySelector(".error-detail");
   if (!detail) return;
   const isHidden = detail.style.display === "none";
   detail.style.display = isHidden ? "block" : "none";
-  btn.textContent = isHidden ? t("subplugins.hide_error_detail") : t("subplugins.view_error_detail");
 }
 
 
@@ -2776,19 +2945,23 @@ async function loadMarketplace() {
       return `<div class="market-card glass" data-id="${esc(item.id || "")}" style="cursor:pointer">
         <div class="market-avatar">${cover || esc(initial)}</div>
         <div class="market-main">
-          <div class="market-name" title="${esc(title)}">${esc(title)}</div>
+          <div class="market-title-row">
+            <div class="market-name" title="${esc(title)}">${esc(title)}</div>
+          </div>
           <div class="market-meta">${esc(item.author || "")} · v${esc(item.latest_version || "?")}</div>
           <div class="market-desc">${esc(item.summary || "")}</div>
           ${tags ? `<div class="market-tags">${tags}</div>` : ""}
-          <div class="market-stats">
-            <span class="stat">↓ ${esc(item.download_count || 0)}</span>
-            <button class="stat market-like-btn${item.liked ? " liked" : ""}" data-id="${esc(item.id || "")}" data-liked="${item.liked ? "1" : "0"}" title="${esc(t("marketplace.like_button"))}">♥ <span class="like-count">${esc(item.like_count || 0)}</span></button>
-            <span class="stat">${esc(t("marketplace.score_label"))} ${esc(item.score || 0)}</span>
+          <div class="market-footer">
+            <div class="market-stats">
+              <span class="stat">↓ ${esc(item.download_count || 0)}</span>
+              <button class="stat market-like-btn${item.liked ? " liked" : ""}" data-id="${esc(item.id || "")}" data-liked="${item.liked ? "1" : "0"}" title="${esc(t("marketplace.like_button"))}">♥ <span class="like-count">${esc(item.like_count || 0)}</span></button>
+              <span class="stat">${esc(t("marketplace.score_label"))} ${esc(item.score || 0)}</span>
+            </div>
+            <div class="market-actions">
+              <button class="btn small ghost" data-id="${esc(item.id || "")}">${esc(t("marketplace.detail_button"))}</button>
+              <button class="btn small market-install-btn" data-id="${esc(item.id || "")}">${esc(t("marketplace.install_button"))}</button>
+            </div>
           </div>
-        </div>
-        <div class="market-actions">
-          <button class="btn small market-install-btn" data-id="${esc(item.id || "")}">${esc(t("marketplace.install_button"))}</button>
-          <button class="btn small ghost" data-id="${esc(item.id || "")}">${esc(t("marketplace.detail_button"))}</button>
         </div>
       </div>`;
     }).join("");
@@ -3074,10 +3247,180 @@ async function checkMarketUpdates() {
   } catch (e) { toast(e.message || t("marketplace.check_failed"), true); }
 }
 
-async function updateMarketPlugin(name) {
-  if (!await customConfirm(t("marketplace.update_confirm", { name }))) return;
+/* ─── 更新流程：单一更新按钮 → 市场更新 / 手动更新 ─── */
+function compareVersions(a, b) {
+  const pa = String(a || "").split(".").map((x) => parseInt(x, 10) || 0);
+  const pb = String(b || "").split(".").map((x) => parseInt(x, 10) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const da = pa[i] || 0;
+    const db = pb[i] || 0;
+    if (da !== db) return da - db;
+  }
+  return 0;
+}
+
+function openUpdateFlow(name) {
+  const cached = subpluginMarketCache[name] || {};
+  // 非市场来源没有市场更新可选：直接进入手动更新弹窗
+  if (!cached.market) { openUpdateModal(name); return; }
+  const nameEl = document.getElementById("update-choice-plugin-name");
+  if (nameEl) nameEl.textContent = name;
+  const modal = document.getElementById("update-choice-modal");
+  if (modal) {
+    modal.dataset.pluginName = name;
+    modal.classList.add("show");
+  }
+}
+
+function updateChoicePluginName() {
+  const modal = document.getElementById("update-choice-modal");
+  return (modal && modal.dataset.pluginName) || "";
+}
+
+function updateChoiceMarket() {
+  const name = updateChoicePluginName();
+  if (name) startMarketUpdateFlow(name);
+}
+
+function updateChoiceManual() {
+  const name = updateChoicePluginName();
+  closeModal("update-choice-modal");
+  if (name) openUpdateModal(name);
+}
+
+async function startMarketUpdateFlow(name) {
+  const cached = subpluginMarketCache[name] || {};
+  const market = cached.market || {};
+  const marketId = String(market.id || "");
+  const currentVersion = String(cached.version || "");
+  const content = document.getElementById("market-update-content");
+  const applyBtn = document.getElementById("market-update-apply-btn");
+  marketUpdateState = null;
+  if (!marketId) { toast(t("marketplace.update_check_failed"), true); return; }
+  if (applyBtn) applyBtn.disabled = true;
+  if (content) content.innerHTML = `<div style="color:var(--muted);padding:12px 0">${esc(t("marketplace.update_checking"))}</div>`;
+  closeModal("update-choice-modal");
+  const modal = document.getElementById("market-update-modal");
+  if (modal) modal.classList.add("show");
   try {
-    const res = await api("POST", `/api/subplugins/${encodeURIComponent(name)}/market-update`, {});
+    const res = await api("GET", "/api/market/plugin/" + encodeURIComponent(marketId));
+    const detail = res.data || {};
+    const versions = Array.isArray(detail.versions) ? detail.versions : [];
+    // 仅保留版本号大于当前版本的选项（可更新到最新或任一更高的历史版本）
+    const newer = versions
+      .filter((v) => v && typeof v === "object" && compareVersions(String(v.version || ""), currentVersion) > 0)
+      .sort((a, b) => compareVersions(String(b.version || ""), String(a.version || "")));
+    if (!newer.length) {
+      closeModal("market-update-modal");
+      showLatestVersionModal(name, currentVersion || String(detail.latest_version || "?"));
+      return;
+    }
+    marketUpdateState = {
+      name, marketId, detail, currentVersion,
+      selectedVersion: String(newer[0].version || ""),
+    };
+    renderMarketUpdateContent(detail, currentVersion, newer);
+  } catch (e) {
+    closeModal("market-update-modal");
+    toast(e.message || t("marketplace.update_check_failed"), true);
+  }
+}
+
+function showLatestVersionModal(name, version) {
+  const desc = document.getElementById("latest-version-desc");
+  const chip = document.getElementById("latest-version-chip");
+  if (desc) {
+    // 插件名以占位符注入模板后统一转义，再替换为高亮 span（防 XSS 且保留样式）
+    const placeholder = "\u0001";
+    const text = t("marketplace.already_latest_desc", { name: placeholder, version: String(version || "?") });
+    desc.innerHTML = esc(text).split(placeholder).join(`<span class="lv-name">${esc(name)}</span>`);
+  }
+  if (chip) chip.textContent = "v" + String(version || "?");
+  const modal = document.getElementById("latest-version-modal");
+  if (modal) modal.classList.add("show");
+}
+
+function renderMarketUpdateContent(detail, currentVersion, newerVersions) {
+  const content = document.getElementById("market-update-content");
+  const applyBtn = document.getElementById("market-update-apply-btn");
+  if (!content) return;
+  const title = detail.title || detail.id || "";
+  const initial = String(title).trim().charAt(0).toUpperCase() || "?";
+  const cover = detail.cover_url
+    ? `<img src="/api/market/cover?url=${encodeURIComponent(detail.cover_url)}&token=${encodeURIComponent(TOKEN)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">`
+    : "";
+  const tags = Array.isArray(detail.tags) && detail.tags.length
+    ? `<div class="market-tags">${detail.tags.map((tag) => `<span class="tag gray">${esc(tag)}</span>`).join("")}</div>`
+    : "";
+  const versionHtml = newerVersions.map((v, idx) => {
+    const selected = idx === 0 ? " selected" : "";
+    const deps = Array.isArray(v.dependencies) && v.dependencies.length
+      ? `<div class="ver-meta">${esc(t("marketplace.detail_dependencies"))}: ${esc(v.dependencies.join(", "))}</div>`
+      : "";
+    const minLb = v.min_lumenbridge ? `<div class="ver-meta">${esc(t("marketplace.detail_min_lb"))}: ${esc(v.min_lumenbridge)}</div>` : "";
+    const date = v.published_at ? String(v.published_at).replace("T", " ").slice(0, 16) : "";
+    return `<div class="market-ver-item${selected}" data-version="${esc(v.version || "")}">
+      <span class="ver-radio"></span>
+      <div class="ver-body">
+        <span class="ver">v${esc(v.version || "?")}</span>
+        ${date ? ` <span class="ver-meta">${esc(date)}</span>` : ""}
+        ${deps}${minLb}
+        ${v.changelog ? `<div class="ver-changelog">${esc(v.changelog)}</div>` : ""}
+      </div>
+    </div>`;
+  }).join("");
+  content.innerHTML = `
+    <div class="market-detail-head">
+      <div class="market-detail-cover">${cover || esc(initial)}</div>
+      <div class="market-detail-info">
+        <h4>${esc(title)}</h4>
+        <div class="market-update-current">
+          <span>${esc(t("marketplace.update_current_version"))}</span>
+          <span class="tag gray">v${esc(currentVersion || "?")}</span>
+          <span>→</span>
+          <span>${esc(t("marketplace.update_target_version"))}</span>
+          <span class="tag blue" id="market-update-target-ver">v${esc(marketUpdateState ? marketUpdateState.selectedVersion : "")}</span>
+        </div>
+        <div class="market-stats">
+          <span class="stat">↓ ${esc(detail.download_count || 0)}</span>
+          <button class="stat market-like-btn${detail.liked ? " liked" : ""}" data-id="${esc(detail.id || "")}" data-liked="${detail.liked ? "1" : "0"}" title="${esc(t("marketplace.like_button"))}">♥ <span class="like-count">${esc(detail.like_count || 0)}</span></button>
+          <span class="stat">${esc(t("marketplace.score_label"))} ${esc(detail.score || 0)}</span>
+        </div>
+        ${tags}
+      </div>
+    </div>
+    <div class="market-detail-section">
+      <h5>${esc(t("marketplace.detail_description"))}</h5>
+      <div class="market-detail-desc">${esc(detail.description || detail.summary || "")}</div>
+    </div>
+    <div class="market-detail-section">
+      <h5>${esc(t("marketplace.update_pick_version"))}</h5>
+      <div class="market-version-list">${versionHtml}</div>
+    </div>`;
+  if (applyBtn) applyBtn.disabled = !marketUpdateState || !marketUpdateState.selectedVersion;
+}
+
+function selectMarketVersion(version) {
+  if (!marketUpdateState) return;
+  marketUpdateState.selectedVersion = version;
+  document.querySelectorAll("#market-update-content .market-ver-item").forEach((el) => {
+    el.classList.toggle("selected", el.dataset.version === version);
+  });
+  const target = document.getElementById("market-update-target-ver");
+  if (target) target.textContent = "v" + version;
+  const applyBtn = document.getElementById("market-update-apply-btn");
+  if (applyBtn) applyBtn.disabled = !version;
+}
+
+async function applyMarketUpdate() {
+  if (!marketUpdateState || !marketUpdateState.selectedVersion) return;
+  const name = marketUpdateState.name;
+  const version = marketUpdateState.selectedVersion;
+  try {
+    const res = await api("POST", `/api/subplugins/${encodeURIComponent(name)}/market-update`, { version });
+    closeModal("market-update-modal");
+    marketUpdateState = null;
     watchMarketTask(res.data.task_id, t("marketplace.update_success", { name }));
   } catch (e) { toast(e.message || t("marketplace.update_failed", { name }), true); }
 }
@@ -3512,7 +3855,7 @@ ${aeField(t("connections.qq_extra_intents"), `<input type="number" min="0" max="
     <div class="ae-switch-label">${esc(t("connections.qq_suppress_log"))}</div>
     <div class="ae-switch-sub">${esc(t("connections.qq_suppress_log_hint"))}</div>
   </div>
-  <div class="switch"><input type="checkbox" id="ae-suppress-log" ${(a.suppress_connection_log || false) ? "checked" : ""}>
+  <div class="switch"><input type="checkbox" id="ae-suppress-log" ${(a.suppress_connection_log ?? true) ? "checked" : ""}>
   <label class="track" for="ae-suppress-log"></label></div>
 </div>
 <div class="hint">${esc(t("connections.qqofficial_hint"))}</div>
@@ -3767,13 +4110,9 @@ function collectAdapterForm() {
       ? Math.min(2147483647, Math.max(0, Math.floor(intentsRaw)))
       : 0;
     patch.main_group = toIntList(document.getElementById("ae-main-group").value);
-    // 保留原有连接字段，避免后端校验报缺少 ws 配置
-    patch.ws_type = a.ws_type ?? 0;
-    patch.listen_host = a.listen_host || "0.0.0.0";
-    patch.listen_port = a.listen_port ?? 0;
-    patch.access_token = a.access_token || "";
     patch.bot_qq = Number(document.getElementById("ae-bot-qq").value) || 0;
-    patch.target = "";
+    // 官方机器人卡片不含 WebSocket 连接字段（ws_type/target 等）：
+    // 后端按类型校验，官方域只走 AppID/Secret 网关鉴权
     return patch;
   }
   const forward = document.getElementById("ae-ws-type").dataset.value === "0";

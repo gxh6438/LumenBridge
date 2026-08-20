@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import shutil
 import threading
 import urllib.parse
 from pathlib import Path
@@ -96,31 +97,6 @@ def _is_nonempty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def _validate_id_list(value: Any, path: str, *, allow_csv: bool = False) -> None:
-    """校验 QQ/群号，拒绝 bool、空值、负数和过长集合。"""
-    if allow_csv and isinstance(value, str):
-        values = [item.strip() for item in value.split(",") if item.strip()]
-    elif isinstance(value, (list, tuple)):
-        values = list(value)
-    else:
-        values = [value]
-    if not values or len(values) > 100:
-        raise ConfigValidationError(f"{path} 必须包含 1 至 100 个有效号码")
-    normalized: set[int] = set()
-    for item in values:
-        if isinstance(item, bool):
-            raise ConfigValidationError(f"{path} 中不能包含布尔值")
-        try:
-            number = int(str(item).strip())
-        except (TypeError, ValueError) as exc:
-            raise ConfigValidationError(f"{path} 中包含无效号码") from exc
-        if number <= 0 or number > 999999999999999:
-            raise ConfigValidationError(f"{path} 中包含超出范围的号码")
-        normalized.add(number)
-    if len(normalized) != len(values):
-        raise ConfigValidationError(f"{path} 不能包含重复号码")
-
-
 # v1.2.0 起迁出 config.json 的旧连接键（加载时迁移到 connections.json 后剥离）
 LEGACY_CONNECTION_KEYS = ("connection", "admin_qq", "main_group", "sync")
 
@@ -191,8 +167,10 @@ def _validate_effective_config(config: dict[str, Any]) -> None:
             parsed_url = urllib.parse.urlparse(value)
             if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
                 raise ConfigValidationError(f"{path} 必须是有效的 http:// 或 https:// 地址")
-    if not _is_nonempty_string(config["webui"]["password"]):
-        raise ConfigValidationError("webui.password 不能为空")
+    # 密码仅在 webui 启用时必填：用户关闭 webui 时清空密码不应导致
+    # 整份配置校验失败回退默认值（那会把 enable 改回 true 并覆写用户文件）
+    if config["webui"]["enable"] and not _is_nonempty_string(config["webui"]["password"]):
+        raise ConfigValidationError("webui.password 不能为空（webui 启用时）")
     for path, value in (("webui.secret", config["webui"]["secret"]),):
         if not isinstance(value, str) or len(value) > 4096:
             raise ConfigValidationError(f"{path} 必须是长度不超过 4096 的字符串")
@@ -280,8 +258,16 @@ class ConfigManager:
             if self.path.is_file():
                 try:
                     raw = json.loads(self.path.read_text(encoding="utf-8"))
-                except (json.JSONDecodeError, OSError) as e:
+                except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
                     self.logger.error(_t("plugin.config_error", error=e))
+                    # 手改笔误（如尾逗号）不应导致整份配置被默认值覆写：
+                    # 备份坏文件供修复；reload 时（内存已有配置）保留现值直接返回
+                    try:
+                        shutil.copy2(self.path, self.path.with_suffix(".json.corrupt"))
+                    except OSError:
+                        pass
+                    if self.data:
+                        return
                     raw = {}
             else:
                 raw = {}
@@ -293,9 +279,16 @@ class ConfigManager:
             # 合并后校验跨字段约束（与 apply_patch 同源）：deep_merge 只补键不查值，
             # 手改配置的越界/非法值会原样流入运行时。校验失败时回退默认配置并落盘修复。
             try:
+                _validate_patch_shape(self.data, DEFAULT_CONFIG)
                 _validate_effective_config(self.data)
             except (ConfigValidationError, KeyError, TypeError) as e:
                 self.logger.error(_t("plugin.config_error", error=e))
+                # 覆盖默认前先备份原文件，避免用户自定义配置不可恢复地丢失
+                if self.path.is_file():
+                    try:
+                        shutil.copy2(self.path, self.path.with_suffix(".json.bak"))
+                    except OSError:
+                        pass
                 self.data = copy.deepcopy(DEFAULT_CONFIG)
                 patched = True
             patched = patched or migrated
@@ -332,14 +325,14 @@ class ConfigManager:
             if pip_conf.get("index_url"):
                 self._pip_index_applied = True
                 return False
+            self._pip_index_applied = True
             if language in ("zh_CN", "zh_TW"):
                 pip_conf["index_url"] = "https://mirrors.cloud.tencent.com/pypi/simple"
-            else:
-                pip_conf["index_url"] = ""
-            self.data["pip"] = pip_conf
-            self._pip_index_applied = True
-            self._write_locked()
-            return True
+                self.data["pip"] = pip_conf
+                self._write_locked()
+                return True
+            # 非中文语言保持默认官方源，无需写盘
+            return False
 
     def apply_patch(self, patch: dict[str, Any]) -> dict[str, Any]:
         """校验并原子应用配置补丁，返回更新后的深拷贝快照。

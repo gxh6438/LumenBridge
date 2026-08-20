@@ -10,6 +10,7 @@ import copy
 import json
 import os
 import re
+import shutil
 import threading
 import uuid
 from pathlib import Path
@@ -69,16 +70,13 @@ DEFAULT_ADAPTERS: list[dict[str, Any]] = [
         "type": "qqofficial",
         "name": "QQ 官方机器人",
         "enabled": False,
-        "ws_type": 0,
-        "target": "",
-        "listen_host": "0.0.0.0",
-        "listen_port": 3002,
-        "access_token": "",
         "app_id": "",
         "app_secret": "",
         "sandbox": False,
-        # 后台日志开关：关闭后抑制连接/断连/重连类日志（防刷屏），其它日志不受影响
-        "suppress_connection_log": False,
+        # 后台静默日志开关（默认开启）：开启时不打印连接/断连/重连、凭据
+        # 降级与补发提示等运行类日志（防刷屏）；关闭后打印全部日志便于排障。
+        # 仅官方域适配器有此开关（ws/astrbot 无高频运行提示类日志）
+        "suppress_connection_log": True,
         # 连接间隔（毫秒）：两次网关连接尝试之间的最小等待时间，0 表示按指数退避自动重连
         "connect_interval": 60000,
         # 附加事件订阅位（按位或叠加到默认 Intents）：
@@ -136,69 +134,61 @@ def _norm_id_list(value: Any) -> list[Any]:
     return [value] if value not in (None, "") else []
 
 
-def _validate_adapter(adapter: dict[str, Any], *, partial: bool = False) -> None:
-    """校验单个适配器配置。
-
-    partial=True 时仅校验给定键（用于增量更新），False 时校验完整对象。
-    """
+def _validate_adapter(adapter: dict[str, Any]) -> None:
+    """校验完整的适配器配置对象。"""
     if not isinstance(adapter, dict):
         raise ConnectionValidationError("adapter 必须是对象")
 
     def _get(key: str, default: Any) -> Any:
         return adapter[key] if key in adapter else default
 
-    if "type" in adapter or not partial:
-        if _get("type", "") not in ADAPTER_TYPES:
-            raise ConnectionValidationError("adapter.type 只能为 websocket、astrbot 或 qqofficial")
+    if _get("type", "") not in ADAPTER_TYPES:
+        raise ConnectionValidationError("adapter.type 只能为 websocket、astrbot 或 qqofficial")
 
     # qqofficial 专属字段：AppID / AppSecret / 沙箱开关
-    if "app_id" in adapter or not partial:
-        app_id = str(_get("app_id", "")).strip()
-        if not re.fullmatch(r"[0-9A-Za-z]{0,32}", app_id):
-            raise ConnectionValidationError("adapter.app_id 只能是不超过 32 位的字母数字")
+    app_id = str(_get("app_id", "")).strip()
+    if not re.fullmatch(r"[0-9A-Za-z]{0,32}", app_id):
+        raise ConnectionValidationError("adapter.app_id 只能是不超过 32 位的字母数字")
 
-    if "app_secret" in adapter or not partial:
-        secret = _get("app_secret", "")
-        if not isinstance(secret, str) or not (0 <= len(secret) <= 128):
-            raise ConnectionValidationError("adapter.app_secret 必须是长度不超过 128 的字符串")
+    secret = _get("app_secret", "")
+    if not isinstance(secret, str) or not (0 <= len(secret) <= 128):
+        raise ConnectionValidationError("adapter.app_secret 必须是长度不超过 128 的字符串")
 
-    if "sandbox" in adapter or not partial:
-        if type(_get("sandbox", False)) is not bool:
-            raise ConnectionValidationError("adapter.sandbox 必须是布尔值")
+    if type(_get("sandbox", False)) is not bool:
+        raise ConnectionValidationError("adapter.sandbox 必须是布尔值")
 
     # qqofficial 专属字段：连接间隔（毫秒），0 表示按指数退避自动重连
-    if "connect_interval" in adapter or not partial:
-        interval = _get("connect_interval", 60000)
-        if isinstance(interval, bool) or not isinstance(interval, (int, float)) \
-                or not 0 <= float(interval) <= 86400000:
-            raise ConnectionValidationError("adapter.connect_interval 必须是 0 至 86400000 之间的毫秒数")
+    interval = _get("connect_interval", 60000)
+    if isinstance(interval, bool) or not isinstance(interval, (int, float)) \
+            or not 0 <= float(interval) <= 86400000:
+        raise ConnectionValidationError("adapter.connect_interval 必须是 0 至 86400000 之间的毫秒数")
 
     # qqofficial 专属字段：附加事件订阅位（按位或叠加到默认 Intents）
     # 官方 Intents 域上限为 1<<30，非法位（超出 30 位的值）会导致网关拒连
-    if "extra_intents" in adapter or not partial:
-        intents = _get("extra_intents", 0)
-        if isinstance(intents, bool) or not isinstance(intents, int) \
-                or not 0 <= intents <= (1 << 31) - 1:
-            raise ConnectionValidationError("adapter.extra_intents 必须是 0 至 2^31-1 之间的整数")
+    intents = _get("extra_intents", 0)
+    if isinstance(intents, bool) or not isinstance(intents, int) \
+            or not 0 <= intents <= (1 << 31) - 1:
+        raise ConnectionValidationError("adapter.extra_intents 必须是 0 至 2^31-1 之间的整数")
 
-    if "name" in adapter or not partial:
-        name = str(_get("name", "")).strip()
-        if not name or len(name) > 64:
-            raise ConnectionValidationError("adapter.name 必须是 1 至 64 个字符")
+    name = str(_get("name", "")).strip()
+    if not name or len(name) > 64:
+        raise ConnectionValidationError("adapter.name 必须是 1 至 64 个字符")
 
-    if "enabled" in adapter or not partial:
-        if type(_get("enabled", False)) is not bool:
-            raise ConnectionValidationError("adapter.enabled 必须是布尔值")
+    if type(_get("enabled", False)) is not bool:
+        raise ConnectionValidationError("adapter.enabled 必须是布尔值")
 
-    if "ws_type" in adapter or not partial:
+    # WebSocket 连接五项（ws_type/target/listen_host/listen_port/access_token）
+    # 仅适用于 websocket / astrbot 类型：官方机器人走网关鉴权（AppID/Secret），
+    # 卡片不含这些字段（存量卡片里的多余键在 load 归一化时剔除）
+    adapter_type = str(_get("type", ""))
+    if adapter_type in ("websocket", "astrbot"):
         ws = _get("ws_type", 0)
         # bool 是 int 子类：True/False 会通过 in (0,1) 检查，须显式排除
         if isinstance(ws, bool) or ws not in (0, 1):
             raise ConnectionValidationError("adapter.ws_type 只能为 0（正向）或 1（反向）")
 
-    # target：反向 WS 时必填且必须是 ws:// 或 wss://
-    target = str(_get("target", "") or "").strip()
-    if "target" in adapter or not partial:
+        # target：反向 WS 时必填且必须是 ws:// 或 wss://
+        target = str(_get("target", "") or "").strip()
         if target:
             from urllib.parse import urlparse
 
@@ -206,73 +196,67 @@ def _validate_adapter(adapter: dict[str, Any], *, partial: bool = False) -> None
             if parsed.scheme not in {"ws", "wss"} or not parsed.netloc:
                 raise ConnectionValidationError("adapter.target 必须是有效的 ws:// 或 wss:// 地址")
 
-    if "listen_host" in adapter or not partial:
         host = str(_get("listen_host", "")).strip()
         if not host or "://" in host:
             raise ConnectionValidationError("adapter.listen_host 必须是有效监听地址")
 
-    if "listen_port" in adapter or not partial:
         port = _get("listen_port", 0)
         if type(port) is not int or not 1 <= port <= 65535:
             raise ConnectionValidationError("adapter.listen_port 必须位于 1 至 65535 之间")
 
-    if "access_token" in adapter or not partial:
         token = _get("access_token", "")
         if not isinstance(token, str) or len(token) > 4096:
             raise ConnectionValidationError("adapter.access_token 必须是长度不超过 4096 的字符串")
 
-    if "bot_qq" in adapter or not partial:
-        qq = _get("bot_qq", 0)
-        if isinstance(qq, bool) or not isinstance(qq, int) or not 0 <= qq <= 999999999999999:
-            raise ConnectionValidationError("adapter.bot_qq 必须是非负整数")
+    qq = _get("bot_qq", 0)
+    if isinstance(qq, bool) or not isinstance(qq, int) or not 0 <= qq <= 999999999999999:
+        raise ConnectionValidationError("adapter.bot_qq 必须是非负整数")
 
     # qqofficial 的 main_group / admin_qq 是 openid 字符串（字母数字），仅做字符集校验
-    qq_official = str(_get("type", "")) == "qqofficial"
+    qq_official = adapter_type == "qqofficial"
     for key in ("admin_qq", "main_group"):
-        if key in adapter or not partial:
-            items = _norm_id_list(_get(key, []))
-            if len(items) > 100:
-                raise ConnectionValidationError(f"adapter.{key} 最多包含 100 个号码")
-            if qq_official:
-                # 官方域：group_openid / 用户 openid 均为字符串标识
-                for item in items:
-                    if isinstance(item, bool) or not re.fullmatch(
-                        r"[0-9A-Za-z_-]{4,64}", str(item).strip()
-                    ):
-                        raise ConnectionValidationError(
-                            f"adapter.{key} 中包含无效的 openid"
-                        )
-                continue
+        items = _norm_id_list(_get(key, []))
+        if len(items) > 100:
+            raise ConnectionValidationError(f"adapter.{key} 最多包含 100 个号码")
+        if qq_official:
+            # 官方域：group_openid / 用户 openid 均为字符串标识
             for item in items:
-                if isinstance(item, bool):
-                    raise ConnectionValidationError(f"adapter.{key} 中不能包含布尔值")
-                try:
-                    number = int(str(item).strip())
-                except (TypeError, ValueError) as exc:
-                    raise ConnectionValidationError(f"adapter.{key} 中包含无效号码") from exc
-                if number <= 0 or number > 999999999999999:
-                    raise ConnectionValidationError(f"adapter.{key} 中包含超出范围的号码")
+                if isinstance(item, bool) or not re.fullmatch(
+                    r"[0-9A-Za-z_-]{4,64}", str(item).strip()
+                ):
+                    raise ConnectionValidationError(
+                        f"adapter.{key} 中包含无效的 openid"
+                    )
+            continue
+        for item in items:
+            if isinstance(item, bool):
+                raise ConnectionValidationError(f"adapter.{key} 中不能包含布尔值")
+            try:
+                number = int(str(item).strip())
+            except (TypeError, ValueError) as exc:
+                raise ConnectionValidationError(f"adapter.{key} 中包含无效号码") from exc
+            if number <= 0 or number > 999999999999999:
+                raise ConnectionValidationError(f"adapter.{key} 中包含超出范围的号码")
 
-    if "sync" in adapter or not partial:
-        sync = _get("sync", {})
-        if not isinstance(sync, dict):
-            raise ConnectionValidationError("adapter.sync 必须是对象")
-        merged = copy.deepcopy(_default_sync())
-        for key, value in sync.items():
-            if key not in merged:
-                raise ConnectionValidationError(f"adapter.sync 不支持的配置项：{key}")
-            expected = merged[key]
-            if isinstance(expected, bool) and type(value) is not bool:
-                raise ConnectionValidationError(f"adapter.sync.{key} 必须是布尔值")
-            if isinstance(expected, int) and not isinstance(expected, bool):
-                if isinstance(value, bool) or not isinstance(value, int):
-                    raise ConnectionValidationError(f"adapter.sync.{key} 必须是整数")
-            if isinstance(expected, str) and not isinstance(value, str):
-                raise ConnectionValidationError(f"adapter.sync.{key} 必须是字符串")
-        if "max_message_length" in sync:
-            length = int(sync["max_message_length"])
-            if not 1 <= length <= 4096:
-                raise ConnectionValidationError("adapter.sync.max_message_length 必须位于 1 至 4096 之间")
+    sync = _get("sync", {})
+    if not isinstance(sync, dict):
+        raise ConnectionValidationError("adapter.sync 必须是对象")
+    merged = copy.deepcopy(_default_sync())
+    for key, value in sync.items():
+        if key not in merged:
+            raise ConnectionValidationError(f"adapter.sync 不支持的配置项：{key}")
+        expected = merged[key]
+        if isinstance(expected, bool) and type(value) is not bool:
+            raise ConnectionValidationError(f"adapter.sync.{key} 必须是布尔值")
+        if isinstance(expected, int) and not isinstance(expected, bool):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ConnectionValidationError(f"adapter.sync.{key} 必须是整数")
+        if isinstance(expected, str) and not isinstance(value, str):
+            raise ConnectionValidationError(f"adapter.sync.{key} 必须是字符串")
+    if "max_message_length" in sync:
+        length = int(sync["max_message_length"])
+        if not 1 <= length <= 4096:
+            raise ConnectionValidationError("adapter.sync.max_message_length 必须位于 1 至 4096 之间")
 
 
 def _merge_adapter(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
@@ -286,48 +270,104 @@ def _merge_adapter(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any
     return result
 
 
+# 适配器卡片按类型分文件存于 connections/ 目录：websocket / qqofficial / astrbot
+# 各一个 JSON（{"version": 1, "adapters": [...]}），互不混杂
+ADAPTER_FILES: dict[str, str] = {
+    "websocket": "websocket.json",
+    "qqofficial": "qqofficial.json",
+    "astrbot": "astrbot.json",
+}
+# WebSocket 专属连接字段：仅 websocket / astrbot 卡片持有；qqofficial 卡片
+# 不含（官方机器人走网关鉴权），加载归一化时剔除存量卡片里的残留键
+_WS_ONLY_FIELDS = ("ws_type", "target", "listen_host", "listen_port", "access_token")
+
+
 class ConnectionManager:
-    """适配器连接配置加载器：connections.json 持久化 + 旧版配置迁移。"""
+    """适配器连接配置加载器：connections/ 目录分类型持久化 + 旧版配置迁移。
+
+    存储布局（v1.1.0 起）::
+
+        plugins/lumenbridge/
+        ├── config.json              # 主配置
+        ├── connections/             # 适配器卡片（按类型分文件）
+        │   ├── websocket.json
+        │   ├── qqofficial.json
+        │   └── astrbot.json
+        └── data/                    # 运行数据（规则/白名单等）
+
+    兼容：目录不存在时回退读取旧版单文件 connections.json（功能不断），
+    下次写盘自动切换为新结构并把旧文件改名 connections.json.migrated；
+    完整迁移（含数据文件搬移与官方卡片字段清理）由独立脚本
+    migrate_storage.py 完成，用户手动放入插件目录运行。
+    """
 
     def __init__(self, data_folder: Path, logger: Any, legacy: dict[str, Any] | None = None) -> None:
         self.logger = logger
+        self.dir = Path(data_folder) / "connections"
+        # 旧版单文件路径：目录缺失时回退读取；写盘切换新结构后改名 .migrated
         self.path = Path(data_folder) / "connections.json"
         self.adapters: list[dict[str, Any]] = []
+        # 当前是否处于“旧单文件回退”模式（写盘时据此改名旧文件）
+        self._legacy_layout = False
         self._lock = threading.RLock()
         self.load(legacy=legacy)
 
     # ------------------------------------------------------------------ load
+    def _read_items(self, fpath: Path) -> list[Any]:
+        """读取单个存储文件里的 adapters 列表；损坏/缺失返回空列表。"""
+        if not fpath.is_file():
+            return []
+        try:
+            data = json.loads(fpath.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+            self.logger.error(_t("connections.load_error", error=e))
+            # 文件损坏前先备份原文件，便于用户手动恢复
+            self._backup_file(fpath)
+            return []
+        items = data.get("adapters") if isinstance(data, dict) else None
+        return items if isinstance(items, list) else []
+
     def load(self, *, legacy: dict[str, Any] | None = None) -> None:
-        """加载 connections.json；首次生成时若提供 legacy（旧 config.json 键）则迁移。"""
+        """加载 connections/ 目录（旧版单文件回退）；首次生成时迁移旧 config.json。"""
         with self._lock:
-            raw: Any = {}
-            fresh = True
-            if self.path.is_file():
-                try:
-                    raw = json.loads(self.path.read_text(encoding="utf-8"))
-                    fresh = False
-                except (json.JSONDecodeError, OSError) as e:
-                    self.logger.error(_t("connections.load_error", error=e))
-                    raw = {}
-                    # 文件损坏视同首次生成：允许 legacy 迁移重建可用配置
-                    fresh = True
-            raw = raw if isinstance(raw, dict) else {}
-            adapters = raw.get("adapters")
-            if not isinstance(adapters, list) or not adapters:
+            self._legacy_layout = False
+            fresh = not any((self.dir / name).is_file() for name in ADAPTER_FILES.values())
+            # (来源文件, 卡片) 对：剔除卡片时按来源备份对应文件
+            sourced: list[tuple[Path | None, Any]] = []
+            if fresh and self.path.is_file():
+                # 旧版单文件存储：回退读取保证升级后连接不中断，写盘即切新结构
+                self._legacy_layout = True
+                sourced.extend((self.path, item) for item in self._read_items(self.path))
+                self.logger.warning(_t("connections.legacy_layout_hint"))
+            else:
+                for name in ADAPTER_FILES.values():
+                    fpath = self.dir / name
+                    sourced.extend((fpath, item) for item in self._read_items(fpath))
+            original_adapters = [item for _, item in sourced]
+            adapters = original_adapters
+            if not adapters:
                 adapters = copy.deepcopy(DEFAULT_ADAPTERS)
                 # 旧版 config.json 存在连接信息时，迁移进首张 WebSocket 卡片
                 if legacy and fresh:
                     adapters[0] = self._migrate_legacy(adapters[0], legacy)
-                raw = {"version": 1, "adapters": adapters}
             else:
                 # 补全缺失字段并按默认顺序排列已知键
                 normalized: list[dict[str, Any]] = []
-                for item in adapters:
+                dropped_sources: set[Path] = set()
+                for source, item in sourced:
                     if not isinstance(item, dict) or item.get("type") not in ADAPTER_TYPES:
+                        dropped_sources.add(source) if source else None
                         continue
                     merged = _merge_adapter(self._blank(item.get("type", "websocket")), item)
+                    # qqofficial 卡片剔除 ws 五项（旧版默认卡片残留，官方域无此概念）
+                    if merged.get("type") == "qqofficial":
+                        for key in _WS_ONLY_FIELDS:
+                            merged.pop(key, None)
                     if not str(merged.get("id") or "") or not _ID_RE.match(str(merged["id"])):
                         merged["id"] = self._gen_id(str(merged.get("type")))
+                    else:
+                        # id 归一化为字符串，避免手改成数字后 get/update/delete 永远失配
+                        merged["id"] = str(merged["id"])
                     # 撤下默认 AstrBot 卡片：未启用且从未配置的 astrbot_default 直接移除
                     if (
                         merged.get("id") == "astrbot_default"
@@ -348,11 +388,29 @@ class ConnectionManager:
                                 error=e,
                             )
                         )
+                        if source is not None:
+                            dropped_sources.add(source)
                         continue
                     normalized.append(merged)
-                raw = {"version": 1, "adapters": normalized or copy.deepcopy(DEFAULT_ADAPTERS)}
-            self.adapters = raw["adapters"]
-            self._write_locked()
+                # 有卡片被剔除时先备份来源文件，避免用户配置不可恢复地丢失
+                for source in dropped_sources:
+                    if source is not None:
+                        self._backup_file(source)
+                adapters = normalized or copy.deepcopy(DEFAULT_ADAPTERS)
+            self.adapters = adapters
+            # 内容有变化才落盘：/lumen reload 等高频路径不再产生无谓写盘；
+            # 旧单文件模式内容必然变化（剔除 ws 字段等归一化），借此自动切换新结构
+            if fresh or original_adapters != self.adapters:
+                self._write_locked()
+
+    def _backup_file(self, fpath: Path) -> None:
+        """把指定存储文件备份为 .bak（剔除卡片或文件损坏时调用）。"""
+        if not fpath.is_file():
+            return
+        try:
+            shutil.copy2(fpath, fpath.with_suffix(".json.bak"))
+        except OSError:
+            pass
 
     def _blank(self, adapter_type: str) -> dict[str, Any]:
         """按类型生成空白适配器模板。"""
@@ -379,15 +437,22 @@ class ConnectionManager:
     @staticmethod
     def _migrate_legacy(blank: dict[str, Any], legacy: dict[str, Any]) -> dict[str, Any]:
         """把旧 config.json 的 connection/admin_qq/main_group/sync 迁移进适配器。"""
+
+        def _to_int(value: Any, default: int) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
         result = copy.deepcopy(blank)
         conn = legacy.get("connection") or {}
         if isinstance(conn, dict):
-            result["ws_type"] = int(conn.get("ws_type", 0) or 0)
+            result["ws_type"] = _to_int(conn.get("ws_type", 0) or 0, 0)
             result["target"] = str(conn.get("target", "") or "")
             result["listen_host"] = str(conn.get("listen_host", "0.0.0.0") or "0.0.0.0")
-            result["listen_port"] = int(conn.get("listen_port", 3002) or 3002)
+            result["listen_port"] = _to_int(conn.get("listen_port", 3002) or 3002, 3002)
             result["access_token"] = str(conn.get("access_token", "") or "")
-            result["bot_qq"] = int(conn.get("bot_qq", 0) or 0)
+            result["bot_qq"] = _to_int(conn.get("bot_qq", 0) or 0, 0)
         if legacy.get("admin_qq"):
             # 旧配置可能为 int / csv 字符串 / 列表；list(str) 会把 csv 拆成
             # 单字符列表导致管理员全部失效，统一走 parse_groups 归一化
@@ -402,16 +467,36 @@ class ConnectionManager:
                 if key in merged:
                     merged[key] = copy.deepcopy(value)
             result["sync"] = merged
+        # 旧版连接默认生效：迁移出完整连接信息后自动启用，避免升级后静默掉线
+        if ConnectionManager.is_configured(result):
+            result["enabled"] = True
         return result
 
     def _write_locked(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".json.tmp")
-        payload = {"version": 1, "adapters": self.adapters}
-        tmp.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=4), encoding="utf-8"
-        )
-        os.replace(tmp, self.path)
+        """按适配器类型分文件写盘（原子替换），三类互不混杂。"""
+        self.dir.mkdir(parents=True, exist_ok=True)
+        groups: dict[str, list[dict[str, Any]]] = {t: [] for t in ADAPTER_FILES}
+        for adapter in self.adapters:
+            groups.setdefault(str(adapter.get("type", "websocket")), []).append(adapter)
+        for atype, fname in ADAPTER_FILES.items():
+            fpath = self.dir / fname
+            tmp = fpath.with_suffix(".json.tmp")
+            tmp.write_text(
+                json.dumps(
+                    {"version": 1, "adapters": groups.get(atype, [])},
+                    ensure_ascii=False,
+                    indent=4,
+                ),
+                encoding="utf-8",
+            )
+            os.replace(tmp, fpath)
+        # 旧版单文件回退模式下完成首次写盘：改名旧文件，避免下次加载再走回退分支
+        if self._legacy_layout and self.path.is_file():
+            try:
+                self.path.rename(self.path.with_suffix(".json.migrated"))
+            except OSError:
+                pass
+            self._legacy_layout = False
 
     # ------------------------------------------------------------------ CRUD
     @staticmethod
@@ -515,7 +600,11 @@ class ConnectionManager:
         return patch
 
     def _ensure_unique_name(self, adapter: dict[str, Any], *, exclude: str | None) -> None:
-        """卡片名去重：重名自动追加序号（保持展示唯一）。"""
+        """卡片名去重：重名自动追加序号（保持展示唯一）。
+
+        追加序号前先把基名截断，确保结果不超过 _validate_adapter 的 64 字符上限，
+        否则写盘的超长名会在下次启动校验时被当作非法卡片剔除。
+        """
         names = {
             str(a.get("name"))
             for a in self.adapters
@@ -526,11 +615,13 @@ class ConnectionManager:
             adapter["name"] = name
             return
         for i in range(2, 100):
-            candidate = f"{name} {i}"
+            suffix = f" {i}"
+            candidate = f"{name[: 64 - len(suffix)]}{suffix}"
             if candidate not in names:
                 adapter["name"] = candidate
                 return
-        adapter["name"] = f"{name} {uuid.uuid4().hex[:4]}"
+        suffix = f" {uuid.uuid4().hex[:4]}"
+        adapter["name"] = f"{name[: 64 - len(suffix)]}{suffix}"
 
     def _ensure_unique_listen_port(self, adapter: dict[str, Any], *, exclude: str | None) -> None:
         """反向适配器的监听端口不得与其他适配器冲突（0.0.0.0 会抢占全部网卡，仅按端口判断）。"""

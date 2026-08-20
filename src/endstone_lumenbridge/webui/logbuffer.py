@@ -98,7 +98,13 @@ class LoggerTee:
 
         def write() -> None:
             try:
-                getattr(self._logger, forward, self._logger.info)(text)
+                # 默认参数不能提前求值：底层 logger 缺 info 属性时
+                # getattr 的第三参会先抛 AttributeError，把本可成功的转发也吞掉
+                fn = getattr(self._logger, forward, None)
+                if not callable(fn):
+                    fn = getattr(self._logger, "info", None)
+                if callable(fn):
+                    fn(text)
             except Exception:
                 pass
 
@@ -123,7 +129,15 @@ class LoggerTee:
         self._emit("debug", msg)
 
     def exception(self, msg: Any) -> None:
-        self._emit("error", msg)
+        # 在调用现场捕获堆栈：转发到主线程后 sys.exc_info() 已丢失，
+        # 不捕获的话异常日志与 error 级别无异，排障信息全部丢失
+        import traceback
+
+        text = str(msg)
+        tb = traceback.format_exc()
+        if tb and tb.strip() != "NoneType: None":
+            text = f"{text}\n{tb}"
+        self._emit("error", text)
 
     def critical(self, msg: Any) -> None:
         # 缓冲区记录为 error（前端兼容），转发到控制台/文件时保留 critical 级别

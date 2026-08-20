@@ -215,7 +215,7 @@ class I18n:
             data = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
                 data = {}
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             data = {}
         self._cache[lang] = data
         return data

@@ -73,6 +73,9 @@ class OneBotAdapter:
         self._ws: Any = None
         self._server: Any = None
         self._clients: set[Any] = set()
+        # 反向模式下是否已广播 bot.online：实例级标志保证多客户端
+        # 场景 online/offline 对称（最后一个客户端断开时才广播下线）
+        self._announced = False
         self._connected_event: asyncio.Event | None = None
         self._send_queue: asyncio.Queue | None = None
         self._pending: dict[str, asyncio.Future] = {}
@@ -180,6 +183,7 @@ class OneBotAdapter:
         # 兜底清理残留状态，防止 stop()+start() 复用同实例时旧 Future 残留
         self._pending.clear()
         self._clients.clear()
+        self._announced = False
         self._connected_event = None
         self._send_queue = None
         self.logger.info(_t("adapter.stopped"))
@@ -267,7 +271,7 @@ class OneBotAdapter:
             if not self._running:
                 break
             attempt += 1
-            delay = min(60.0, 2.0 ** min(attempt, 5) + random.uniform(0, 2))
+            delay = min(60.0, 2.0 ** min(attempt, 6) + random.uniform(0, 2))
             self.logger.warning(_t("adapter.disconnected", delay=delay, attempt=attempt))
             await asyncio.sleep(delay)
 
@@ -287,7 +291,8 @@ class OneBotAdapter:
             self._connected_event.set()
             self.logger.info(_t("adapter.reverse_client_connected", self_id=self_id))
             announced = not self.bot_qq or str(self_id) == str(self.bot_qq)
-            if announced:
+            if announced and not self._announced:
+                self._announced = True
                 self.bus.emit("bot.online", self)
             try:
                 async for raw in ws:
@@ -305,7 +310,8 @@ class OneBotAdapter:
                     self._connected_event.clear()
                     # 最后一个客户端断开：通知资料卡片下线
                     # （仅此前广播过上线，保持 online/offline 对称）
-                    if announced:
+                    if self._announced:
+                        self._announced = False
                         try:
                             self.bus.emit("bot.offline", self)
                         except Exception:
@@ -350,6 +356,18 @@ class OneBotAdapter:
             # 仅当该 echo 仍对应等待中的 Future 才派发；fut 为 None 说明
             # 已超时/取消被 pop 或未知 echo，迟到的回执不再 emit，避免误触发
             if fut is not None:
+                retcode = data.get("retcode")
+                if data.get("status") == "failed" or (retcode is not None and retcode != 0):
+                    # 失败回执与超时回执对调用方同为 None，这里留下
+                    # retcode/wording 日志作为排障依据
+                    self.logger.warning(
+                        _t(
+                            "adapter.api_failed",
+                            retcode=retcode,
+                            status=data.get("status"),
+                            wording=data.get("wording") or data.get("message") or "",
+                        )
+                    )
                 if not fut.done():
                     fut.set_result(data.get("data"))
                 self.bus.emit(f"packid_{echo}", data.get("data"))
@@ -417,7 +435,8 @@ class OneBotAdapter:
             for it in items:
                 q.put_nowait(it)
         except Exception:
-            pass
+            # 重灌失败会丢失 pack 与 drain 出的 items，必须留日志供排查
+            self.logger.exception("OneBot send queue requeue failed")
 
     async def _sender_loop(self) -> None:
         """发送队列常驻协程：断线时挂起，恢复后补发"""
@@ -516,11 +535,19 @@ class OneBotAdapter:
             await q.put(pack)
             try:
                 data = await asyncio.wait_for(fut, timeout=timeout)
-                callback(data)
+                try:
+                    callback(data)
+                except Exception:
+                    # 回调异常不能逃逸到事件循环：记录后吞掉，避免
+                    # "exception was never retrieved" 且中断发送协程
+                    self.logger.exception("OneBot API callback error")
             except asyncio.TimeoutError:
                 self._pending.pop(echo, None)
                 self.logger.warning(_t("adapter.api_timeout", action=pack.get('action')))
-                callback(None)
+                try:
+                    callback(None)
+                except Exception:
+                    self.logger.exception("OneBot API callback error")
             except asyncio.CancelledError:
                 self._pending.pop(echo, None)
                 # stop() 取消 pending Future 时回调 None，让调用方立即感知失败

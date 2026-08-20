@@ -150,14 +150,15 @@ class QQOfficialAdapter:
         groups: list[str] | None = None,
         connect_interval: int = DEFAULT_CONNECT_INTERVAL,
         extra_intents: int = 0,
-        suppress_connection_log: bool = False,
+        suppress_connection_log: bool = True,
     ) -> None:
         self.logger = logger
         self.bus = event_bus
         self.app_id = str(app_id or "").strip()
         self.app_secret = str(app_secret or "").strip()
         self.sandbox = bool(sandbox)
-        # 后台连接日志开关：True 时抑制连接/断连/重连类日志（防刷屏），其它日志不受影响
+        # 后台静默日志开关（默认开启）：True 时抑制连接/断连/重连、凭据降级
+        # 与补发提示等运行类日志（防刷屏）；发送失败等异常日志不受影响
         self.suppress_connection_log = bool(suppress_connection_log)
         # 连接间隔（毫秒）：两次网关连接尝试之间的最小等待时间；0 表示按指数退避自动重连
         try:

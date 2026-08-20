@@ -688,22 +688,30 @@ class MarketplaceClient:
             if subplugin:
                 subplugin.manifest = manifest
 
-    def _install_declared_dependencies(self, plugin_name: str, dependencies: list[str], *, upgrade: bool = False) -> tuple[bool, str]:
+    def _install_declared_dependencies(self, plugin_name: str, dependencies: list[str], *, upgrade: bool = False, log=None, progress=None) -> tuple[bool, str]:
+        log = log or (lambda _msg: None)
+        progress = progress or (lambda _pct, _label="": None)
         if not dependencies:
             return True, ""
         manager = self.plugin.subplugin_manager
         pip_manager = self.plugin._get_pip_manager()
         if manager is None or pip_manager is None:
             return False, "pip 管理器不可用"
+        # 依赖安装纳入任务日志/进度条：下载完插件本体后，前端能看到
+        # "正在安装依赖 → pip 逐行输出 → 热重载" 的完整过程
+        log(f"检测到声明的依赖: {' '.join(dependencies)}")
+        progress(96, "正在安装依赖")
         # 必须持 plugin._pip_serial_lock：旧版本直接调用 pip_manager.install 绕过了 WebUI 的
         # _pip_serial_lock，可与 WebUI 安装任务并发执行而损坏 site-packages 元数据。
         with self.plugin._pip_serial_lock:
-            ok, message = pip_manager.install(dependencies, upgrade=upgrade)
+            ok, message = pip_manager.install(dependencies, on_log=log, upgrade=upgrade)
         if not ok:
             return False, message
+        progress(98, "正在热重载子插件")
         loaded = bool(self._run_on_main_wait(lambda: manager.reload_one(plugin_name), timeout=20))
         if not loaded:
             return False, "依赖已安装，但子插件热重载失败；请在子插件页面查看错误详情"
+        log("依赖安装完成，子插件已重载")
         return True, message
 
     def install(self, market_id: str, requested_version: str = "", *, upgrade_dependencies: bool = False, log=None, progress=None) -> dict[str, Any]:
@@ -733,7 +741,9 @@ class MarketplaceClient:
             dependencies = release.get("dependencies", [])
             if not isinstance(dependencies, list):
                 dependencies = []
-            dep_ok, dep_message = self._install_declared_dependencies(name, [str(x) for x in dependencies], upgrade=upgrade_dependencies)
+            dep_ok, dep_message = self._install_declared_dependencies(
+                name, [str(x) for x in dependencies], upgrade=upgrade_dependencies, log=log, progress=progress
+            )
             loaded = False
             with manager._lock:
                 installed = manager.subplugins.get(name)
@@ -854,7 +864,7 @@ class MarketplaceClient:
             except OSError:
                 pass
 
-    def update(self, plugin_name: str, *, update_dependencies: bool = True, log=None, progress=None) -> dict[str, Any]:
+    def update(self, plugin_name: str, requested_version: str = "", *, update_dependencies: bool = True, log=None, progress=None) -> dict[str, Any]:
         log = log or (lambda _msg: None)
         progress = progress or (lambda _pct, _label="": None)
         log(f"正在查找子插件 {plugin_name} 的市场来源...")
@@ -869,11 +879,22 @@ class MarketplaceClient:
             if not isinstance(origin, dict) or origin.get("source") != "marketplace":
                 raise MarketplaceError("该插件不是通过插件市场安装，仍可使用上传或下载链接手动升级")
             market_id = str(origin.get("id") or "")
+            local_version = str(subplugin.manifest.get("version") or "")
         if not _MARKET_ID_RE.fullmatch(market_id):
             raise MarketplaceError("市场来源记录无效")
-        return self.install(market_id, upgrade_dependencies=update_dependencies, log=log, progress=progress)
+        if requested_version:
+            # 市场更新弹窗已限定"仅高于当前版本"，后端再兜底校验一次，
+            # 防止旧前端/直接调 API 把版本降级覆盖本地更新的 lumen.json
+            if not _VERSION_RE.fullmatch(requested_version):
+                raise MarketplaceError("请求更新的版本号非法")
+            if not _is_newer(requested_version, local_version):
+                raise MarketplaceError(f"目标版本 v{requested_version} 不高于当前版本 v{local_version}，已拒绝降级更新")
+            log(f"目标更新版本: v{requested_version}")
+        return self.install(market_id, requested_version, upgrade_dependencies=update_dependencies, log=log, progress=progress)
 
-    def update_dependencies(self, plugin_name: str) -> dict[str, Any]:
+    def update_dependencies(self, plugin_name: str, *, log=None, progress=None) -> dict[str, Any]:
+        log = log or (lambda _msg: None)
+        progress = progress or (lambda _pct, _label="": None)
         manager = self.plugin.subplugin_manager
         if manager is None:
             raise MarketplaceError("子插件管理器不可用")
@@ -885,7 +906,7 @@ class MarketplaceClient:
             # 会拆成单字符列表，导致 pip install o p e n a i
             deps_raw = subplugin.manifest.get("dependencies", [])
             dependencies = [str(x) for x in deps_raw if x] if isinstance(deps_raw, list) else []
-        ok, message = self._install_declared_dependencies(plugin_name, dependencies, upgrade=True)
+        ok, message = self._install_declared_dependencies(plugin_name, dependencies, upgrade=True, log=log, progress=progress)
         return {"name": plugin_name, "dependencies_ok": ok, "message": message, "restart_required": not ok}
 
     def framework_update_info(self) -> dict[str, Any]:
@@ -952,7 +973,7 @@ class MarketplaceClient:
             raise MarketplaceError("版本更新记录缺少有效版本、下载地址或 SHA-256")
         # 幂等复用：目标 wheel 已按同一发布记录暂存且哈希一致时跳过重复下载，
         # 供"暂存→立即热重载"两步流程与自动更新共用。
-        receipt_path = Path(self.plugin.data_folder) / "framework_update.json"
+        receipt_path = Path(self.plugin.data_folder) / "data" / "framework_update.json"
         plugins_dir = Path(self.plugin.data_folder).parent
         target = plugins_dir / f"endstone_lumenbridge-{version}-py3-none-any.whl"
         if receipt_path.is_file() and target.is_file():
@@ -1023,8 +1044,9 @@ class MarketplaceClient:
                 # v1.1.0 起支持进程内热重载（apply_framework_update），不再强制重启
                 "restart_required": False,
             }
-            Path(self.plugin.data_folder).mkdir(parents=True, exist_ok=True)
-            (Path(self.plugin.data_folder) / "framework_update.json").write_text(
+            receipt_dir = Path(self.plugin.data_folder) / "data"
+            receipt_dir.mkdir(parents=True, exist_ok=True)
+            (receipt_dir / "framework_update.json").write_text(
                 json.dumps(receipt, ensure_ascii=False, indent=2), encoding="utf-8"
             )
             log(f"新版本 v{version} 已暂存，准备热重载")

@@ -27,21 +27,32 @@ from .constants import (
     BIZ_EVENT_ID_INVALID,
     MEDIA_FILE_TYPE,
 )
-from .utils import OUT_MENTION_RE, ApiHTTPError, biz_code, extract_payload
+from .utils import (
+    OUT_MENTION_RE,
+    ApiHTTPError,
+    biz_code,
+    escape_markdown_text,
+    extract_payload,
+    markdown_to_plain_text,
+    normalize_target as _normalize_target,
+)
 
 
 def _payload_body(content: str, file_info: str) -> dict[str, Any]:
     """按内容选择官方消息载体。
 
     - 富媒体：msg_type=7，content 作配文；
-    - 含 <@!openid> 提及：官方仅在 markdown（msg_type=2）中把提及解析为
-      真实 @（纯文本会原样显示标记），故切换 markdown 载体；
+    - 含出站 @ 标记（extract_payload 已统一归一为官方文本链
+      <qqbot-at-user id="openid" />）：切换 markdown 载体（msg_type=2）——
+      Gensokyo-ForSpark 实测该组合可渲染真实 @（纯文本 + 文本链、
+      markdown + <at id=""> 均实测显示原文）。其余文本同步做 markdown
+      转义，防止 * # < 等被客户端误解析成格式；
     - 其余：纯文本 msg_type=0。
     """
     if file_info:
         return {"msg_type": 7, "content": content}
     if OUT_MENTION_RE.search(content or ""):
-        return {"msg_type": 2, "markdown": {"content": content}}
+        return {"msg_type": 2, "markdown": {"content": escape_markdown_text(content)}}
     return {"msg_type": 0, "content": content}
 
 
@@ -102,14 +113,16 @@ class MessageSender:
 
         策略：超时/网络错误按间隔重试（文本 1s / 富媒体 3s，重试时递增
         msg_seq 规避官方 (msg_id, msg_seq) 去重）；event_id 无效（40034025）
-        清除后立即重发一次。参数经 ad._retry_params() 运行时读取，
-        支持测试 monkeypatch 主模块常量。
+        清除后立即重发一次；markdown 载体被拒（机器人未开通原生 markdown
+        能力）时降级为纯文本 + 官方文本链 @ 格式重发一次。参数经
+        ad._retry_params() 运行时读取，支持测试 monkeypatch 主模块常量。
         """
         path = (
             f"/v2/groups/{target}/messages" if kind == "group" else f"/v2/users/{target}/messages"
         )
         retry_max, delay_text, delay_media = self.ad._retry_params()
         event_id_retried = False
+        md_fallback_retried = False
         for attempt in range(1, retry_max + 1):
             try:
                 data = await self.ad._api_request("POST", path, body)
@@ -123,11 +136,26 @@ class MessageSender:
                 if biz == BIZ_ACTIVE_REJECTED:
                     # 主动消息被拒：无需重试，交调用方入栈
                     return "rejected"
+                if (
+                    not md_fallback_retried
+                    and body.get("msg_type") == 2
+                    and "markdown" in str(e.detail or e).lower()
+                ):
+                    # markdown 能力未开通（如"不允许发送原生 markdown"）：
+                    # 降级纯文本（@ 不渲染，还原为 @Openid前8位 可读文本，
+                    # 学 Gensokyo 兜底），去重字段保留
+                    md_fallback_retried = True
+                    body["content"] = markdown_to_plain_text(
+                        str((body.get("markdown") or {}).get("content") or "")
+                    )
+                    body.pop("markdown", None)
+                    body["msg_type"] = 0
+                    continue
                 if biz == BIZ_EVENT_ID_INVALID and "event_id" in body and not event_id_retried:
                     body.pop("event_id", None)
                     event_id_retried = True
                     continue
-                if attempt < retry_max:
+                if attempt < retry_max and not self.ad.suppress_connection_log:
                     self.ad.logger.warning(
                         _t(
                             "qqofficial.send_retry",
@@ -140,7 +168,7 @@ class MessageSender:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                if attempt < retry_max:
+                if attempt < retry_max and not self.ad.suppress_connection_log:
                     self.ad.logger.warning(
                         _t(
                             "qqofficial.send_retry",
@@ -188,13 +216,13 @@ class MessageSender:
                     body["media"] = {"file_info": file_info}
                 result = await self.post_message(kind, target, body, media is not None)
                 if result == "ok":
-                    self.ad.logger.info(_t("qqofficial.active_flushed", target=target))
+                    # 补发成功属运行提示类日志：静默模式下不打印（防刷屏）
+                    if not self.ad.suppress_connection_log:
+                        self.ad.logger.info(_t("qqofficial.active_flushed", target=target))
                 else:
                     self.ad.logger.warning(
                         _t("qqofficial.active_flush_failed", target=target, error=result)
                     )
-                    if body.get("msg_type") == 2:
-                        self.ad.logger.warning(_t("qqofficial.markdown_hint"))
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -239,29 +267,30 @@ class MessageSender:
                         self.ad.logger.debug(_t("qqofficial.event_id_reply", target=target))
                     else:
                         # 群聊主动消息几乎必被官方拒绝（22009），回复会"消失"——
-                        # 此前无任何日志，用户表现为"命令生效但群里无返回"
-                        self.ad.logger.warning(
-                            _t("qqofficial.send_no_credential", target=target, head=content[:40])
-                        )
+                        # 此前无任何日志，用户表现为"命令生效但群里无返回"。
+                        # 属高频运行提示：静默模式（默认）下不打印，排障时可关闭开关查看
+                        if not self.ad.suppress_connection_log:
+                            self.ad.logger.warning(
+                                _t("qqofficial.send_no_credential", target=target, head=content[:40])
+                            )
                 result = await self.post_message(kind, str(target), body, media is not None)
                 if result == "rejected":
                     if passive is None:
-                        # 主动消息被拒（22009）：入栈等下次被动回复时借道补发
+                        # 主动消息被拒（22009）：入栈等下次被动回复时借道补发。
+                        # 入栈提示属运行提示类日志：静默模式下不打印
                         self.ad.credentials.push_active((kind, str(target), content, media))
-                        self.ad.logger.info(
-                            _t(
-                                "qqofficial.active_queued",
-                                target=target,
-                                size=self.ad.credentials.active_size(str(target)),
+                        if not self.ad.suppress_connection_log:
+                            self.ad.logger.info(
+                                _t(
+                                    "qqofficial.active_queued",
+                                    target=target,
+                                    size=self.ad.credentials.active_size(str(target)),
+                                )
                             )
-                        )
                 elif result == "failed":
                     self.ad.logger.warning(
                         _t("qqofficial.send_failed", target=target, error="retries exhausted")
                     )
-                    if body.get("msg_type") == 2:
-                        # markdown 消息需在 q.qq.com 后台为机器人开通能力
-                        self.ad.logger.warning(_t("qqofficial.markdown_hint"))
                 if passive is not None and result == "ok":
                     # 被动回复发送成功：借剩余额度补发该目标栈内的主动消息
                     await self.flush_active_stack(str(target))
@@ -279,6 +308,7 @@ class MessageSender:
         loop = self.ad._loop
         if not self.ad._running or loop is None or loop.is_closed():
             return
+        target = _normalize_target(target)
         content, media = extract_payload(message)
         if not content and media is None:
             # 空载荷丢弃要有迹可循：此前 base64 图片未被解析时在此被

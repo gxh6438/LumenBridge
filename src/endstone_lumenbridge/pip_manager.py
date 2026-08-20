@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
@@ -588,21 +589,72 @@ class PipManager:
         if on_log:
             on_log(_t("pip.installing", packages=" ".join(packages)))
 
+        # 流式执行：逐行读取 pip 输出实时回调 on_log，
+        # 安装市场插件的依赖时前端进度弹窗能同步看到 Collecting/Downloading/Installing 过程
+        stdout_tail: list[str] = []
+        stderr_lines: list[str] = []
         try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                timeout=self.timeout,
+            process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace",
             )
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        except (FileNotFoundError, OSError) as e:
             return False, _t("pip.install_failed", error=e)
 
-        if on_log:
-            if result.stdout:
-                on_log(result.stdout)
-            if result.stderr:
-                on_log(result.stderr)
+        # stderr 由后台线程排空：主线程逐行读 stdout 时若 stderr 缓冲区写满会互相死锁
+        def _drain_stderr() -> None:
+            try:
+                if process.stderr is not None:
+                    for line in process.stderr:
+                        stderr_lines.append(line.rstrip("\n"))
+            except Exception:  # noqa: BLE001
+                pass
 
-        if result.returncode == 0:
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_thread.start()
+
+        # 看门狗兜底超时：逐行读 stdout 期间进程挂起不吐输出时，wait(timeout) 永远到不了，
+        # 由定时器强杀进程，读循环随管道 EOF 自然结束
+        timed_out = threading.Event()
+
+        def _kill_on_timeout() -> None:
+            timed_out.set()
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+        watchdog = threading.Timer(max(0, self.timeout), _kill_on_timeout)
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            if process.stdout is not None:
+                for line in process.stdout:
+                    line = line.rstrip("\n")
+                    if not line:
+                        continue
+                    if on_log:
+                        on_log(line)
+                    stdout_tail.append(line)
+                    if len(stdout_tail) > 30:
+                        stdout_tail.pop(0)
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        finally:
+            watchdog.cancel()
+            stderr_thread.join(timeout=5)
+
+        if timed_out.is_set():
+            return False, _t("pip.install_failed", error=f"timeout after {self.timeout}s")
+
+        stderr_tail = [ln for ln in stderr_lines if ln.strip()][-30:]
+        if on_log:
+            for line in stderr_tail:
+                on_log(line)
+
+        if process.returncode == 0:
             # pip 退出码成功不等于当前运行中的解释器已可导入；立即在同一解释器验证，
             # 把环境目标错误或陈旧查找缓存转为可行动错误
             unavailable = self.missing_dependencies(packages)
@@ -614,7 +666,10 @@ class PipManager:
                 msg += _t("pip.install_not_visible_warning", packages=", ".join(unavailable))
                 return True, msg
             return True, _t("pip.install_success", packages=" ".join(packages))
-        return False, _t("pip.install_failed", error=result.stderr[-500:] or result.stdout[-500:])
+        return False, _t(
+            "pip.install_failed",
+            error="\n".join(stderr_tail)[-500:] or "\n".join(stdout_tail)[-500:],
+        )
 
     def uninstall(self, package: str) -> tuple[bool, str]:
         """卸载包（受保护包拒绝）。"""

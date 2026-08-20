@@ -35,8 +35,9 @@ class EventDispatcher:
         self.bus.on("onebot.pack", self._on_pack)
 
     def _resolve_sender(self, source: Any) -> Any:
-        """回复目标：优先来源适配器，其次主适配器。"""
-        if source is not None and getattr(source, "is_connected", False):
+        """回复目标：始终使用来源适配器（断线时其发送队列会挂起待重连后补发），
+        仅在事件无来源（旧链路兼容）时回退主适配器。"""
+        if source is not None:
             return source
         primary = getattr(self.adapter, "primary", None)
         return primary() if callable(primary) else self.adapter
@@ -81,8 +82,14 @@ class EventDispatcher:
 
         不含适配器 id：同一协议端事件经多条链路（如同一 NapCat 同时挂在
         正向与反向两个适配器上）重复上报时指纹一致，可跨适配器去重；
-        time / target_id 等字段参与指纹，避免正常连续事件被误判为重复。
+        time / target_id / message_id 等字段参与指纹，避免正常连续事件
+        （如同一秒撤回两条不同消息）被误判为重复。
         """
+        file_info = pack.get("file")
+        if isinstance(file_info, dict):
+            file_key = str(file_info.get("file_id") or file_info.get("filename") or "")
+        else:
+            file_key = str(file_info or "")
         return (
             str(pack.get("post_type", "")),
             str(pack.get("notice_type") or pack.get("request_type") or ""),
@@ -91,6 +98,8 @@ class EventDispatcher:
             str(pack.get("user_id", "")),
             str(pack.get("operator_id", "")),
             str(pack.get("target_id", "")),
+            str(pack.get("message_id", "")),
+            file_key,
             str(pack.get("self_id", "")),
             str(pack.get("time", "")),
         )

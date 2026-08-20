@@ -6,7 +6,8 @@ from typing import Any
 
 
 def _pack(action: str, params: dict[str, Any], echo: str | None = None) -> dict[str, Any]:
-    pack: dict[str, Any] = {"action": action, "params": params}
+    # 浅拷贝 params：调用方在异步等待回执期间改写原字典会污染已入队待发的包
+    pack: dict[str, Any] = {"action": action, "params": dict(params)}
     if echo is not None:
         pack["echo"] = echo
     return pack
@@ -137,8 +138,10 @@ def group_member_list(group_id: int, echo: str | None = None) -> dict[str, Any]:
 
 
 def group_member_info(
-    group_id: int, user_id: int, no_cache: bool = True, echo: str | None = None
+    group_id: int, user_id: int, no_cache: bool = False, echo: str | None = None
 ) -> dict[str, Any]:
+    # no_cache 默认 False：与 stranger_info / group_info 及 OneBot v11 规范对齐，
+    # 避免高频调用（如入群欢迎查名片）每次强制穿透协议端缓存
     return _pack(
         "get_group_member_info",
         {"group_id": group_id, "user_id": user_id, "no_cache": no_cache},

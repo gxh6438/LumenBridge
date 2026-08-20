@@ -72,8 +72,9 @@ class WhitelistModule:
         self.adapter = plugin.adapter
 
         # 双域存储：个人号域 whitelist.json / 官方域 whitelist_official.json
-        self.path = Path(plugin.data_folder) / "whitelist.json"
-        self.path_official = Path(plugin.data_folder) / "whitelist_official.json"
+        #（运行数据统一存放于 data/ 子目录，见迁移脚本 migrate_storage.py）
+        self.path = Path(plugin.data_folder) / "data" / "whitelist.json"
+        self.path_official = Path(plugin.data_folder) / "data" / "whitelist_official.json"
         self._data_lock = threading.RLock()
         self._pending_qq: set[str] = set()
         self._pending_xbox: set[str] = set()
@@ -109,7 +110,7 @@ class WhitelistModule:
             return []
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             self.logger.error(_t("whitelist.log.parse_error"))
             return []
         if not isinstance(data, list):

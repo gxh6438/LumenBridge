@@ -533,9 +533,66 @@ textarea.file-editor {
 .subplugin-card { padding: 13px 15px; border-radius: var(--radius-md); margin-bottom: 10px; }
 .sp-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .sp-head .name { font-size: 15px; font-weight: 700; }
-.sp-desc { color: var(--muted); font-size: 12.5px; margin-top: 5px; line-height: 1.5; }
+/* 描述固定两行截断（超出走浮层展开），保证所有子插件卡片高度一致 */
+.sp-desc-row { display: flex; align-items: flex-end; gap: 6px; margin-top: 5px; }
+.sp-desc {
+  color: var(--muted); font-size: 12.5px; line-height: 1.5; flex: 1; min-width: 0;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.sp-desc-expand {
+  display: none; width: 24px; height: 24px; flex: 0 0 24px; margin-bottom: 1px;
+  place-items: center; border: 1px solid var(--divider); border-radius: 8px;
+  background: var(--input-bg, transparent); cursor: pointer; color: var(--muted);
+  transition: color .15s, border-color .15s, background .15s;
+}
+.sp-desc-row.overflow .sp-desc-expand { display: grid; }
+.sp-desc-expand:hover { color: var(--accent); border-color: var(--accent); }
+.sp-desc-expand svg { width: 14px; height: 14px; }
+/* 描述展开浮层：fixed 定位 + 滑入动画，不撑大卡片本身 */
+.sp-desc-popover {
+  position: fixed; z-index: 400; max-width: 400px; max-height: 300px; overflow-y: auto;
+  background: var(--card-bg, #fff); border: 1px solid var(--divider);
+  border-radius: 12px; box-shadow: 0 12px 40px rgba(0, 0, 0, .22);
+  padding: 12px 14px; font-size: 12.5px; line-height: 1.65;
+  color: var(--text-secondary, var(--muted)); white-space: pre-wrap; word-break: break-word;
+  opacity: 0; visibility: hidden; transform: translateY(-6px) scale(.98);
+  transition: opacity .16s, transform .16s, visibility .16s;
+}
+.sp-desc-popover.show { opacity: 1; visibility: visible; transform: translateY(0) scale(1); }
 .sp-actions { display: flex; gap: 7px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
 .sp-actions .spacer { flex: 1; }
+/* 子插件卡片 ⋯ 更多按钮：与开关并排的次级操作入口 */
+.sp-more-btn {
+  width: 34px; height: 34px; flex: 0 0 34px; margin-top: 3px;
+  display: inline-grid; place-items: center;
+  border: 1px solid var(--divider); border-radius: 50%;
+  background: var(--input-bg, transparent); cursor: pointer;
+  color: var(--muted); transition: background .15s, color .15s, border-color .15s;
+}
+.sp-more-btn:hover { background: var(--accent-soft, rgba(10,132,255,.12)); color: var(--accent); border-color: var(--accent); }
+.sp-more-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.sp-more-btn svg { width: 17px; height: 17px; }
+/* ⋯ 浮层菜单：fixed 定位 + 最高层级，绝不被子插件卡片/毛玻璃遮挡 */
+.sp-more-menu {
+  position: fixed; z-index: 400; min-width: 178px;
+  background: var(--card-bg, #fff); border: 1px solid var(--divider);
+  border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.22);
+  padding: 5px; opacity: 0; visibility: hidden;
+  transform: translateY(-4px) scale(.98);
+  transition: opacity .14s, transform .14s, visibility .14s;
+}
+.sp-more-menu.show { opacity: 1; visibility: visible; transform: translateY(0) scale(1); }
+.sp-more-menu .menu-item {
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  padding: 8px 10px; border: none; border-radius: 8px;
+  background: none; cursor: pointer; font-size: 13px; color: var(--text);
+  text-align: left; transition: background .12s;
+}
+.sp-more-menu .menu-item:hover { background: var(--accent-soft, rgba(10,132,255,.1)); }
+.sp-more-menu .menu-item.danger { color: var(--red); }
+.sp-more-menu .menu-item.danger:hover { background: rgba(255,69,58,.1); }
+.sp-more-menu .menu-item svg { width: 15px; height: 15px; flex-shrink: 0; opacity: .75; }
+.sp-more-menu .menu-sep { height: 1px; background: var(--divider); margin: 4px 6px; }
 .custom-select { position: relative; flex-shrink: 0; }
 .custom-select-btn {
   display: flex; align-items: center; gap: 6px; padding: 7px 12px;
@@ -975,6 +1032,8 @@ textarea.file-editor {
 }
 
 .marketplace-search-card { z-index: 20; }
+/* 市场卡片 v2：图片保持原尺寸居左、标题/简介在右侧并排（移动端同样保持横排），
+   操作按钮并入标题行右侧，整体排版更紧凑 */
 .market-card {
   display: flex; align-items: stretch; gap: 12px;
   padding: 13px 14px;
@@ -998,10 +1057,12 @@ textarea.file-editor {
   width: 100%; height: 100%; object-fit: cover; display: block;
 }
 .market-card .market-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.market-card .market-title-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .market-card .market-name {
-  font-size: 14px; font-weight: 600;
+  font-size: 14px; font-weight: 600; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.market-card .market-title-row .market-name { flex: 1; }
 .market-card .market-name .market-id-chip {
   font-size: 10.5px; font-weight: 500; color: var(--muted);
   font-family: "SF Mono", Consolas, monospace; margin-left: 6px;
@@ -1016,7 +1077,8 @@ textarea.file-editor {
   overflow: hidden; line-height: 1.45;
 }
 .market-card .market-tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
-.market-card .market-stats { margin-top: auto; padding-top: 6px; color: var(--muted); font-size: 11.5px; display: flex; gap: 10px; flex-wrap: wrap; }
+.market-card .market-footer { margin-top: auto; padding-top: 6px; display: flex; align-items: center; gap: 10px; }
+.market-card .market-stats { color: var(--muted); font-size: 11.5px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; flex: 1; min-width: 0; }
 .market-card .market-stats .stat { display: inline-flex; align-items: center; gap: 3px; }
 /* 市场点赞按钮：爱心放大、可点击，已点赞高亮 */
 .market-like-btn.stat {
@@ -1032,10 +1094,9 @@ textarea.file-editor {
 .market-like-btn.stat.liked .like-count { color: var(--red); }
 .market-like-btn.stat:disabled { opacity: .55; cursor: wait; transform: none; }
 .market-card .market-actions {
-  display: flex; flex-direction: column; gap: 6px; flex: 0 0 auto;
-  justify-content: center; align-self: stretch;
+  display: flex; flex-direction: row; gap: 6px; flex: 0 0 auto;
+  align-items: center;
 }
-.market-card .market-title-row { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 
 /* 市场插件详情弹窗 */
 .market-detail-cover {
@@ -1068,6 +1129,92 @@ textarea.file-editor {
 .market-version-item .ver-changelog { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
 .market-version-item .ver-install { flex: 0 0 auto; }
 
+/* ---------------- 更新方式选择弹窗（市场更新 / 手动更新） ---------------- */
+.update-choice-option {
+  display: flex; align-items: center; gap: 13px; width: 100%;
+  padding: 14px 15px; margin-bottom: 10px;
+  border: 1px solid var(--divider); border-radius: 14px;
+  background: var(--input-bg, transparent); cursor: pointer;
+  text-align: left; transition: border-color .15s, background .15s, transform .12s;
+}
+.update-choice-option:hover { border-color: var(--accent); background: var(--accent-soft); transform: translateY(-1px); }
+.update-choice-icon {
+  width: 40px; height: 40px; flex: 0 0 40px; border-radius: 12px;
+  display: flex; align-items: center; justify-content: center; color: #fff;
+}
+.update-choice-icon.market { background: linear-gradient(135deg, #12b7f5, #0284c7); box-shadow: 0 6px 14px rgba(18,183,245,.32); }
+.update-choice-icon.manual { background: linear-gradient(135deg, #ff9f0a, #ff6b00); box-shadow: 0 6px 14px rgba(255,159,10,.3); }
+.update-choice-icon svg { width: 20px; height: 20px; }
+.update-choice-info { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.update-choice-name { font-weight: 650; font-size: 14.5px; }
+.update-choice-desc { font-size: 12px; color: var(--muted); line-height: 1.45; }
+
+/* ---------------- 已是最新版弹窗（成功态大图标 + 描边动画 + 光环） ---------------- */
+.latest-version-hero { text-align: center; padding: 18px 6px 6px; position: relative; }
+.latest-version-hero::before {
+  content: ""; position: absolute; inset: -26px -40px auto;
+  height: 190px; pointer-events: none; z-index: -1;
+  background: radial-gradient(closest-side, rgba(48, 209, 88, .16), transparent 72%);
+}
+.latest-version-icon {
+  position: relative; width: 86px; height: 86px; margin: 0 auto 18px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(circle at 32% 28%, rgba(48, 209, 88, .32), rgba(48, 209, 88, .1) 62%);
+  border: 1.5px solid rgba(48, 209, 88, .5);
+  box-shadow: 0 10px 28px rgba(48, 209, 88, .22), inset 0 1px 2px rgba(255, 255, 255, .22);
+  animation: latest-pop .5s cubic-bezier(.3, 1.4, .5, 1);
+}
+.latest-version-icon::after {
+  content: ""; position: absolute; inset: -9px; border-radius: 50%;
+  border: 1.5px solid rgba(48, 209, 88, .28);
+  animation: latest-ring 2.2s ease-out infinite;
+}
+.latest-version-icon svg {
+  width: 38px; height: 38px; color: var(--green);
+  stroke-dasharray: 30; stroke-dashoffset: 30;
+  animation: latest-check .45s .18s ease-out forwards;
+}
+@keyframes latest-pop { from { transform: scale(.4); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+@keyframes latest-check { to { stroke-dashoffset: 0; } }
+@keyframes latest-ring { 0% { transform: scale(.86); opacity: .8; } 70% { transform: scale(1.12); opacity: 0; } 100% { transform: scale(1.12); opacity: 0; } }
+.latest-version-title { font-size: 18px; font-weight: 700; margin: 0 0 8px; letter-spacing: .2px; }
+.latest-version-desc { font-size: 13px; color: var(--muted); line-height: 1.6; margin: 0 auto 6px; max-width: 330px; }
+.latest-version-desc .lv-name { font-weight: 650; color: var(--text-secondary, inherit); }
+.latest-version-chip {
+  display: inline-flex; align-items: center; gap: 7px; margin-top: 12px;
+  font-family: "SF Mono", Consolas, monospace; font-size: 12.5px; font-weight: 600;
+  padding: 5px 14px; border-radius: 999px; color: var(--green);
+  border: 1px solid rgba(48, 209, 88, .38);
+  background: linear-gradient(135deg, rgba(48, 209, 88, .16), rgba(48, 209, 88, .05));
+}
+.latest-version-chip::before {
+  content: ""; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--green); box-shadow: 0 0 6px rgba(48, 209, 88, .8);
+  animation: latest-blink 2s ease-in-out infinite;
+}
+@keyframes latest-blink { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+/* ---------------- 市场更新弹窗（版本选择 + 一键更新） ---------------- */
+.market-update-current { display: flex; align-items: center; gap: 7px; margin-top: 3px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+.market-update-current .tag { font-size: 10.5px; }
+.market-ver-item {
+  border: 1px solid var(--divider); border-radius: 10px; padding: 9px 11px;
+  font-size: 12.5px; display: flex; gap: 10px; align-items: flex-start;
+  cursor: pointer; transition: border-color .15s, background .15s;
+}
+.market-ver-item:hover { border-color: var(--accent); }
+.market-ver-item.selected { border-color: var(--accent); background: var(--accent-soft); }
+.market-ver-item .ver-radio {
+  width: 17px; height: 17px; flex: 0 0 17px; margin-top: 1px;
+  border: 1.5px solid var(--muted); border-radius: 50%;
+  display: inline-grid; place-items: center; transition: border-color .15s;
+}
+.market-ver-item.selected .ver-radio { border-color: var(--accent); }
+.market-ver-item.selected .ver-radio::after {
+  content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--accent);
+}
+.market-ver-item .ver-body { flex: 1; min-width: 0; }
+
   @media (max-width: 640px) {
     .pip-config-grid { grid-template-columns: 1fr; }
     .pip-packages-grid { grid-template-columns: 1fr; }
@@ -1091,10 +1238,11 @@ textarea.file-editor {
   #page-marketplace .hint { padding:0; }
   .sp-actions .spacer { display:none; }
   .sp-actions .switch { margin-left:auto; }
-  .market-card { flex-direction: column; align-items: stretch; }
-  .market-card .market-avatar { width: 64px; height: 64px; flex: 0 0 64px; border-radius: 12px; align-self: flex-start; min-height: 0; }
-  .market-card .market-actions { flex-direction: row; }
-  .market-card .market-actions .btn { flex: 1; }
+  /* 市场卡片移动端同样保持横排：图片左、文字右，按钮在右下角 */
+  .market-card .market-avatar { width: 64px; height: 64px; flex: 0 0 64px; min-height: 0; }
+  .market-card .market-footer { flex-wrap: wrap; }
+  .market-card .market-actions { flex: 0 0 auto; margin-left: auto; }
+  .market-card .market-actions .btn { padding: 5px 10px; font-size: 12px; }
   .market-detail-head { flex-direction: column; }
   .market-detail-cover { width: 64px; height: 64px; flex: 0 0 64px; border-radius: 14px; }
   table { min-width: 0; }
@@ -1872,6 +2020,65 @@ textarea.file-editor {
   </div>
 </div>
 
+<div class="modal-mask" id="update-choice-modal" data-closable="true" onclick="maskClick(event,'update-choice-modal')">
+  <div class="modal glass" style="max-width:420px">
+    <h3><span data-i18n="subplugins.update_choice_title">选择更新方式</span> <button class="close-x" onclick="closeModal('update-choice-modal')">✕</button></h3>
+    <div class="modal-body">
+      <div id="update-choice-plugin-name" style="margin-bottom:12px;font-weight:600"></div>
+      <button class="update-choice-option" id="update-choice-market-btn" onclick="updateChoiceMarket()">
+        <span class="update-choice-icon market">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+        </span>
+        <span class="update-choice-info">
+          <span class="update-choice-name" data-i18n="subplugins.update_choice_market">市场更新</span>
+          <span class="update-choice-desc" data-i18n="subplugins.update_choice_market_desc">检查插件市场版本，可一键更新到最新版或指定的历史版本</span>
+        </span>
+      </button>
+      <button class="update-choice-option" id="update-choice-manual-btn" onclick="updateChoiceManual()">
+        <span class="update-choice-icon manual">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        </span>
+        <span class="update-choice-info">
+          <span class="update-choice-name" data-i18n="subplugins.update_choice_manual">手动更新</span>
+          <span class="update-choice-desc" data-i18n="subplugins.update_choice_manual_desc">上传 .zip 更新包或填写下载链接，手动更新到指定版本</span>
+        </span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask" id="latest-version-modal" data-closable="true" onclick="maskClick(event,'latest-version-modal')">
+  <div class="modal glass" style="max-width:400px">
+    <div class="modal-body">
+      <div class="latest-version-hero">
+        <div class="latest-version-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <h3 class="latest-version-title" data-i18n="marketplace.already_latest_title">当前已是最新版</h3>
+        <p class="latest-version-desc" id="latest-version-desc"></p>
+        <div class="latest-version-chip" id="latest-version-chip"></div>
+      </div>
+    </div>
+    <div class="toolbar latest-version-toolbar">
+      <button class="btn small" onclick="closeModal('latest-version-modal')" data-i18n="marketplace.already_latest_ok">我知道了</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask" id="market-update-modal" data-closable="true" onclick="maskClick(event,'market-update-modal')">
+  <div class="modal glass" style="max-width:640px">
+    <h3><span data-i18n="marketplace.update_modal_title">市场更新</span> <button class="close-x" onclick="closeModal('market-update-modal')">✕</button></h3>
+    <div class="modal-body">
+      <div id="market-update-content"><div style="color:var(--muted);padding:12px 0" data-i18n="marketplace.update_checking">正在检查市场版本…</div></div>
+    </div>
+    <div class="toolbar" style="margin:20px 0 0;justify-content:flex-end;align-items:center;gap:10px">
+      <span style="flex:1"></span>
+      <button class="btn small ghost" onclick="closeModal('market-update-modal')" data-i18n="common.close">关闭</button>
+      <button class="btn small" id="market-update-apply-btn" disabled onclick="applyMarketUpdate()" data-i18n="marketplace.one_click_update">一键更新</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-mask" id="plugin-config-modal" data-closable="true" onclick="maskClick(event,'plugin-config-modal')">
   <div class="modal glass">
     <h3><span id="plugin-config-title">子插件配置</span> <button class="close-x" onclick="closeModal('plugin-config-modal')">✕</button></h3>
@@ -2055,6 +2262,10 @@ textarea.file-editor {
     </div>
   </div>
 </div>
+
+<!-- 子插件 ⋯ 更多操作浮层菜单：fixed 定位 + z-index:400，置于所有卡片/毛玻璃/弹窗之上 -->
+<div class="sp-more-menu" id="sp-more-menu" role="menu"></div>
+<div class="sp-desc-popover" id="sp-desc-popover" role="tooltip"></div>
 
 <button id="back-to-top" onclick="window.scrollTo({top:0,behavior:'smooth'})" title="回到顶部">
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>
