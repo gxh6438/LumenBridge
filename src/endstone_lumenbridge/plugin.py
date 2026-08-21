@@ -1,5 +1,6 @@
 """LumenBridge 插件主类：Endstone 群服互通框架。"""
 
+import logging
 import threading
 import time
 from pathlib import Path
@@ -66,7 +67,7 @@ class LumenBridgePlugin(Plugin):
     commands = {
         "lumen": {
             "description": "LumenBridge 群服互通管理命令",
-            "usages": ["/lumen (status|reload|say|plugins|pip)<action: LumenAction> [message: message]"],
+            "usages": ["/lumen (status|reload|say|plugins|pip|update)<action: LumenAction> [message: message]"],
             "permissions": ["lumenbridge.command.lumen"],
         },
     }
@@ -115,6 +116,20 @@ class LumenBridgePlugin(Plugin):
     def i18n(self):
         """全局 I18n 实例。"""
         return get_i18n()
+
+    def _cmd_log(self) -> Any:
+        """命令处理路径安全取日志器。
+
+        /lumen pip、/lumen update 的后台线程必须用 tee logger（replxx 线程
+        安全，见 logbuffer.py）；但命令处理可能运行在未完成初始化的实例上
+        （如 __new__ 构造的测试替身，缺 _tee_logger / logger 属性），
+        直接属性访问会 AttributeError。逐级回退到模块级 logger 兜底。
+        """
+        return (
+            getattr(self, "_tee_logger", None)
+            or getattr(self, "logger", None)
+            or logging.getLogger("LumenBridge")
+        )
 
     @property
     def language(self) -> str:
@@ -180,8 +195,8 @@ class LumenBridgePlugin(Plugin):
 
             self.bus = EventBus(self._tee_logger)
 
-            # 连接配置（v1.2.0）：适配器卡片独立存于 connections.json，
-            # 首次生成时自动迁移旧 config.json 的 connection/admin_qq/main_group/sync
+            # 适配器卡片独立存于 connections.json，首次生成时自动迁移
+            # 旧 config.json 的 connection/admin_qq/main_group/sync
             self.connections = ConnectionManager(
                 self.data_folder,
                 self._tee_logger,
@@ -223,13 +238,15 @@ class LumenBridgePlugin(Plugin):
                     daemon=True,
                 ).start()
 
-            if self.config_manager.data.get("webui", {}).get("enable", True):
+            webui_cfg = self.config_manager.data.get("webui", {})
+            if isinstance(webui_cfg, dict) and webui_cfg.get("enable", True):
                 self.webui = WebUIServer(self)
                 # webui 就绪后补注册子插件在 on_load 中暂存的 config/page/api
                 # （子插件加载早于 webui 创建，延迟注册解决加载顺序问题）
-                for sp in self.subplugin_manager.subplugins.values():
-                    if sp.loaded and sp.context:
-                        sp.context.web._flush_pending()
+                with self.subplugin_manager._lock:
+                    pending = [sp for sp in self.subplugin_manager.subplugins.values() if sp.loaded and sp.context]
+                for sp in pending:
+                    sp.context.web._flush_pending()
                 self.webui.start()
 
             self.hub.sync_from_manager()
@@ -284,14 +301,17 @@ class LumenBridgePlugin(Plugin):
             lambda: self.webui.stop() if self.webui else None,
             lambda: self.subplugin_manager.unload_all() if self.subplugin_manager else None,
             lambda: self.chat_sync_module.on_server_stop() if self.chat_sync_module else None,
-            lambda: (time.sleep(0.5), self.hub.stop_all()) if self.hub else None,
+            lambda: self.hub.stop_all() if self.hub else None,
             lambda: self.bus.remove_all() if self.bus else None,
         ):
             try:
                 cleanup()
             except Exception as e:
                 log.error(_t("plugin.stop_exception", error=e))
-        self._started = False
+        # 与 _on_bot_online 的 check-then-set 用同一把锁原子化：
+        # 防止停用期间 bot 上线把 _started 重新置 True、在拆卸后的模块上广播
+        with self._bot_profile_lock:
+            self._started = False
         # 组件引用清理：所有清理 lambda 执行完毕后再置空，尽早释放资源、
         # 避免停用后残留引用继续被误用（LoggerTee 无 stop 方法，仅做引用清理）
         self.webui = None
@@ -314,7 +334,8 @@ class LumenBridgePlugin(Plugin):
 
     def _check_market_updates_background(self) -> None:
         """低频市场更新检查：子插件只记录可用更新（安装需 WebUI 管理员确认）；
-        框架本体在 updates.auto_update 开启时自动暂存并热重载生效。
+        框架本体只通知新版本，绝不自动更新——热重载会重载服务器内全部插件，
+        必须由管理员经 /lumen update framework -y 或 WebUI 确认弹窗手动确认。
         """
         client = self.marketplace
         if client is None:
@@ -336,10 +357,14 @@ class LumenBridgePlugin(Plugin):
             if not info.get("available"):
                 return
             version = str((info.get("latest") or {}).get("version") or "?")
-            log.info(f"[Update] 发现 LumenBridge 新版本 v{version}，开始自动更新并热重载")
-            client.apply_framework_update()
+            log.info(
+                f"[Update] 发现 LumenBridge 新版本 v{version}（不会自动更新）。"
+                f"确认更新请执行 /lumen update framework，准备就绪后再执行 "
+                f"/lumen update framework -y；或在 WebUI 面板点击更新并确认。"
+                f"注意：更新会重载服务器内所有插件。"
+            )
         except Exception as exc:  # noqa: BLE001
-            log.warning(f"[Update] 框架自动更新失败: {exc}")
+            log.warning(f"[Update] 框架更新检查失败: {exc}")
 
     @staticmethod
     def _qq_avatar_url(qq: int) -> str:
@@ -449,7 +474,6 @@ class LumenBridgePlugin(Plugin):
                     if subplugin.context:
                         subplugin.context.QClient = self.hub
 
-        # v1.3.0 起机器人资料按适配器卡片（bot_qq 字段）维护
         self._rebuild_bot_profiles_baseline()
 
         summary = self._connection_mode_summary()
@@ -475,9 +499,12 @@ class LumenBridgePlugin(Plugin):
             self.webui = WebUIServer(self)
             # 补注册子插件在 on_load 中暂存的 config/page/api（与 on_enable 同序）
             if self.subplugin_manager is not None:
-                for sp in self.subplugin_manager.subplugins.values():
-                    if sp.loaded and sp.context:
-                        sp.context.web._flush_pending()
+                # 持锁快照：marketplace 安装/卸载线程（WebUI 线程）会并发增删该 dict，
+                # 裸迭代可能 RuntimeError: dictionary changed size during iteration
+                with self.subplugin_manager._lock:
+                    pending = [sp for sp in self.subplugin_manager.subplugins.values() if sp.loaded and sp.context]
+                for sp in pending:
+                    sp.context.web._flush_pending()
             self.webui.start()
             return
         # 曾被 disable 停掉的实例：refresh_config 只刷新参数不重启监听，
@@ -490,7 +517,11 @@ class LumenBridgePlugin(Plugin):
     def _on_bot_online(self, adapter: Any = None) -> None:
         # 此回调在 WS 线程触发，必须用线程安全的 tee logger
         name = str(getattr(adapter, "display_name", "") or "")
-        (self._tee_logger or self.logger).info(_t("plugin.bot_connected", name=name))
+        # 连接成功属运行提示类日志：来源适配器开启后台静默日志时不打印
+        # （防刷屏，READY/RESUMED 每次重连都会触发本回调）；
+        # WS/AstrBot 适配器无此开关，保持原样打印
+        if not getattr(adapter, "suppress_connection_log", False):
+            (self._tee_logger or self.logger).info(_t("plugin.bot_connected", name=name))
         if adapter is not None:
             adapter.get_login_info(
                 lambda data, a=adapter: self._update_bot_profile(a, data)
@@ -532,10 +563,49 @@ class LumenBridgePlugin(Plugin):
         """
         return threading.get_ident() == self._main_thread_id
 
+    def call_on_main(
+        self, func: Callable[[], Any], timeout: float = 5.0, default: Any = None
+    ) -> Any:
+        """把 func 调度到主线程执行并阻塞等待返回值（同步主线程桥）。
+
+        - 已在主线程：直接同步执行（调度会自死锁）；
+        - 后台线程：调度后阻塞等待，超时/异常返回 default；
+        - 超时后排队中的任务不再执行（cancelled 标志，同 runcmdEx），
+          避免「调用方已按失败处理、副作用却延迟发生」的不一致。
+
+        供子插件在 OneBot/WebUI 线程安全触碰 Endstone API（玩家、
+        记分板、其他插件实例等），如统一经济服务的余额读写。
+        """
+        if self.is_on_main_thread():
+            try:
+                return func()
+            except Exception:
+                return default
+        box: list[Any] = [default]
+        done = threading.Event()
+        cancelled = threading.Event()
+
+        def _run() -> None:
+            if cancelled.is_set():
+                done.set()
+                return
+            try:
+                box[0] = func()
+            except Exception:
+                box[0] = default
+            finally:
+                done.set()
+
+        self.server.scheduler.run_task(self, _run, delay=0)
+        if not done.wait(timeout):
+            cancelled.set()
+            return default
+        return box[0]
+
     def group_allowed(self, pack: dict[str, Any]) -> bool:
         """来源群是否允许处理：属于任一启用适配器的群列表。
 
-        未填写任何群 openid / 群 QQ 号时，默认对所有群生效（v1.3.x 规则）：
+        未填写任何群 openid / 群 QQ 号时，默认对所有群生效：
         - 所有适配器均未配置群列表 → 放行任意来源群；
         - 来源适配器自身未配置群列表 → 放行其任意来源群
           （AstrBot 群号在其插件端配置、QQ 官方 openid 可后置抄录均依赖此行为）；
@@ -550,14 +620,23 @@ class LumenBridgePlugin(Plugin):
         if connections is None:
             # 连接管理器未就绪（加载中/已卸载）时不处理任何群消息
             return False
-        configured = connections.all_group_keys()
+        # group_key_set 为缓存的 frozenset（热路径 O(1)）；getattr 兼容
+        # 仅实现 all_group_keys 的测试桩/旧实现
+        key_set = getattr(connections, "group_key_set", None)
+        configured = key_set() if callable(key_set) else frozenset(connections.all_group_keys())
         if not configured:
             # 没有任何适配器填写群号 → 默认所有群生效
             return True
         if key in configured:
             return True
         adapter_id = str(pack.get("_lumen_adapter_id", "") or "")
-        cfg = connections.get(adapter_id) if adapter_id else None
+        # get_view 免深拷贝：该回退路径在未配置群的消息上每条触发一次；
+        # 同样以 getattr 兼容只有 get() 的桩
+        if adapter_id:
+            view = getattr(connections, "get_view", None)
+            cfg = view(adapter_id) if callable(view) else connections.get(adapter_id)
+        else:
+            cfg = None
         if cfg is not None and cfg.get("enabled"):
             groups = connections.parse_groups_loose(cfg.get("main_group"))
             return key in groups or not groups
@@ -678,7 +757,7 @@ class LumenBridgePlugin(Plugin):
 
         action = args[0].lower() if args else "status"
 
-        known_actions = {"status", "reload", "say", "plugins", "pip"}
+        known_actions = {"status", "reload", "say", "plugins", "pip", "update"}
         if action not in known_actions:
             sender.send_message(f"{ColorFormat.RED}{_t('plugin.command.unknown_action', action=action)}{ColorFormat.RESET}")
             return True
@@ -695,6 +774,9 @@ class LumenBridgePlugin(Plugin):
 
         if action == "pip":
             return self._handle_pip_command(sender, args[1:] if len(args) > 1 else [])
+
+        if action == "update":
+            return self._handle_update_command(sender, args[1:] if len(args) > 1 else [])
 
         if action == "status":
             adapter_lines: list[str] = []
@@ -713,13 +795,13 @@ class LumenBridgePlugin(Plugin):
                     )
             rules = len(self.regex_module.rules) if self.regex_module else 0
             bindings = len(self.whitelist_module.snapshot()) if self.whitelist_module else 0
-            sub_count = (
-                sum(1 for sp in self.subplugin_manager.subplugins.values() if sp.loaded)
-                if self.subplugin_manager else 0
-            )
-            sub_total = (
-                len(self.subplugin_manager.subplugins) if self.subplugin_manager else 0
-            )
+            if self.subplugin_manager:
+                # 持锁快照：WebUI 安装/卸载线程会并发增删 subplugins dict
+                with self.subplugin_manager._lock:
+                    sub_count = sum(1 for sp in self.subplugin_manager.subplugins.values() if sp.loaded)
+                    sub_total = len(self.subplugin_manager.subplugins)
+            else:
+                sub_count = sub_total = 0
             webui_state = (
                 f"{ColorFormat.GREEN}{self.webui.url}" if self.webui and self.webui.is_running
                 else f"{ColorFormat.RED}{_t('plugin.command.state_disabled')}"
@@ -738,11 +820,9 @@ class LumenBridgePlugin(Plugin):
             try:
                 self.config_manager.load()
                 self._init_i18n()
-                # 连接配置同样热重载：手动编辑 connections.json 后 /lumen reload
-                # 也能生效（与 WebUI 保存行为一致，旧实现仅按内存旧配置重建）
+                # 连接配置同样热重载：手动编辑 connections.json 后 /lumen reload 也能生效
                 self.reload_onebot_connection()
-                # WebUI 配置热重载：host/port/password/secret/enable 变化
-                # 立即生效（旧实现只在启动时读一次，reload 对其完全无效）
+                # WebUI 配置热重载：host/port/password/secret/enable 变化立即生效
                 self._reload_webui()
                 # 失效 pip manager 缓存使新 pip 配置生效；加锁避免与 _get_pip_manager 双检锁并发竞态
                 with self._pip_manager_lock:
@@ -812,7 +892,7 @@ class LumenBridgePlugin(Plugin):
             return cached
         if not self.config_manager:
             return None
-        log = self._tee_logger or self.logger
+        log = self._cmd_log()
         with self._pip_manager_lock:
             cached = getattr(self, "_pip_manager", None)
             if cached is not None:
@@ -855,6 +935,10 @@ class LumenBridgePlugin(Plugin):
             sender.send_message(f"{ColorFormat.GOLD}{_t('pip.cmd_installing', packages=' '.join(packages))}{ColorFormat.RESET}")
 
             # 异步执行安装避免阻塞命令调用线程；结果通过 run_on_main 回传主线程
+            # 后台线程必须用 tee logger：Endstone 原始 logger 经 replxx 写控制台，
+            # 非主线程调用会与控制台输入线程竞争导致服务端崩溃（见 logbuffer.py）
+            _log = self._cmd_log()
+
             def _async_install() -> None:
                 log_lines: list[str] = []
                 try:
@@ -862,29 +946,34 @@ class LumenBridgePlugin(Plugin):
                     with self._pip_serial_lock:
                         success, msg = mgr.install(packages, on_log=lambda line: log_lines.append(line))
                 except Exception as e:  # noqa: BLE001
-                    self.logger.exception("pip install thread error")
+                    _log.exception("pip install thread error")
                     success, msg = False, str(e)
 
                 def _send_result() -> None:
-                    for line in log_lines:
-                        sender.send_message(line)
-                    color = ColorFormat.GREEN if success else ColorFormat.RED
-                    sender.send_message(f"{color}{msg}{ColorFormat.RESET}")
-                    # 子插件依赖安装成功则自动 reload；reload_one 调用 Endstone API 必须在主线程执行
-                    if success and self.subplugin_manager and target:
-                        with self.subplugin_manager._lock:
-                            sp_exists = target in self.subplugin_manager.subplugins
-                        if sp_exists:
-                            ok = self.subplugin_manager.reload_one(target)
-                            reload_msg = _t("pip.cmd_reload_success" if ok else "pip.cmd_reload_failed", name=target)
-                            rcolor = ColorFormat.GREEN if ok else ColorFormat.RED
-                            sender.send_message(f"{rcolor}{reload_msg}{ColorFormat.RESET}")
+                    try:
+                        for line in log_lines:
+                            sender.send_message(line)
+                        color = ColorFormat.GREEN if success else ColorFormat.RED
+                        sender.send_message(f"{color}{msg}{ColorFormat.RESET}")
+                        # 子插件依赖安装成功则自动 reload；reload_one 调用 Endstone API 必须在主线程执行
+                        if success and self.subplugin_manager and target:
+                            with self.subplugin_manager._lock:
+                                sp_exists = target in self.subplugin_manager.subplugins
+                            if sp_exists:
+                                ok = self.subplugin_manager.reload_one(target)
+                                reload_msg = _t("pip.cmd_reload_success" if ok else "pip.cmd_reload_failed", name=target)
+                                rcolor = ColorFormat.GREEN if ok else ColorFormat.RED
+                                sender.send_message(f"{rcolor}{reload_msg}{ColorFormat.RESET}")
+                    except Exception:  # noqa: BLE001
+                        # run_on_main 只调度不执行：_send_result 内部异常须自捕获，
+                        # 否则直接抛进主线程任务上下文
+                        _log.exception("pip install result send failed")
 
                 try:
                     self.run_on_main(_send_result)
                 except Exception:  # noqa: BLE001
                     # 插件已停用、调度器不可用时线程不得静默死亡，留日志供排查
-                    self.logger.exception("pip install result dispatch failed")
+                    _log.exception("pip install result dispatch failed")
 
             threading.Thread(target=_async_install, name="LumenBridge-pip-install", daemon=True).start()
             return True
@@ -897,40 +986,239 @@ class LumenBridgePlugin(Plugin):
 
             # 卸载同步执行会阻塞命令调用线程，与 install 分支一致改为后台
             # daemon 线程执行，结果经 run_on_main 回发主线程
+            _log = self._cmd_log()
+
             def _async_uninstall() -> None:
                 try:
                     # 持 _pip_serial_lock：与 install 路径互斥，避免并发卸载/安装损坏环境
                     with self._pip_serial_lock:
                         success, msg = mgr.uninstall(package)
                 except Exception as e:  # noqa: BLE001
-                    self.logger.exception("pip uninstall thread error")
+                    _log.exception("pip uninstall thread error")
                     success, msg = False, str(e)
 
                 def _send_result() -> None:
-                    color = ColorFormat.GREEN if success else ColorFormat.RED
-                    sender.send_message(f"{color}{msg}{ColorFormat.RESET}")
+                    try:
+                        color = ColorFormat.GREEN if success else ColorFormat.RED
+                        sender.send_message(f"{color}{msg}{ColorFormat.RESET}")
+                    except Exception:  # noqa: BLE001
+                        _log.exception("pip uninstall result send failed")
 
                 try:
                     self.run_on_main(_send_result)
                 except Exception:  # noqa: BLE001
-                    self.logger.exception("pip uninstall result dispatch failed")
+                    _log.exception("pip uninstall result dispatch failed")
 
             threading.Thread(target=_async_uninstall, name="LumenBridge-pip-uninstall", daemon=True).start()
             return True
 
         if sub == "list":
-            pkgs = mgr.list_packages()
-            if not pkgs:
-                sender.send_message(f"{ColorFormat.YELLOW}{_t('pip.cmd_list_empty')}{ColorFormat.RESET}")
-                return True
-            sender.send_message(f"{ColorFormat.GOLD}{_t('pip.cmd_list_title', count=len(pkgs))}{ColorFormat.RESET}")
-            lines = [f"{p.get('name', '?')}=={p.get('version', '?')}" for p in pkgs[:50]]
-            sender.send_message("\n".join(lines))
-            if len(pkgs) > 50:
-                sender.send_message(f"{ColorFormat.YELLOW}{_t('pip.cmd_list_truncated', total=len(pkgs))}{ColorFormat.RESET}")
+            # pip list 是同步子进程调用（冷启动 1-3s、timeout 30s），
+            # 与 install/uninstall 一致移入后台线程避免阻塞命令调用线程
+            _log = self._cmd_log()
+
+            def _async_list() -> None:
+                try:
+                    pkgs = mgr.list_packages()
+                except Exception as e:  # noqa: BLE001
+                    _log.exception("pip list thread error")
+                    pkgs = []
+
+                def _send_result() -> None:
+                    try:
+                        if not pkgs:
+                            sender.send_message(f"{ColorFormat.YELLOW}{_t('pip.cmd_list_empty')}{ColorFormat.RESET}")
+                            return
+                        sender.send_message(f"{ColorFormat.GOLD}{_t('pip.cmd_list_title', count=len(pkgs))}{ColorFormat.RESET}")
+                        lines = [f"{p.get('name', '?')}=={p.get('version', '?')}" for p in pkgs[:50]]
+                        sender.send_message("\n".join(lines))
+                        if len(pkgs) > 50:
+                            sender.send_message(f"{ColorFormat.YELLOW}{_t('pip.cmd_list_truncated', total=len(pkgs))}{ColorFormat.RESET}")
+                    except Exception:  # noqa: BLE001
+                        _log.exception("pip list result send failed")
+
+                try:
+                    self.run_on_main(_send_result)
+                except Exception:  # noqa: BLE001
+                    _log.exception("pip list result dispatch failed")
+
+            threading.Thread(target=_async_list, name="LumenBridge-pip-list", daemon=True).start()
             return True
 
         sender.send_message(f"{ColorFormat.RED}{_t('pip.cmd_unknown_sub')}{ColorFormat.RESET}")
+        return True
+
+    def _handle_update_command(self, sender: CommandSender, args: list[str]) -> bool:
+        """处理 /lumen update <子插件名 | -A|--all> 子命令。
+
+        下载安装会阻塞数秒至数分钟，与 pip 命令一致在后台 daemon 线程执行，
+        结果经 run_on_main 回发主线程（send_message 线程安全性同 pip 分支）。
+        """
+        tokens = [tok for arg in args for tok in str(arg).split()]
+        if not tokens:
+            sender.send_message(f"{ColorFormat.RED}{_t('plugin.command.update_usage')}{ColorFormat.RESET}")
+            return True
+
+        # /lumen update framework [-y]：框架本体更新（手动确认，热重载重载全服插件）
+        if tokens[0] in ("framework", "框架"):
+            return self._handle_framework_update_command(sender, tokens[1:])
+
+        update_all = tokens[0] in ("-A", "--all")
+        target = "" if update_all else tokens[0]
+
+        client = self.marketplace
+        if client is None or not client.enabled:
+            sender.send_message(f"{ColorFormat.RED}{_t('plugin.command.update_market_disabled')}{ColorFormat.RESET}")
+            return True
+
+        if not update_all:
+            if self.subplugin_manager is None:
+                sender.send_message(f"{ColorFormat.RED}{_t('plugin.command.update_manager_unavailable')}{ColorFormat.RESET}")
+                return True
+            with self.subplugin_manager._lock:
+                sp = self.subplugin_manager.subplugins.get(target)
+                origin = sp.manifest.get("_market", {}) if sp else None
+            if sp is None:
+                sender.send_message(f"{ColorFormat.RED}{_t('plugin.command.update_unknown_plugin', name=target)}{ColorFormat.RESET}")
+                return True
+            if not isinstance(origin, dict) or origin.get("source") != "marketplace":
+                sender.send_message(f"{ColorFormat.RED}{_t('plugin.command.update_not_market', name=target)}{ColorFormat.RESET}")
+                return True
+
+        sender.send_message(
+            f"{ColorFormat.GOLD}{_t('plugin.command.update_starting_all' if update_all else 'plugin.command.update_starting', name=target)}{ColorFormat.RESET}"
+        )
+
+        # 后台线程必须用 tee logger（replxx 线程安全，见 logbuffer.py）
+        _thread_log = self._cmd_log()
+
+        def _dispatch(color: str, text: str) -> None:
+            try:
+                sender.send_message(f"{color}{text}{ColorFormat.RESET}")
+            except Exception:  # noqa: BLE001
+                _thread_log.exception("update command result dispatch failed")
+
+        def _run() -> None:
+            def _log(msg: str) -> None:
+                # 市场日志同步抄一份到控制台，方便无 WebUI 时排查
+                _thread_log.info(f"[Market] {msg}")
+
+            try:
+                if update_all:
+                    result = client.update_all(log=_log)
+                    total = int(result.get("total") or 0)
+                    if not total:
+                        self.run_on_main(lambda: _dispatch(ColorFormat.YELLOW, _t("plugin.command.update_none_available")))
+                        return
+                    ok = len(result.get("updated") or [])
+                    fail = len(result.get("failed") or [])
+                    lines = [
+                        _t("plugin.command.update_success", name=str(i.get("name") or "?"), version=str(i.get("to_version") or "?"))
+                        for i in result.get("updated") or []
+                    ] + [
+                        _t("plugin.command.update_failed", name=str(i.get("name") or "?"), error=str(i.get("error") or "?"))
+                        for i in result.get("failed") or []
+                    ]
+                    summary_color = ColorFormat.GREEN if not fail else ColorFormat.YELLOW
+                    summary = _t("plugin.command.update_all_result", ok=ok, fail=fail)
+
+                    def _send_batch(summary_color: str = summary_color, summary: str = summary, lines: list[str] = lines) -> None:
+                        _dispatch(summary_color, summary)
+                        if lines:
+                            _dispatch(ColorFormat.RESET, "\n".join(lines))
+
+                    self.run_on_main(_send_batch)
+                else:
+                    result = client.update(target, "", update_dependencies=True, log=_log)
+                    version = str(result.get("version") or "?")
+                    self.run_on_main(
+                        lambda: _dispatch(ColorFormat.GREEN, _t("plugin.command.update_success", name=target, version=version))
+                    )
+            except Exception as e:  # noqa: BLE001
+                _thread_log.exception("lumen update thread error")
+                error = str(e)
+                self.run_on_main(lambda: _dispatch(ColorFormat.RED, _t("plugin.command.update_failed", name=target or "-A", error=error)))
+
+        threading.Thread(target=_run, name="LumenBridge-subplugin-update", daemon=True).start()
+        return True
+
+    def _handle_framework_update_command(self, sender: CommandSender, args: list[str]) -> bool:
+        """处理 /lumen update framework [-y]：框架本体更新（手动确认模式）。
+
+        两步确认流程：
+        - 无 -y：检查新版本并下载校验暂存（不更新），就绪后提示管理员
+          用 -y 确认——因为热重载走 Server.reload()，会重载服务器内全部插件；
+        - 带 -y：执行暂存（幂等，已暂存则跳过下载）并调度热重载。
+        """
+        client = self.marketplace
+        if client is None or not client.enabled:
+            sender.send_message(f"{ColorFormat.RED}{_t('plugin.command.update_market_disabled')}{ColorFormat.RESET}")
+            return True
+
+        confirm = any(tok in ("-y", "--yes") for tok in args)
+        _thread_log = self._cmd_log()
+
+        def _dispatch(color: str, text: str) -> None:
+            try:
+                sender.send_message(f"{color}{text}{ColorFormat.RESET}")
+            except Exception:  # noqa: BLE001
+                _thread_log.exception("framework update command result dispatch failed")
+
+        if confirm:
+            sender.send_message(f"{ColorFormat.GOLD}{_t('plugin.command.framework_confirm_start')}{ColorFormat.RESET}")
+
+            def _run_apply() -> None:
+                try:
+                    result = client.apply_framework_update(
+                        log=lambda msg: _thread_log.info(f"[Update] {msg}")
+                    )
+                    version = str(result.get("to_version") or "?")
+                    self.run_on_main(
+                        lambda: _dispatch(
+                            ColorFormat.GREEN,
+                            _t("plugin.command.framework_reload_scheduled", version=version),
+                        )
+                    )
+                except Exception as e:  # noqa: BLE001
+                    _thread_log.exception("framework apply thread error")
+                    error = str(e)
+                    self.run_on_main(
+                        lambda: _dispatch(ColorFormat.RED, _t("plugin.command.framework_apply_failed", error=error))
+                    )
+
+            threading.Thread(target=_run_apply, name="LumenBridge-framework-update", daemon=True).start()
+            return True
+
+        sender.send_message(f"{ColorFormat.GOLD}{_t('plugin.command.framework_checking')}{ColorFormat.RESET}")
+
+        def _run_stage() -> None:
+            try:
+                info = client.framework_update_info()
+                if not info.get("available"):
+                    current = str(info.get("current_version") or "?")
+                    self.run_on_main(
+                        lambda: _dispatch(ColorFormat.GREEN, _t("plugin.command.framework_latest", version=current))
+                    )
+                    return
+                version = str((info.get("latest") or {}).get("version") or "?")
+                self.run_on_main(
+                    lambda: _dispatch(
+                        ColorFormat.GOLD,
+                        _t("plugin.command.framework_staging", version=version),
+                    )
+                )
+                client.stage_framework_update(log=lambda msg: _thread_log.info(f"[Update] {msg}"))
+                self.run_on_main(
+                    lambda: _dispatch(ColorFormat.GOLD, _t("plugin.command.framework_ready", version=version))
+                )
+            except Exception as e:  # noqa: BLE001
+                _thread_log.exception("framework stage thread error")
+                error = str(e)
+                self.run_on_main(
+                    lambda: _dispatch(ColorFormat.RED, _t("plugin.command.framework_stage_failed", error=error))
+                )
+
+        threading.Thread(target=_run_stage, name="LumenBridge-framework-stage", daemon=True).start()
         return True
 
 

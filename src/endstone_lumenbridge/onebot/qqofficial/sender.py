@@ -1,17 +1,11 @@
 """QQ 官方机器人消息发送器。
 
-职责单一：消费发送队列，按凭据优先级（被动 msg_id → 入群 event_id →
-主动）组装请求体，经重试矩阵发送。含：
-
-- 富媒体上传（/v2/{groups|users}/{target}/files，url 或本地 base64）；
-- 错误码驱动的重试矩阵（借鉴 Gensokyo）：超时/网络错误按间隔重试并递增
-  msg_seq 规避官方 (msg_id, msg_seq) 去重；event_id 无效（40034025）
-  清除后立即重发；主动消息被拒（22009）不入重试，交补发栈；
-- 主动补发栈 flush（Gensokyo AtoP）：被动回复成功后借凭据池剩余额度
-  补发该目标被拒的主动消息。
-
-依赖以 adapter 引用注入（logger / credentials / _api_request / _loop /
-_running），避免循环导入。
+消费发送队列，按凭据优先级（被动 msg_id → 入群 event_id → 主动）组装
+请求体发送。富媒体经 /v2/{groups|users}/{target}/files 上传（url 或本地
+base64）；错误码驱动重试（借鉴 Gensokyo）：超时/网络错误按间隔重试并
+递增 msg_seq 规避官方 (msg_id, msg_seq) 去重，event_id 无效（40034025）
+清除后立即重发，主动消息被拒（22009）不入重试交补发栈，被动回复成功后
+借剩余额度补发（Gensokyo AtoP）。依赖以 adapter 引用注入，避免循环导入。
 """
 
 from __future__ import annotations
@@ -25,6 +19,7 @@ from .constants import (
     ACTIVE_STACK_FLUSH,
     BIZ_ACTIVE_REJECTED,
     BIZ_EVENT_ID_INVALID,
+    BIZ_MSG_ID_EXPIRED,
     MEDIA_FILE_TYPE,
 )
 from .utils import (
@@ -42,11 +37,10 @@ def _payload_body(content: str, file_info: str) -> dict[str, Any]:
     """按内容选择官方消息载体。
 
     - 富媒体：msg_type=7，content 作配文；
-    - 含出站 @ 标记（extract_payload 已统一归一为官方文本链
-      <qqbot-at-user id="openid" />）：切换 markdown 载体（msg_type=2）——
+    - 含出站 @ 标记（extract_payload 已归一为官方文本链
+      <qqbot-at-user id="openid" />）：切换 markdown 载体（msg_type=2），
       Gensokyo-ForSpark 实测该组合可渲染真实 @（纯文本 + 文本链、
-      markdown + <at id=""> 均实测显示原文）。其余文本同步做 markdown
-      转义，防止 * # < 等被客户端误解析成格式；
+      markdown + <at id=""> 均显示原文）；其余文本同步转义防误解析；
     - 其余：纯文本 msg_type=0。
     """
     if file_info:
@@ -106,26 +100,28 @@ class MessageSender:
     ) -> str:
         """发送单条消息，含错误码驱动的重试矩阵（借鉴 Gensokyo）。
 
-        返回值：
-        - "ok"：发送成功；
-        - "rejected"：主动消息被拒（code 22009），调用方可入补发栈；
-        - "failed"：重试耗尽或其他错误。
-
-        策略：超时/网络错误按间隔重试（文本 1s / 富媒体 3s，重试时递增
-        msg_seq 规避官方 (msg_id, msg_seq) 去重）；event_id 无效（40034025）
-        清除后立即重发一次；markdown 载体被拒（机器人未开通原生 markdown
-        能力）时降级为纯文本 + 官方文本链 @ 格式重发一次。参数经
-        ad._retry_params() 运行时读取，支持测试 monkeypatch 主模块常量。
+        返回 "ok" / "rejected"（主动被拒 22009，可入补发栈）/ "failed"。
+        超时/网络错误按间隔重试（文本 1s / 富媒体 3s，递增 msg_seq 规避
+        官方 (msg_id, msg_seq) 去重）；event_id 无效（40034025）清除后立即
+        重发一次；markdown 载体被拒（未开通能力）时降级纯文本重发一次。
+        参数经 ad._retry_params() 运行时读取，支持测试 monkeypatch。
         """
         path = (
             f"/v2/groups/{target}/messages" if kind == "group" else f"/v2/users/{target}/messages"
         )
         retry_max, delay_text, delay_media = self.ad._retry_params()
         event_id_retried = False
+        msg_id_retried = False
         md_fallback_retried = False
         for attempt in range(1, retry_max + 1):
             try:
                 data = await self.ad._api_request("POST", path, body)
+                # 重试期间 body 内 msg_seq 已递增：把最终消耗的序号回写
+                # 凭据池，否则池下次发出的 seq 与官方已消费的重复而被去重
+                if "msg_id" in body and "msg_seq" in body:
+                    self.ad.credentials.sync_passive_seq(
+                        target, str(body["msg_id"]), int(body["msg_seq"])
+                    )
                 # 记录发送回执 id（撤回自己发的消息需按 id 反查，2 分钟时限内有效）
                 sent_id = str((data or {}).get("id") or "")
                 if sent_id:
@@ -152,8 +148,19 @@ class MessageSender:
                     body["msg_type"] = 0
                     continue
                 if biz == BIZ_EVENT_ID_INVALID and "event_id" in body and not event_id_retried:
+                    # 官方判定该 event_id 无效：从存储移除，否则窗口内后续
+                    # 每条消息都先白白消耗一轮重试再降级主动通道（连锁丢失）
+                    self.ad.credentials.purge_event_id(target)
                     body.pop("event_id", None)
                     event_id_retried = True
+                    continue
+                if biz == BIZ_MSG_ID_EXPIRED and "msg_id" in body and not msg_id_retried:
+                    # msg_id 已被官方判定过期：清掉凭据字段并从池中移除，
+                    # 改走主动通道重发一次（沿用旧凭据只会整轮重试失败）
+                    self.ad.credentials.purge_passive(target, str(body.get("msg_id") or ""))
+                    body.pop("msg_id", None)
+                    body.pop("msg_seq", None)
+                    msg_id_retried = True
                     continue
                 if attempt < retry_max and not self.ad.suppress_connection_log:
                     self.ad.logger.warning(
@@ -197,8 +204,8 @@ class MessageSender:
                 return
             passive = self.ad.credentials.take_passive(target)
             if passive is None:
-                # 凭据耗尽：条目回栈首，留待下次机会
-                self.ad.credentials.push_active(item)
+                # 凭据耗尽：条目回栈首（unshift 保序），留待下次机会
+                self.ad.credentials.unshift_active(item)
                 return
             kind, tgt, content, media = item
             try:
@@ -220,6 +227,10 @@ class MessageSender:
                     if not self.ad.suppress_connection_log:
                         self.ad.logger.info(_t("qqofficial.active_flushed", target=target))
                 else:
+                    if result == "rejected" and "msg_id" not in body:
+                        # msg_id 过期降级后被拒：条目已出栈，回栈首等待下次
+                        # 机会，否则该条消息静默丢失
+                        self.ad.credentials.unshift_active(item)
                     self.ad.logger.warning(
                         _t("qqofficial.active_flush_failed", target=target, error=result)
                     )
@@ -266,16 +277,18 @@ class MessageSender:
                         body["event_id"] = event_id
                         self.ad.logger.debug(_t("qqofficial.event_id_reply", target=target))
                     else:
-                        # 群聊主动消息几乎必被官方拒绝（22009），回复会"消失"——
-                        # 此前无任何日志，用户表现为"命令生效但群里无返回"。
-                        # 属高频运行提示：静默模式（默认）下不打印，排障时可关闭开关查看
+                        # 群聊主动消息几乎必被官方拒绝（22009），回复会"消失"
+                        #（用户表现为"命令生效但群里无返回"）；静默模式下
+                        # 不打印，排障时可关闭开关查看
                         if not self.ad.suppress_connection_log:
                             self.ad.logger.warning(
                                 _t("qqofficial.send_no_credential", target=target, head=content[:40])
                             )
                 result = await self.post_message(kind, str(target), body, media is not None)
                 if result == "rejected":
-                    if passive is None:
+                    # msg_id 过期降级主动通道被拒（凭据已在 post_message 内
+                    # 被清除，body 不再含 msg_id）同样入栈，否则消息被静默丢弃
+                    if passive is None or "msg_id" not in body:
                         # 主动消息被拒（22009）：入栈等下次被动回复时借道补发。
                         # 入栈提示属运行提示类日志：静默模式下不打印
                         self.ad.credentials.push_active((kind, str(target), content, media))
@@ -311,8 +324,8 @@ class MessageSender:
         target = _normalize_target(target)
         content, media = extract_payload(message)
         if not content and media is None:
-            # 空载荷丢弃要有迹可循：此前 base64 图片未被解析时在此被
-            # 无声丢弃（用户侧表现为"无响应、无报错"），此处必须留痕
+            # 空载荷丢弃必须留痕：base64 图片未被解析时被无声丢弃，
+            # 用户侧表现为"无响应、无报错"
             self.ad.logger.warning(
                 _t("qqofficial.send_dropped_empty", target=target)
             )

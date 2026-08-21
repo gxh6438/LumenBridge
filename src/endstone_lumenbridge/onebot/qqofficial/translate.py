@@ -1,15 +1,9 @@
 """QQ 官方事件 → OneBot v11 事件包翻译。
 
-职责单一：接收网关 DISPATCH（op=0）载荷，翻译为 OneBot v11 事件包并经
-``bus.emit("onebot.pack", ...)`` 派发。翻译规则：
-
-- 官方事件有 OneBot 对应语义 → 标准事件（message / group_increase / ...）；
-- 无对应语义 → 扩展 notice 转发（notice_type=官方事件名小写，raw=原始载荷），
-  仅官方适配器会产生，个人号适配器永不触发同名事件，子插件按需订阅；
-- 频道事件经 domain="guild" 标记，与 QQ 群（official / qq）域隔离。
-
-依赖以 adapter 引用注入（logger / bus / app_id / adapter_id / credentials /
-_api_request），避免循环导入。
+接收网关 DISPATCH（op=0）载荷翻译为 OneBot v11 事件包派发：有对应语义的
+映射标准事件；无对应语义的以官方事件名小写作扩展 notice 转发（raw=原始
+载荷，仅官方适配器产生）；频道事件经 domain="guild" 与 QQ 群域隔离。
+依赖以 adapter 引用注入，避免循环导入。
 """
 
 from __future__ import annotations
@@ -20,6 +14,7 @@ from typing import Any
 from ...i18n import t as _t
 from .constants import (
     CT_MEDIA_API,
+    CT_SEGMENT_EXACT,
     CT_SEGMENT_PREFIX,
     OFFICIAL_RAW_EVENTS,
     PASSIVE_MAX_SEQ_C2C,
@@ -47,7 +42,9 @@ class EventTranslator:
             self.ad.on_ready(data)
             return
         if event == "RESUMED":
-            self.ad.logger.info(_t("qqofficial.resumed"))
+            # 会话恢复属运行提示类日志：静默模式下不打印（防刷屏）
+            if not self.ad.suppress_connection_log:
+                self.ad.logger.info(_t("qqofficial.resumed"))
             self.ad.bus.emit("bot.online", self.ad)
             return
         if event in ("GROUP_MESSAGE_CREATE", "GROUP_AT_MESSAGE_CREATE"):
@@ -71,8 +68,8 @@ class EventTranslator:
             return
         if event in ("GROUP_MSG_REJECT", "GROUP_MSG_RECEIVE"):
             # 群管理员在机器人群资料页 关闭/开启「接收机器人主动消息」：
-            # 关闭后机器人无法在该群主动发言（被动回复不受影响）。
-            # intent 1<<25 已订阅必然收到，此前静默丢弃会让"机器人不说话"无从排查
+            # 关闭后无法在该群主动发言（被动回复不受影响），静默丢弃
+            # 会让"机器人不说话"无从排查
             self._emit_group_msg_switch(data, rejected=event == "GROUP_MSG_REJECT")
             return
         if event in ("C2C_MSG_REJECT", "C2C_MSG_RECEIVE"):
@@ -117,9 +114,7 @@ class EventTranslator:
             self._emit_official_raw(event, data)
             return
         if event in OFFICIAL_RAW_EVENTS:
-            # OneBot v11 无对应语义的官方事件：以官方事件名（小写）作为 notice_type
-            # 原样转发，附 raw 原始载荷。仅官方适配器会产生这些事件（个人号适配器
-            # 永远不会触发同名事件），子插件按需订阅，不识别者安全忽略。
+            # 无 OneBot 对应语义：官方事件名小写作 notice_type 原样转发
             self._emit_official_raw(event, data)
             return
         # 兜底：官方新增/未枚举事件同样转发，保证子插件永远能收到全量事件
@@ -138,11 +133,7 @@ class EventTranslator:
         return pack
 
     def _notice_pack(self, notice_type: str, sub_type: str, data: dict[str, Any]) -> None:
-        """机器人自身入群通用 notice 包。
-
-        OneBot v11 语义：user_id=事件主体，operator_id=操作者。
-        仅用于机器人自身入群：加入者是机器人（app_id），操作者是 op_member_openid。
-        """
+        """机器人自身入群通用 notice 包：user_id=机器人（app_id），operator_id=op_member_openid。"""
         pack = self._base_pack(
             post_type="notice",
             notice_type=notice_type,
@@ -151,7 +142,7 @@ class EventTranslator:
             user_id=self.ad.app_id,  # 加入者是机器人自身
             operator_id=str(data.get("op_member_openid") or ""),
         )
-        self.ad.bus.emit("onebot.pack", pack)
+        self.ad._emit_pack(pack)
 
     # ------------------------------------------------------------ notice 翻译
     def _emit_robot_added(self, data: dict[str, Any]) -> None:
@@ -182,16 +173,14 @@ class EventTranslator:
             user_id=self.ad.app_id,  # 被移出的是机器人自身
             operator_id=str(data.get("op_member_openid") or ""),
         )
-        self.ad.bus.emit("onebot.pack", pack)
+        self.ad._emit_pack(pack)
 
     def _emit_group_msg_switch(self, data: dict[str, Any], rejected: bool) -> None:
         """群管理员 关闭/开启 机器人主动消息（GROUP_MSG_REJECT / GROUP_MSG_RECEIVE）。
 
-        事件字段：timestamp / group_openid / op_member_openid（操作人）。
-        OneBot v11 标准中没有对应事件（group_ban 是"禁言"，语义不符，
-        强行映射会让下游把"关闭主动消息"误判为"机器人被禁言"），
-        故用自定义扩展 notice_type="group_msg_switch"（sub_type=reject/receive），
-        与 C2C 的 friend_msg_switch 成对；不识别该类型的插件会安全忽略。
+        OneBot v11 无对应事件（group_ban 是"禁言"，语义不符），故用自定义
+        notice_type="group_msg_switch"（sub_type=reject/receive），与 C2C 的
+        friend_msg_switch 成对；不识别该类型的插件会安全忽略。
         """
         group_openid = str(data.get("group_openid") or "")
         if not group_openid:
@@ -212,14 +201,13 @@ class EventTranslator:
             user_id=self.ad.app_id,  # 被操作者是机器人自身
             operator_id=str(data.get("op_member_openid") or ""),
         )
-        self.ad.bus.emit("onebot.pack", pack)
+        self.ad._emit_pack(pack)
 
     def _emit_c2c_msg_switch(self, data: dict[str, Any], rejected: bool) -> None:
         """用户 关闭/开启 机器人主动消息推送（C2C_MSG_REJECT / C2C_MSG_RECEIVE）。
 
-        事件字段：timestamp / openid（操作用户）。OneBot v11 无对应标准通知，
-        使用自定义 notice_type="friend_msg_switch"（sub_type=reject/receive），
-        子插件可经 notice.friend_msg_switch 订阅；主要价值在日志可排查。
+        OneBot v11 无对应标准通知，使用自定义 notice_type="friend_msg_switch"
+        （sub_type=reject/receive）；主要价值在日志可排查。
         """
         openid = str(data.get("openid") or "")
         if not openid:
@@ -239,7 +227,7 @@ class EventTranslator:
             user_id=openid,
             operator_id=openid,
         )
-        self.ad.bus.emit("onebot.pack", pack)
+        self.ad._emit_pack(pack)
 
     def _emit_official_raw(self, event: str, data: dict[str, Any], unknown: bool = False) -> None:
         """OneBot v11 无对应语义的官方事件 → 扩展 notice 转发。
@@ -278,7 +266,7 @@ class EventTranslator:
         )
         if group_key:
             pack["group_id"] = group_key
-        self.ad.bus.emit("onebot.pack", pack)
+        self.ad._emit_pack(pack)
 
     # ------------------------------------------------------------ 消息翻译
     async def _fetch_media_url(self, scope: str, owner: str, msg_id: str, seg_type: str) -> str:
@@ -318,6 +306,10 @@ class EventTranslator:
             seg_type = next(
                 (seg for prefix, seg in CT_SEGMENT_PREFIX if content_type.startswith(prefix)), ""
             )
+            if not seg_type:
+                # 官方语音附件 content_type 为 "voice"（无斜杠前缀）：
+                # 只做前缀匹配会把它当未知类型静默丢弃
+                seg_type = CT_SEGMENT_EXACT.get(content_type, "")
             if not seg_type:
                 continue
             url = str(att.get("url") or "").strip()
@@ -362,10 +354,10 @@ class EventTranslator:
             anonymous=None,  # OneBot v11 标准字段：官方消息无匿名概念，恒为 null
             message=message,
             raw_message=content,
-            font=0,  # 标准字段：官方事件不提供字体信息
+            font=0,
             sender={"user_id": member_openid, "nickname": nickname, "card": ""},
         )
-        self.ad.bus.emit("onebot.pack", pack)
+        self.ad._emit_pack(pack)
 
     async def _emit_c2c_message(self, data: dict[str, Any]) -> None:
         msg_id = str(data.get("id") or "")
@@ -395,16 +387,15 @@ class EventTranslator:
             font=0,  # OneBot v11 标准字段：官方事件不提供字体信息
             sender={"user_id": user_openid, "nickname": nickname, "card": ""},
         )
-        self.ad.bus.emit("onebot.pack", pack)
+        self.ad._emit_pack(pack)
 
     # ------------------------------------------------------------ 频道事件
     async def _emit_guild_message(self, data: dict[str, Any]) -> None:
         """频道消息（AT_MESSAGE_CREATE 1<<30 / 私域 MESSAGE_CREATE 1<<9）→ OneBot 群消息。
 
-        官方文档确认两者载荷结构相同（私域为全量消息，无需@）。
-        频道为 guild/channel 两级结构，OneBot 单级群模型取 channel_id 作为
-        group_id、guild_id 附在扩展字段；domain="guild" 标记频道域，
-        下游（chat_sync 等）按群列表匹配自然隔离，不会混入 QQ 群互通。
+        两者载荷结构相同（官方文档确认，私域为全量消息无需@）。频道两级
+        结构取 channel_id 作 group_id；domain="guild" 标记频道域，下游按
+        群列表匹配自然隔离，不会混入 QQ 群互通。
         """
         msg_id = str(data.get("id") or "")
         channel_id = str(data.get("channel_id") or "")
@@ -431,7 +422,7 @@ class EventTranslator:
             domain="guild",  # 频道域：区别于 QQ 群（official/qq）
             guild_id=str(data.get("guild_id") or ""),
         )
-        self.ad.bus.emit("onebot.pack", pack)
+        self.ad._emit_pack(pack)
 
     async def _emit_guild_direct_message(self, data: dict[str, Any]) -> None:
         """频道私信（DIRECT_MESSAGE_CREATE，1<<12）→ OneBot 私聊消息。"""
@@ -458,7 +449,7 @@ class EventTranslator:
             guild_id=str(data.get("guild_id") or ""),
             src_guild_id=str(data.get("src_guild_id") or ""),
         )
-        self.ad.bus.emit("onebot.pack", pack)
+        self.ad._emit_pack(pack)
 
     def _emit_guild_recall(self, data: dict[str, Any], friend: bool) -> None:
         """频道消息撤回（PUBLIC_MESSAGE_DELETE / MESSAGE_DELETE / DIRECT_MESSAGE_DELETE）。
@@ -494,13 +485,12 @@ class EventTranslator:
         else:
             pack["operator_id"] = op_id  # OneBot 语义：撤回操作者
             pack["group_id"] = str(data.get("channel_id") or message.get("channel_id") or "")
-        self.ad.bus.emit("onebot.pack", pack)
+        self.ad._emit_pack(pack)
 
     def _emit_group_member_event(self, data: dict[str, Any], joined: bool) -> None:
-        """QQ 群成员进退群（GROUP_MEMBER_ADD / GROUP_MEMBER_REMOVE）。
+        """QQ 群成员进退群（GROUP_MEMBER_ADD / GROUP_MEMBER_REMOVE，属 1<<25）。
 
-        官方文档确认属 GROUP_AND_C2C_EVENT（1<<25），默认订阅即可收到。
-        OneBot v11 语义：group_increase（approve）/ group_decrease（leave），
+        OneBot v11 语义 group_increase（approve）/ group_decrease（leave），
         user_id=进/退群成员，operator_id 官方未提供时留空，raw 保留原文。
         """
         group_openid = str(data.get("group_openid") or "")
@@ -518,7 +508,7 @@ class EventTranslator:
             operator_id=str(data.get("op_member_openid") or ""),
             raw=data,
         )
-        self.ad.bus.emit("onebot.pack", pack)
+        self.ad._emit_pack(pack)
 
     def _emit_group_join_request(self, data: dict[str, Any]) -> None:
         """用户申请加群（GROUP_JOIN_REQUEST）→ OneBot v11 request.group.add。
@@ -558,7 +548,7 @@ class EventTranslator:
             flag=flag,
             raw=data,
         )
-        self.ad.bus.emit("onebot.pack", pack)
+        self.ad._emit_pack(pack)
 
     def _emit_guild_member_change(self, data: dict[str, Any], joined: bool) -> None:
         """频道成员进退（GUILD_MEMBER_ADD / GUILD_MEMBER_REMOVE，1<<1 特权）。
@@ -582,7 +572,7 @@ class EventTranslator:
             domain="guild",
             raw=data,
         )
-        self.ad.bus.emit("onebot.pack", pack)
+        self.ad._emit_pack(pack)
 
     def _emit_friend_change(self, data: dict[str, Any], notice_type: str) -> None:
         """C2C 好友添加 / 删除（openid 维度）。"""
@@ -594,4 +584,4 @@ class EventTranslator:
             notice_type=notice_type,
             user_id=openid,
         )
-        self.ad.bus.emit("onebot.pack", pack)
+        self.ad._emit_pack(pack)

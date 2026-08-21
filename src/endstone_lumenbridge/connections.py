@@ -1,7 +1,6 @@
-"""连接配置管理：适配器卡片（WebSocket / AstrBot）列表，存放在插件数据目录的 connections.json。
+"""连接配置管理：适配器卡片列表的加载、校验与持久化（存储布局见 ConnectionManager）。
 
-从 v1.2.0 起，连接配置与群服互通配置从 config.json 剥离到本文件；每个适配器
-拥有独立的身份（机器人 QQ / 管理员 / 主群）与群服互通设置。
+每个适配器拥有独立的身份（机器人 QQ / 管理员 / 主群）与群服互通设置。
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ ADAPTER_TYPES = ("websocket", "astrbot", "qqofficial")
 
 
 def _default_sync() -> dict[str, Any]:
-    """单个适配器的群服互通默认配置（与 v1.1.x config.sync 字段一致）。"""
+    """单个适配器的群服互通默认配置。"""
     return {
         "chat_to_server_enable": True,
         "chat_to_group_enable": True,
@@ -157,7 +156,7 @@ def _validate_adapter(adapter: dict[str, Any]) -> None:
     if type(_get("sandbox", False)) is not bool:
         raise ConnectionValidationError("adapter.sandbox 必须是布尔值")
 
-    # qqofficial 专属字段：连接间隔（毫秒），0 表示按指数退避自动重连
+    # qqofficial 专属字段：连接间隔（毫秒）
     interval = _get("connect_interval", 60000)
     if isinstance(interval, bool) or not isinstance(interval, (int, float)) \
             or not 0 <= float(interval) <= 86400000:
@@ -277,15 +276,14 @@ ADAPTER_FILES: dict[str, str] = {
     "qqofficial": "qqofficial.json",
     "astrbot": "astrbot.json",
 }
-# WebSocket 专属连接字段：仅 websocket / astrbot 卡片持有；qqofficial 卡片
-# 不含（官方机器人走网关鉴权），加载归一化时剔除存量卡片里的残留键
+# WebSocket 专属连接字段：qqofficial 卡片不含，加载归一化时剔除存量残留键
 _WS_ONLY_FIELDS = ("ws_type", "target", "listen_host", "listen_port", "access_token")
 
 
 class ConnectionManager:
     """适配器连接配置加载器：connections/ 目录分类型持久化 + 旧版配置迁移。
 
-    存储布局（v1.1.0 起）::
+    存储布局::
 
         plugins/lumenbridge/
         ├── config.json              # 主配置
@@ -310,7 +308,19 @@ class ConnectionManager:
         # 当前是否处于“旧单文件回退”模式（写盘时据此改名旧文件）
         self._legacy_layout = False
         self._lock = threading.RLock()
+        # 群/管理员标识并集缓存（frozenset，成员判定 O(1)）：
+        # group_allowed / admin 判定在每条消息热路径上调用，
+        # 不缓存则每条消息都要持锁遍历全部适配器并重复解析 CSV。
+        # CRUD（load/create/update/delete）时失效；读取端的竞态
+        # 最坏情况只是多算一次，结果仍正确。
+        self._group_keys_cache: frozenset[str] | None = None
+        self._admin_keys_cache: frozenset[str] | None = None
         self.load(legacy=legacy)
+
+    def _invalidate_key_caches(self) -> None:
+        """适配器列表变化后失效群/管理员并集缓存。"""
+        self._group_keys_cache = None
+        self._admin_keys_cache = None
 
     # ------------------------------------------------------------------ load
     def _read_items(self, fpath: Path) -> list[Any]:
@@ -398,6 +408,7 @@ class ConnectionManager:
                         self._backup_file(source)
                 adapters = normalized or copy.deepcopy(DEFAULT_ADAPTERS)
             self.adapters = adapters
+            self._invalidate_key_caches()
             # 内容有变化才落盘：/lumen reload 等高频路径不再产生无谓写盘；
             # 旧单文件模式内容必然变化（剔除 ws 字段等归一化），借此自动切换新结构
             if fresh or original_adapters != self.adapters:
@@ -523,6 +534,19 @@ class ConnectionManager:
                     return copy.deepcopy(adapter)
         return None
 
+    def get_view(self, adapter_id: str) -> dict[str, Any] | None:
+        """按 id 返回适配器内部字典的只读引用（不拷贝）。
+
+        供消息热路径读取 sync 配置 / 群列表等：update()/create() 均以
+        整字典替换而非原地修改，持有旧引用的读取方只会看到一致的
+        旧快照，不会读到半更新状态。需要修改必须走 update()。
+        """
+        with self._lock:
+            for adapter in self.adapters:
+                if adapter.get("id") == adapter_id:
+                    return adapter
+        return None
+
     def create(self, patch: dict[str, Any]) -> dict[str, Any]:
         """新建适配器；patch 至少包含 type，其余字段取默认值。"""
         if not isinstance(patch, dict):
@@ -534,7 +558,6 @@ class ConnectionManager:
         # 「添加适配器」创建的卡片默认启用：开关默认打开，未配置完成前
         # hub 因 is_configured() 不通过不会实际建连（初始默认卡片不受影响）
         created["enabled"] = True
-        # 默认命名：同类型已有 N 个则追加序号
         with self._lock:
             same = [a for a in self.adapters if a.get("type") == adapter_type]
             base_name = {"websocket": "WebSocket", "astrbot": "AstrBot",
@@ -542,7 +565,6 @@ class ConnectionManager:
             default_name = base_name if not same else f"{base_name} {len(same) + 1}"
         created["name"] = default_name
         patch = {k: v for k, v in patch.items() if k not in ("id",)}
-        # WebUI 未配置密钥时（******）不覆盖
         patch = self._unmask_patch(patch, created)
         created = _merge_adapter(created, patch)
         _validate_adapter(created)
@@ -550,6 +572,7 @@ class ConnectionManager:
             self._ensure_unique_name(created, exclude=None)
             self._ensure_unique_listen_port(created, exclude=None)
             self.adapters.append(created)
+            self._invalidate_key_caches()
             self._write_locked()
             return copy.deepcopy(created)
 
@@ -575,6 +598,7 @@ class ConnectionManager:
             self._ensure_unique_name(merged, exclude=adapter_id)
             self._ensure_unique_listen_port(merged, exclude=adapter_id)
             self.adapters[current_index] = merged
+            self._invalidate_key_caches()
             self._write_locked()
             return copy.deepcopy(merged)
 
@@ -585,6 +609,7 @@ class ConnectionManager:
                     if len(self.adapters) <= 1:
                         raise ConnectionValidationError(_t("connections.keep_one"))
                     self.adapters.remove(adapter)
+                    self._invalidate_key_caches()
                     self._write_locked()
                     return True
         return False
@@ -715,12 +740,39 @@ class ConnectionManager:
 
     def all_group_keys(self) -> list[str]:
         """所有适配器群标识的宽松并集（含 QQ 官方的 group_openid 字符串）。"""
-        seen: dict[str, None] = {}
+        return list(self.group_key_set())
+
+    def group_key_set(self) -> frozenset[str]:
+        """all_group_keys 的集合视图（缓存）：消息热路径 O(1) 成员判定用。"""
+        cached = self._group_keys_cache
+        if cached is not None:
+            return cached
         with self._lock:
+            # 锁内双检 + 锁内写缓存：与 CRUD 的失效（同锁）串行化，
+            # 消除"计算完成后、写缓存前被并发 update 失效"的陈旧缓存窗口
+            if self._group_keys_cache is not None:
+                return self._group_keys_cache
+            keys: set[str] = set()
             for adapter in self.adapters:
-                for key in self.parse_groups_loose(adapter.get("main_group")):
-                    seen.setdefault(key, None)
-        return list(seen.keys())
+                keys.update(self.parse_groups_loose(adapter.get("main_group")))
+            frozen = frozenset(keys)
+            self._group_keys_cache = frozen
+            return frozen
+
+    def admin_key_set(self) -> frozenset[str]:
+        """all_admin_keys 的集合视图（缓存）：管理员判定 O(1) 成员判定用。"""
+        cached = self._admin_keys_cache
+        if cached is not None:
+            return cached
+        with self._lock:
+            if self._admin_keys_cache is not None:
+                return self._admin_keys_cache
+            keys: set[str] = set()
+            for adapter in self.adapters:
+                keys.update(self.parse_groups_loose(adapter.get("admin_qq")))
+            frozen = frozenset(keys)
+            self._admin_keys_cache = frozen
+            return frozen
 
     def all_admins(self) -> list[int]:
         """所有 WebSocket 适配器管理员的并集。"""

@@ -64,10 +64,9 @@ def write_command_palette(palette: dict[str, dict[str, Any]]) -> None:
 def default_usage(name: str) -> str:
     """命令的默认 usage：/{name} [args: message]。
 
-    Endstone 在启动时按 usage 语法构建命令树，参数必须是 <x>/[x]/(a|b) 形式；
-    此前默认 "/{name} ..." 中的字面 "..." 会导致
-    "Syntax Error: expect '(', '<' or '['" 且命令注册失败。
-    [args: message] 为官方贪心字符串参数，可接住任意子命令与参数。
+    Endstone 在启动时按 usage 语法构建命令树，参数必须是 <x>/[x]/(a|b) 形式，
+    字面 "..." 会触发 "Syntax Error" 导致命令注册失败；[args: message] 为
+    官方贪心字符串参数，可接住任意子命令与参数。
     """
     return f"/{name} [args: message]"
 
@@ -102,7 +101,6 @@ def add_command_palette_entry(
     permissions: list[str] | None = None,
 ) -> None:
     """向启动面板登记一个子插件命令（下次服务器启动时并入类级 commands）。"""
-    # 低危项：整个读-改-写过程持锁，防并发注册互相覆盖
     with _PALETTE_LOCK:
         palette = read_command_palette()
         entry: dict[str, Any] = {
@@ -171,7 +169,7 @@ class EnvPool:
     def set_current_group(self, gid: int, source: Any = None) -> None:
         """事件分发前设置当前来源群号（线程本地），仅主群才设置以兼容旧插件过滤。
 
-        v1.2.0：来源适配器自身的群列表同样视为"主群"；AstrBot 适配器（群号在其
+        来源适配器自身的群列表同样视为"主群"；AstrBot 适配器（群号在其
         插件端配置）未配置群列表时接受任意来源群。
         """
         # config_manager 在 reload 过程中可能为 None
@@ -196,7 +194,6 @@ class EnvPool:
     def get(self, key: str, default: Any = None) -> Any:
         with self._lock:
             if key == "main_group":
-                # 事件回调中返回当前来源群，否则返回配置首个主群
                 gid = getattr(self._ctx, "group", None)
                 if gid is not None:
                     return gid
@@ -269,8 +266,7 @@ class Storage:
                     return json.loads(path.read_text(encoding="utf-8"))
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     # 文件损坏（非法 JSON 或非 UTF-8 字节）：备份原文件再写默认值，
-                    # 避免直接覆盖用户数据；UnicodeDecodeError 继承自 ValueError
-                    # 而非 OSError，旧实现不捕获会直接抛给子插件
+                    # 避免直接覆盖用户数据；UnicodeDecodeError 不继承 OSError 需单独捕获
                     import time as _time
                     backup = path.with_suffix(path.suffix + f".corrupt-{int(_time.time())}")
                     try:
@@ -315,9 +311,7 @@ class MCBridge:
 
     def __init__(self, plugin: "LumenBridgePlugin") -> None:
         self._plugin = plugin
-        # M32：原生 listener 改为 per-event 单例——同事件只 register_events 一次，
-        # 具体回调挂到可变分发表；_cleanup 清空分发表（listener 留存但变 no-op），
-        # 避免每次热重载都新增一批无法注销的原生监听器
+        # M32：原生 listener 为 per-event 单例，回调挂可变分发表（详见 _listen_endstone）
         self._endstone_dispatch: dict[str, list[Callable[..., Any]]] = {}
         # 已注册的原生 listener 登记表：(event_name, listener)
         self._endstone_listeners: list[tuple[str, Any]] = []
@@ -360,7 +354,6 @@ class MCBridge:
                 def _handler(listener_self: Any, event: Any) -> None:  # noqa: ANN401
                     if not getattr(listener_self, "_lumen_active", True):
                         return
-                    # 从可变分发表 dispatch：_cleanup 清空分发表即"移除"全部回调
                     for cb in list(dispatch_table.get(event_name, ())):
                         cb(event)
 
@@ -371,7 +364,6 @@ class MCBridge:
                 listener._lumen_active = True  # type: ignore[attr-defined]
                 self._plugin.register_events(listener)
                 self._endstone_listeners.append((event_name, listener))
-            # 同事件重复 listen：只追加回调到分发表，不再新建 listener
             dispatch.append(callback)
             return True
         except Exception:
@@ -380,14 +372,19 @@ class MCBridge:
     def runcmd(self, cmd: str) -> bool:
         """在游戏主线程执行命令，返回 dispatch_command 的真实结果。
 
-        低危项：此前恒返回 True，子插件无法感知命令是否真的执行成功；现等待
-        主线程 dispatch 完成后取真实 bool（最多等 5 秒，超时/异常返回 False）。
-        勿在游戏主线程调用（等待主线程排队任务会死锁，同 runcmdEx）。
+        等待主线程 dispatch 完成后取真实 bool（最多等 5 秒，超时/异常返回
+        False）。勿在游戏主线程调用（等待主线程排队任务会死锁，同 runcmdEx）。
         """
         done = threading.Event()
+        cancelled = threading.Event()
         box: list[bool] = [False]
 
         def run() -> None:
+            # 超时后调用方已返回 False；排队中的任务不再执行，避免
+            # 超时后命令仍延迟生效（调用方重试即重复执行），同 runcmdEx
+            if cancelled.is_set():
+                done.set()
+                return
             try:
                 box[0] = bool(
                     self._plugin.server.dispatch_command(
@@ -400,7 +397,9 @@ class MCBridge:
                 done.set()
 
         self._plugin.run_on_main(run)
-        done.wait(timeout=5.0)
+        if not done.wait(timeout=5.0):
+            cancelled.set()
+            return False
         return box[0]
 
     def runcmdEx(self, cmd: str, timeout: float = 5.0) -> dict[str, Any]:
@@ -439,7 +438,6 @@ class MCBridge:
 
         self._plugin.run_on_main(run)
         if not done.wait(timeout=timeout):
-            # 超时：置取消标志，令仍在主线程队列中的任务直接跳过
             cancelled.set()
         output = re.sub(r"§.", "", "\n".join(outputs), flags=re.DOTALL).strip()
         return {"success": bool(result.get("success")), "output": output}
@@ -473,7 +471,6 @@ class MCBridge:
         try:
             self._plugin.run_on_main(_fetch)
             if not done.wait(timeout=2.0):
-                # 超时：置取消标志，令仍在主线程队列中的任务直接跳过
                 cancelled.set()
                 return []
         except Exception:
@@ -519,7 +516,6 @@ class WebBridge:
             self._pending_configs.clear()
             self._pending_pages.clear()
             self._pending_apis.clear()
-        # 写 plugins_config_schema 时加 ext_lock，与 server.py 注册路径保持一致
         ext_lock = getattr(webui, "_ext_lock", None)
         for name, schema in configs:
             if ext_lock is not None:
@@ -549,7 +545,6 @@ class WebBridge:
 
         return ConfigFormBuilder(target_name, _defer_register)
 
-    # snake_case 别名
     create_config = createConfig
 
     def registerApi(self, method: str, path: str, handler: Any, need_auth: bool = True) -> None:
@@ -722,7 +717,6 @@ def plugin_register_command_compat(
     if ctx is not None:
         ok = ctx.register_command(name, handler, description, aliases, usages)
         if ok:
-            # 全局列表记录归属本 context 的命令，卸载时随 _cleanup 移除
             plugin.__dict__.setdefault("_lumen_plugin_commands", []).append(str(name).strip().lower())
         return ok
     logger = getattr(plugin, "_tee_logger", None) or plugin.logger
@@ -915,7 +909,6 @@ class LumenContext:
         regex_module = getattr(self._plugin, "regex_module", None)
         if regex_module:
             regex_module.register_action(action_type, handler)
-            # 记录已注册的动作，供 _cleanup 注销，避免热重载后旧 action 残留
             self._regex_actions.append(action_type)
 
     def register_command(
@@ -950,13 +943,22 @@ class LumenContext:
         if ok:
             cmd_name = str(name).strip().lower()
             self._commands.append(cmd_name)
-            # H15：按 owner 记录到 context 自身，_cleanup 时从全局
-            # _lumen_plugin_commands 移除属于本上下文的条目
             self._registered_commands.append(cmd_name)
         return ok
 
     def run_on_main(self, func: Callable[[], None], delay: int = 1) -> None:
         self._plugin.run_on_main(func, delay)
+
+    def call_on_main(
+        self, func: Callable[[], Any], timeout: float = 5.0, default: Any = None
+    ) -> Any:
+        """把 func 调度到主线程执行并阻塞等待返回值（同步主线程桥）。
+
+        主线程内调用直接同步执行；后台线程调用则调度并等待，超时或
+        异常返回 default（超时后排队任务不再执行，防延迟副作用）。
+        子插件在 OneBot/WebUI 线程触碰 Endstone API 前用它桥接。
+        """
+        return self._plugin.call_on_main(func, timeout=timeout, default=default)
 
     def _cleanup(self) -> None:
         """卸载子插件时移除其注册的全部事件监听器"""
@@ -975,7 +977,6 @@ class LumenContext:
             for action_type in regex_actions:
                 custom_actions.pop(action_type, None)
         regex_actions.clear()
-        # mc.listen 经内部总线注册的回调同样注销，防止热重载后重复触发
         bus_handlers = getattr(self.mc, "_bus_handlers", None)
         if bus_handlers is not None:
             for event, handler in list(bus_handlers):
@@ -984,9 +985,6 @@ class LumenContext:
                 except Exception:
                     pass
             bus_handlers.clear()
-        # Endstone 未暴露 unregister_events，通过置 _lumen_active=False 软注销，
-        # 避免热重载后子插件回调被重复触发
-        # （防御部分初始化的实例：_commands 可能尚未创建）
         commands = getattr(self, "_commands", None)
         if commands:
             registry = self._plugin.__dict__.get("_lumen_sub_commands", {})
@@ -997,7 +995,6 @@ class LumenContext:
             # 卸载子插件不注销命令本身，仅解除 handler 绑定（on_command 找不到
             # 绑定即返回 False），重启后命令可被再次绑定
         # H15：从全局 _lumen_plugin_commands 移除属于本 context 的命令登记
-        # （防御部分初始化的实例：_registered_commands 可能尚未创建）
         registered_commands = getattr(self, "_registered_commands", None)
         if registered_commands:
             plugin_commands = self._plugin.__dict__.get("_lumen_plugin_commands")
@@ -1008,8 +1005,6 @@ class LumenContext:
                     except ValueError:
                         pass  # 非 compat 路径注册的名字不在全局列表，忽略
             registered_commands.clear()
-        # H14：取消本上下文经 lumen.scheduler 注册的全部定时任务，
-        # 避免热重载后旧 context 的周期任务残留重复执行
         scheduled = getattr(self, "_scheduled_tasks", None)
         if scheduled:
             try:
@@ -1038,7 +1033,6 @@ class LumenContext:
                 except Exception:
                     pass
             endstone_listeners.clear()
-        # H16：撤销本子插件注册的 WebUI API / 自定义页面 / 配置表单
         try:
             self.web._revoke_registrations()
         except Exception:

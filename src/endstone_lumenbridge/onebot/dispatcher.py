@@ -1,6 +1,6 @@
 """OneBot 事件分发器：按 ``post_type`` 分层派发细粒度事件，并为消息事件注入 reply 快捷回复。
 
-v1.2.0 起支持多适配器：事件包携带来源适配器实例，回复经来源适配器发出；
+支持多适配器：事件包携带来源适配器实例，回复经来源适配器发出；
 群号过滤 / 上下文注入也按来源适配器的群列表判定。
 """
 
@@ -15,8 +15,7 @@ from .message import decode_cq_entities, format_message, reply as reply_segment
 
 ReplyFunc = Callable[..., None]
 
-# 事件去抖：同一 notice/request 事件（如入群、退群、撤回）经多条适配器链路
-# 或协议端重发/重连回放重复到达时，仅在窗口内处理第一次
+# 事件去抖窗口：同一 notice/request 事件重复到达时仅处理第一次
 _DEDUP_WINDOW = 5.0
 _DEDUP_MAX = 1024
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import threading
 import time
 from collections import OrderedDict
@@ -81,8 +82,7 @@ DEFAULT_RULES: list[dict[str, Any]] = [
         "eventType": "group.member_join",
         "conditions": [],
         "actions": [
-            # replyAtText：先真实 @ 进群成员再发文本（官方域渲染 <@openid>，
-            # 个人号域发原生 at 消息段）
+            # replyAtText：先真实 @ 进群成员再发文本
             {"type": "replyAtText", "params": " 欢迎新成员！发送 绑定白名单<你的游戏ID> 即可进服游玩"},
         ],
         "block": False,
@@ -140,6 +140,10 @@ class RegexEngineModule:
         self.path = Path(plugin.data_folder) / "data" / "rules.json"
         self.rules: list[dict[str, Any]] = self._load_rules()
         self.custom_actions: dict[str, Callable[..., Any]] = {}
+        # 已编译 pattern 缓存：key = flags + pattern；非法 / 高风险 pattern
+        # 缓存为 None（负缓存）。玩家聊天事件在主线程匹配，逐条重复编译 +
+        # ReDoS 风险扫描会直接消耗 TPS；规则仅在 load/reload/save 时变化。
+        self._pattern_cache: dict[str, "re.Pattern[str] | None"] = {}
 
         self._action_dedup: OrderedDict[tuple[str, ...], float] = OrderedDict()
         self._action_dedup_lock = threading.Lock()
@@ -209,12 +213,23 @@ class RegexEngineModule:
             try:
                 data = json.loads(self.path.read_text(encoding="utf-8"))
                 if isinstance(data, list):
-                    migrated = self._migrate_legacy_welcome(data)
-                    if migrated is not data:
+                    # 过滤非 dict 元素（手改文件 / API 提交畸形数组）：
+                    # 畸形元素会让热路径的 rule.get() 抛 AttributeError
+                    cleaned = [r for r in data if isinstance(r, dict)]
+                    if len(cleaned) != len(data):
+                        self.logger.warning(_t("regex_engine.log.rules_invalid_entries"))
+                    migrated = self._migrate_legacy_welcome(cleaned)
+                    if migrated is not cleaned:
                         self._write_rules_atomic(migrated)
                         self.logger.info(_t("regex_engine.log.welcome_upgraded"))
                     return migrated
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+                # 损坏时先把原文件备份为 .corrupt 再回退默认：
+                # 直接覆写会让用户全部自定义规则永久丢失
+                try:
+                    shutil.copy2(self.path, self.path.with_name(self.path.name + ".corrupt"))
+                except OSError:
+                    pass
                 self.logger.error(_t("regex_engine.log.rules_parse_failed"))
         self._write_rules_atomic(DEFAULT_RULES)
         return json.loads(json.dumps(DEFAULT_RULES))
@@ -245,13 +260,41 @@ class RegexEngineModule:
     def reload_rules(self) -> int:
         """重载规则库，返回规则数量"""
         self.rules = self._load_rules()
+        getattr(self, "_pattern_cache", None) and self._pattern_cache.clear()
         return len(self.rules)
 
     def save_rules(self, rules: list[dict[str, Any]]) -> None:
         """保存规则库并立即热加载（供 WebUI 调用）"""
+        # 过滤非 dict 元素：畸形元素会让热路径 rule.get() 在 try 外抛
+        # AttributeError，导致后续所有规则被跳过
+        rules = [r for r in rules if isinstance(r, dict)]
         self._write_rules_atomic(rules)
         self.rules = rules
+        getattr(self, "_pattern_cache", None) and self._pattern_cache.clear()
         self.logger.info(_t("regex_engine.log.rules_saved", count=len(rules)))
+
+    def _compile_cached(self, pattern: str, flags: str, rule_name: Any) -> "re.Pattern[str] | None":
+        """带缓存编译规则 pattern；非法 / 超长 / 高风险 pattern 返回 None。
+
+        命中缓存时零编译成本（含负缓存），异常日志也只打印一次而不是每条消息刷屏。
+        """
+        # getattr 兜底：测试桩经 __new__ 构造时不走 __init__
+        cache = getattr(self, "_pattern_cache", None)
+        if cache is None:
+            cache = self._pattern_cache = {}
+        key = f"{flags}\x00{pattern}"
+        if key in cache:
+            return cache[key]
+        regex: "re.Pattern[str] | None" = None
+        if pattern and len(pattern) <= _MAX_PATTERN_LEN and not _is_risky_pattern(pattern):
+            try:
+                regex = compile_pattern(pattern, flags)
+            except re.error:
+                regex = None
+        if regex is None:
+            self.logger.error(_t("regex_engine.log.pattern_risky", name=rule_name))
+        cache[key] = regex
+        return regex
 
     def register_action(self, action_type: str, handler: Callable[..., Any]) -> None:
         if callable(handler):
@@ -428,6 +471,9 @@ class RegexEngineModule:
         group_id = pack.get("group_id") or self.plugin.config_manager.main_group
 
         for action in actions or []:
+            # 非法动作元素（字符串 / null 等）跳过，防 .get 抛异常中断后续动作
+            if not isinstance(action, dict):
+                continue
             action_type = action.get("type")
             params = action.get("params", "")
             try:
@@ -600,7 +646,6 @@ class RegexEngineModule:
         if isinstance(message, list):
             parts: list[str] = []
             for seg in message:
-                # 协议端畸形消息段（字符串 / null / data 非字典）跳过，防止 .get 抛异常
                 if not isinstance(seg, dict) or seg.get("type") != "text":
                     continue
                 data = seg.get("data")
@@ -634,11 +679,10 @@ class RegexEngineModule:
                 # 导致所有消息都被命中，因此显式跳过空 pattern 的规则
                 if not pattern:
                     continue
-                # ReDoS 防护：超长 / 高风险 pattern 直接跳过
-                if len(pattern) > _MAX_PATTERN_LEN or _is_risky_pattern(pattern):
-                    self.logger.error(_t("regex_engine.log.pattern_risky", name=rule.get('name')))
+                # ReDoS 防护：超长 / 高风险 pattern 直接跳过（缓存后零重复扫描）
+                regex = self._compile_cached(pattern, rule.get("flags", ""), rule.get("name"))
+                if regex is None:
                     continue
-                regex = compile_pattern(pattern, rule.get("flags", ""))
                 match = regex.search(msg_text)
                 if not match:
                     continue
@@ -662,9 +706,15 @@ class RegexEngineModule:
         if not self.conf.get("enable", True):
             return
         if not pack.get("sender"):
-            pack["sender"] = {
-                "role": "member",
-                "nickname": str(pack.get("user_id", _t("regex_engine.reply.unknown_user"))),
+            # 注意不能原地写入共享 pack：同一事件包会被多个 handler 消费
+            # （如 whitelist 的退群昵称解析依赖 sender 缺失时回退查询群名片），
+            # 注入假 sender 会污染其他 handler 的判断。浅拷贝后注入。
+            pack = {
+                **pack,
+                "sender": {
+                    "role": "member",
+                    "nickname": str(pack.get("user_id", _t("regex_engine.reply.unknown_user"))),
+                },
             }
 
         for rule in self.rules:
@@ -682,14 +732,13 @@ class RegexEngineModule:
                 else:
                     target = str(pack.get("user_id", ""))
                 # ReDoS 防护：截断 + 高风险 pattern 跳过（事件规则在主线程执行，
-                # 灾难性回溯会直接冻结服务器）
+                # 灾难性回溯会直接冻结服务器）；编译走缓存避免逐消息重复编译
                 if len(target) > _MAX_MATCH_TEXT_LEN:
                     target = target[:_MAX_MATCH_TEXT_LEN]
                 if pattern:
-                    if len(pattern) > _MAX_PATTERN_LEN or _is_risky_pattern(pattern):
-                        self.logger.error(_t("regex_engine.log.pattern_risky", name=rule.get('name')))
+                    regex = self._compile_cached(pattern, rule.get("flags", "i"), rule.get("name"))
+                    if regex is None:
                         continue
-                    regex = compile_pattern(pattern, rule.get("flags", "i"))
                     match = regex.search(target)
                     if not match:
                         continue
@@ -720,10 +769,40 @@ class RegexEngineModule:
             return
         self.handle_event("group.member_leave", pack)
 
+    def _mc_event_target_group(self) -> Any:
+        """MC 事件规则的回复目标群。
+
+        main_group 只汇总个人号域数字群号（connections.all_groups 仅遍历
+        websocket 适配器）；纯官方机器人部署下为 0，回复发往群 0 会被
+        hub 按数字路由到个人号域后静默丢弃。此时回退到已连接适配器的
+        广播目标（配置群或官方侧动态发现的群 openid），与 chat_sync
+        的广播口径一致。
+        """
+        main = self.plugin.config_manager.main_group
+        if main:
+            return main
+        try:
+            hub = self.adapter
+            for adapter in hub.connected() if hasattr(hub, "connected") else []:
+                groups = list(getattr(adapter, "groups", None) or [])
+                if groups:
+                    return groups[0]
+                broadcast = getattr(adapter, "broadcast_groups", None)
+                if callable(broadcast):
+                    discovered = list(broadcast())
+                    if discovered:
+                        return discovered[0]
+        except Exception:
+            pass
+        return main
+
     def _mock_pack(self, player_name: str) -> dict[str, Any]:
+        # time 参与 _pack_fingerprint 指纹：缺失时同一玩家 5 秒内（去重窗口）
+        # 重复的相同发言会被误判为上游重复上报而吞掉第二次的动作
         return {
             "user_id": player_name,
-            "group_id": self.plugin.config_manager.main_group,
+            "group_id": self._mc_event_target_group(),
+            "time": int(time.time()),
             "sender": {"nickname": player_name, "role": "member"},
         }
 

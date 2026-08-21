@@ -212,7 +212,8 @@
             "recall": "撤回消息",
             "mute": "禁言用户",
             "runcmd": "执行游戏命令",
-            "plugin": "调用插件命令"
+            "plugin": "调用插件命令",
+            "reply_at_text": "回复并@触发者"
         },
         "condition_fields": {
             "user_id": "用户身份",
@@ -240,7 +241,7 @@
             "enabled": "启用状态",
             "enabled_desc": "关闭后该规则不再触发",
             "trigger_mode": "触发方式",
-            "trigger_mode_desc": "消息 = 匹配群消息文本；事件 = 进退服等",
+            "trigger_mode_desc": "消息 = 有人发群消息时匹配文字；事件 = 进退群、玩家进退服等自动触发",
             "message_trigger": "消息触发",
             "event_trigger": "事件触发",
             "keyword": "匹配关键词",
@@ -262,13 +263,73 @@
             "action_title": "动作 #{n}",
             "field_placeholder": "选择字段",
             "operator_placeholder": "运算",
-            "value_placeholder": "比较值",
+            "value_placeholder": "比较值（怎么填看上方说明）",
             "action_type_placeholder": "选择动作",
-            "action_params_placeholder": "参数（$1..$9 为捕获组，$userId 为发送者 QQ 等）",
+            "action_params_placeholder": "参数（怎么填看上方说明）",
             "no_conditions": "无附加条件（所有消息都会触发）",
             "no_actions": "无动作（规则将不做任何事）",
             "template_placeholder": "选择常用模板快速填入",
-            "template_first_option": "（选择常用模板快速填入）"
+            "template_first_option": "（选择常用模板快速填入）",
+            "template_row": "快速开始",
+            "template_row_desc": "选一个常用场景，整条规则自动填好，再改成你的需求即可",
+            "template_row_placeholder": "选一个模板，自动填好整条规则",
+            "template_row_first_option": "（可选）从模板快速开始",
+            "template_applied": "已填入模板「{name}」，可继续修改",
+            "image_upload_button": "上传图片",
+            "image_uploaded": "图片已上传，保存规则后生效",
+            "image_upload_failed": "图片上传失败：{error}",
+            "conditions_hint": "下面的条件全部满足时规则才会触发；不需要额外限制就保持为空。",
+            "actions_hint": "规则触发后按从上到下的顺序执行这些动作。"
+        },
+        "action_descs": {
+            "reply_text": "机器人往群里发一条文字消息，下面的输入框填要发送的内容。",
+            "reply_at_text": "先 @ 触发这条规则的人，再紧跟着发送文字（入群欢迎@新成员就是这种动作）。输入框填 @ 后面跟的文字。",
+            "reply_image": "往群里发一张图片。点下方「上传图片」按钮选本地图片（自动填入路径），或在输入框填图片链接（http:// 开头）。",
+            "delete_message": "撤回触发这条规则的那条群消息。无需填写任何参数，直接保存即可。",
+            "mute_user": "禁言触发这条规则的人。输入框填禁言秒数（如 600 = 10 分钟），留空默认 600 秒。",
+            "execute_command": "在服务器后台执行一条游戏命令。输入框填命令本身（如 list、say 你好），可用 $1 填入关键词括号里捕获的内容。",
+            "call_plugin_command": "调用 LumenBridge 内置功能（如 getXboxID 查询白名单）。格式：功能名,参数，例如 getXboxID,$at"
+        },
+        "action_params_placeholders": {
+            "reply_text": "要发送的文字，例如：欢迎回来！",
+            "reply_at_text": "@ 后面跟的文字，例如： 欢迎新成员！",
+            "reply_image": "点下方按钮上传图片，或填图片链接 http://…",
+            "delete_message": "无需参数，直接保存即可",
+            "mute_user": "禁言秒数，例如 600（留空默认 600）",
+            "execute_command": "要执行的命令，例如：say 欢迎回来",
+            "call_plugin_command": "例如：getXboxID,$at"
+        },
+        "condition_roles": {
+            "owner": "群主",
+            "admin": "管理员（群管理员 / 后台管理员）",
+            "member": "普通成员"
+        },
+        "condition_field_hints": {
+            "user_role": "限定只有特定身份的人发言才触发。可选：群主、管理员（含群管理员与后台管理员列表）、普通成员。",
+            "user_id": "限定只有指定 QQ 号的人发言才触发。比较值填对方的 QQ 号。",
+            "group_id": "限定只有在指定群号里才触发。比较值填群号。"
+        },
+        "condition_value_placeholders": {
+            "user_role": "选择身份",
+            "user_id": "填 QQ 号，例如 10001",
+            "group_id": "填群号，例如 123456789"
+        },
+        "templates": {
+            "keyword_reply": "关键词回复（最简单）",
+            "keyword_reply_params": "你好呀！有什么可以帮你？",
+            "welcome": "入群欢迎（自动 @ 新成员）",
+            "welcome_params": " 欢迎新成员！发送 绑定白名单<你的游戏ID> 即可进服游玩",
+            "leave_notice": "退群通知",
+            "leave_notice_params": "有成员退出了群聊",
+            "player_join": "玩家进服播报",
+            "player_join_params": "$nickname 进入了服务器！",
+            "admin_cmd": "管理员执行命令",
+            "admin_cmd_params": "$1",
+            "admin_cmd_reply_params": "执行结果：$result",
+            "server_status": "查服（回复在线名单）",
+            "server_status_params": "当前在线玩家：$result",
+            "banned_word": "违禁词：撤回 + 禁言",
+            "banned_word_params": "请文明发言！"
         }
     },
     "whitelist": {
@@ -419,6 +480,13 @@
         "uninstall_success_msg": "卸载成功",
         "uninstall_failed_msg": "卸载失败：{msg}",
         "missing_deps_badge": "依赖缺失",
+        "requires_badge": "插件依赖",
+        "missing_requirements_badge": "插件依赖缺失",
+        "install_requirements_button": "补装依赖",
+        "install_requirements_confirm": "确定要补齐 {name} 的插件级依赖吗？\n子插件依赖将从插件市场自动安装（类似 pip 依赖），Endstone 插件依赖将提示手动安装。",
+        "install_requirements_success": "{name} 的依赖补装完成",
+        "install_requirements_failed": "{name} 的依赖补装失败：{error}",
+        "uninstall_dependents_warning": "警告：以下子插件依赖 {name}，卸载后它们可能无法加载：\n{deps}",
         "copy_error": "复制错误信息",
         "error_copied": "错误信息已复制",
         "install_deps_title": "安装子插件依赖",
@@ -513,11 +581,30 @@
             "say_success": "消息已发送至 {count} 个主群",
             "say_failed": "OneBot 尚未连接",
             "say_broadcast_format": "[服务器] {sender}: {text}",
+            "update_usage": "用法: /lumen update <子插件名 | -A|--all | framework>\n框架本体更新: /lumen update framework 检查并下载新版本，/lumen update framework -y 确认更新（将重载服务器内所有插件）",
+            "framework_checking": "正在检查 LumenBridge 框架更新...",
+            "framework_latest": "当前 LumenBridge 已是最新版本 v{version}",
+            "framework_staging": "发现新版本 v{version}，正在下载并校验（不会自动更新，完成后需手动确认）...",
+            "framework_ready": "新版本 v{version} 已下载校验就绪。\n⚠ 注意：确认更新将重载服务器内所有插件（等同 /reload），WebUI 面板会短暂下线后自动恢复。\n确认更新请输入: /lumen update framework -y",
+            "framework_confirm_start": "已确认更新 LumenBridge 新版本：正在准备并热重载。注意：服务器内所有插件都将重载（等同 /reload），WebUI 面板会短暂下线后自动恢复。",
+            "framework_reload_scheduled": "新版本 v{version} 热重载已调度，即将重载服务器内所有插件，请稍候...",
+            "framework_apply_failed": "框架更新失败: {error}",
+            "framework_stage_failed": "新版本准备失败: {error}",
+            "update_market_disabled": "插件市场未配置或未启用，无法使用市场更新",
+            "update_manager_unavailable": "子插件管理器不可用",
+            "update_unknown_plugin": "未找到子插件: {name}",
+            "update_not_market": "{name} 不是通过插件市场安装的，无法使用市场更新",
+            "update_starting": "开始更新子插件 {name} ...",
+            "update_starting_all": "开始检查并更新所有可更新的子插件...",
+            "update_none_available": "没有需要更新的子插件",
+            "update_success": "{name} 已更新到 v{version}",
+            "update_failed": "{name} 更新失败: {error}",
+            "update_all_result": "批量更新完成: 成功 {ok} 个, 失败 {fail} 个",
             "plugins_list_title": "===== LumenBridge 子插件 =====",
             "plugins_list_empty": "（未初始化）",
             "plugins_list_no_plugins": "暂无子插件加载",
             "no_permission": "你没有权限使用此命令",
-            "unknown_action": "未知子命令: {action}。可用: status | reload | say | plugins | pip",
+            "unknown_action": "未知子命令: {action}。可用: status | reload | say | plugins | pip | update",
             "status_no_group": "未配置"
         },
         "tagline": "Endstone 群服互通框架"
@@ -546,6 +633,7 @@
         "connection_unavailable": "连接不可用",
         "send_queue_dropped": "发送队列已满，丢弃最旧的待发消息",
         "send_queue_dropped_detail": "发送队列已满，丢弃待发消息: action={action} 目标={target}",
+        "dispatch_queue_dropped": "事件派发队列已满（处理器阻塞过久），丢弃最旧的入站事件",
         "mode_forward": "正向 WebSocket",
         "mode_reverse": "反向 WebSocket"
     },
@@ -562,7 +650,8 @@
     },
     "regex_engine": {
         "log": {
-            "rules_parse_failed": "rules.json 解析失败，已回退为默认规则库",
+            "rules_parse_failed": "rules.json 解析失败，已备份为 .corrupt 并回退为默认规则库",
+            "rules_invalid_entries": "rules.json 含非对象元素，已自动过滤",
             "rules_saved": "[正则引擎] 规则库已保存并热加载，共 {count} 条规则",
             "action_registered": "[正则引擎] 已注册自定义动作: [{action_type}]",
             "action_not_found": "[正则引擎] 插件动作 {command} 未注册",
@@ -599,7 +688,11 @@
         "error": {
             "missing_deps": "缺少第三方依赖: {deps}。请在 WebUI 包管理页面或执行 /lumen pip install 安装",
             "missing_module": "缺少 Python 模块: {modules}。请安装对应依赖包",
-            "version_unmet": "LumenBridge 版本过低：需要 ≥ {required}，当前 {current}"
+            "version_unmet": "LumenBridge 版本过低：需要 ≥ {required}，当前 {current}",
+            "require_endstone_missing": "缺少 Endstone 插件依赖 {req}，请先安装并启用该插件，然后热重载本插件",
+            "require_subplugin_missing": "缺少子插件依赖 {req}，请安装后在子插件页面点击「补装依赖」或热重载",
+            "require_subplugin_not_loaded": "子插件依赖 {name} 未成功加载，请先处理其错误（或启用它）再热重载",
+            "require_subplugin_version": "子插件依赖 {name} 版本不满足：需要 {op}{required}，当前 v{current}"
         },
         "log": {
             "load_complete": "[子插件] 加载完成，共 {count} 个子插件已启用",
@@ -610,6 +703,7 @@
             "disabled": "[子插件] {name} 已被清单禁用，跳过加载",
             "missing_entry": "[子插件] {name} 缺少 {entry}，已跳过",
             "manifest_failed": "[子插件] {name} 的 {manifest} 解析失败",
+            "name_conflict": "[子插件] 名字冲突：{old} 与 {new} 都声明了 {name}，跳过 {new}（请修正其中一个的 lumen.json）",
             "manifest_generated": "[子插件] 已为 {name} 生成默认 {manifest}",
             "toggle_enabled": "[子插件] {name} 已启用，重载后生效",
             "toggle_disabled": "[子插件] {name} 已禁用，重载后生效",
@@ -636,6 +730,7 @@
             "install_success_msg": "{name} {action}成功",
             "uninstall_not_exist": "子插件 {name} 不存在",
             "uninstall_path_illegal": "非法路径，已拒绝",
+            "uninstall_rmtree_failed": "卸载 {name} 失败：目录无法删除（可能被占用）: {error}",
             "uninstall_success_msg": "{name} 已卸载并删除",
             "status_enabled": "已启用",
             "status_failed": "加载失败",
@@ -645,6 +740,11 @@
             "missing_deps": "[子插件] {name} 缺少依赖: {deps}，已跳过加载",
             "missing_deps_short": "缺少依赖: {deps}",
             "status_missing_deps": "依赖缺失",
+            "missing_requirements_short": "缺少插件依赖: {deps}",
+            "status_missing_requirements": "插件依赖缺失",
+            "requires_invalid_items": "[子插件] {name} 的 requires 声明存在无法解析的项: {items}，已忽略（格式应如 economy>=1.2.0）",
+            "require_unmet": "[子插件] {name} 的插件级依赖未满足，已跳过加载:\n{error}",
+            "require_endstone_unverifiable": "[子插件] {name} 声明了 Endstone 插件依赖，但当前无法获取服务器插件列表，本次跳过该项检查",
             "deps_not_list": "子插件 {name} 的 dependencies 不是列表类型，已忽略依赖声明",
             "cleanup_exception": "子插件 {name} 清理资源时出错: {error}",
             "command_palette_pending": "命令 /{name} 尚未在启动面板声明，本次启动暂不可用；已写入面板，重启服务器后自动注册",
@@ -686,6 +786,7 @@
             "install_timeout": "安装超时",
             "install_exception": "安装异常: {error}",
             "invalid_url": "请提供有效的 http(s) 下载链接",
+            "invalid_market_id": "无效的插件市场 ID",
             "invalid_hostname": "无效的主机名",
             "dns_failed": "域名解析失败",
             "url_parse_failed": "URL 解析失败",
@@ -716,7 +817,11 @@
             "reload_failed": "框架重载失败: {error}",
             "invalid_body": "请求体格式错误",
             "reload_timeout": "操作超时",
-            "subplugin_manager_unavailable": "子插件管理器未就绪"
+            "subplugin_manager_unavailable": "子插件管理器未就绪",
+            "rules_image_invalid": "未接收到有效的图片文件",
+            "rules_image_type": "仅支持 PNG / JPG / GIF / WebP 图片",
+            "rules_image_too_large": "图片超过 8MB 限制",
+            "rules_image_write_failed": "图片保存失败：{error}"
         }
     },
     "config_labels": {
@@ -1024,6 +1129,13 @@
                     "desc": "开启后普通玩家也可执行 /lumen plugins"
                 }
             },
+            "update": {
+                "section": "update 命令",
+                "allow_player": {
+                    "label": "允许普通玩家",
+                    "desc": "开启后普通玩家也可执行 /lumen update 更新子插件"
+                }
+            },
             "pip": {
                 "section": "pip 命令",
                 "allow_in_game": {
@@ -1182,6 +1294,7 @@
         "installing_plugin": "正在安装插件 {id}...",
         "updating_plugin": "正在更新子插件 {name}...",
         "updating_deps": "正在更新子插件 {name} 的依赖...",
+        "installing_requirements": "正在补齐子插件 {name} 的插件级依赖...",
         "downloading": "下载中",
         "installing_deps": "安装依赖中",
         "installing": "安装中",
@@ -1234,9 +1347,9 @@
         "framework_unconfigured": "尚未配置版本更新 API。请在配置页的“框架更新”中填写 API 地址。",
         "framework_latest": "当前已是最新版本 v{version}。",
         "framework_available": "发现 LumenBridge v{version} 新版本。",
-        "framework_apply_button": "一键更新并生效",
-        "framework_reload_note": "将下载、校验并自动热重载新版本：面板会短暂下线，数秒后自动恢复，无需重启服务器。",
-        "framework_apply_confirm": "确定更新到 LumenBridge 新版本吗？将自动热重载生效，面板会短暂下线后自动恢复。",
+        "framework_apply_button": "更新并热重载",
+        "framework_reload_note": "⚠ 更新将热重载服务器内所有插件（等同 /reload），所有插件短暂中断后自动恢复；面板会短暂下线，数秒后自动恢复，无需重启服务器。",
+        "framework_apply_confirm": "确定更新到 LumenBridge 新版本吗？\n\n⚠ 注意：更新将重载服务器内所有插件（等同 /reload），所有 Endstone 插件会短暂中断后自动恢复，WebUI 面板也会短暂下线。\n\n确定要继续吗？",
         "framework_applying": "正在下载并校验新版本…",
         "framework_reload_started": "新版本已就绪，正在热重载…面板稍后自动恢复",
         "framework_reload_done": "热重载完成，正在刷新页面…",
@@ -1263,6 +1376,8 @@
         "detail_description": "插件介绍",
         "detail_versions": "版本记录",
         "detail_dependencies": "依赖",
+        "detail_requires_subplugins": "子插件依赖",
+        "detail_requires_endstone": "Endstone 插件依赖",
         "detail_min_lb": "最低 LumenBridge",
         "task_success": "市场任务完成",
         "task_failed": "市场任务失败",
@@ -1286,6 +1401,18 @@
         "already_latest_title": "当前已是最新版",
         "already_latest_desc": "{name} 当前版本 v{version} 已是市场最新版本，无需更新。",
         "already_latest_ok": "我知道了",
+        "update_center_title": "可更新的子插件",
+        "update_center_summary": "共 {count} 个子插件有可用更新，可选择版本单独更新，或一键全部更新到最新版。",
+        "update_all_button": "一键更新全部",
+        "update_all_confirm": "确定将 {count} 个子插件全部更新到最新版吗？将逐个下载校验并升级，单个失败不影响其余插件。",
+        "update_all_success": "子插件批量更新完成",
+        "update_all_failed": "子插件批量更新失败",
+        "update_card_button": "更新",
+        "update_loading_versions": "正在获取版本列表…",
+        "no_changelog": "暂无更新日志",
+        "all_up_to_date_title": "子插件均为最新版",
+        "all_up_to_date_desc": "已检查 {count} 个市场来源的子插件，全部为最新版本，无需更新。",
+        "all_up_to_date_chip": "全部最新",
         "update_deps_button": "更新依赖",
         "deps_update_confirm": "确定更新 {name} 的已声明依赖吗？会执行冲突预检并随后热重载。",
         "deps_update_success": "{name} 的依赖更新完成。",
@@ -1459,6 +1586,7 @@
         "server_reconnect": "[QQ官方] 服务端要求重连",
         "heartbeat_stale": "[QQ官方] 心跳 ACK 超时，连接疑似失效，主动断开并重连",
         "invalid_session": "[QQ官方] 会话失效，重新 Identify",
+        "session_reset_code": "[QQ官方] 网关以关闭码 {code} 断开（会话失效），已重置会话将重新 Identify",
         "ready": "[QQ官方] 登录成功: {name}",
         "resumed": "[QQ官方] 会话已恢复（Resume 补投完成）",
         "robot_added": "[QQ官方] 机器人 {name} 已加入群 {group}（已记录 group_openid，可填入适配器配置）",

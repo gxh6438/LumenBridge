@@ -140,7 +140,6 @@ class LoggerTee:
         self._emit("error", text)
 
     def critical(self, msg: Any) -> None:
-        # 缓冲区记录为 error（前端兼容），转发到控制台/文件时保留 critical 级别
         self._emit("error", msg, "critical")
 
     def __getattr__(self, name: str) -> Any:

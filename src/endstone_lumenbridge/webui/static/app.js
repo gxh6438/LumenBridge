@@ -1108,12 +1108,35 @@ const RULE_EVENT_TYPES = [
 ];
 const RULE_ACTION_TYPES = [
   { value: "replyText", labelKey: "rules.action_types.reply_text" },
+  { value: "replyAtText", labelKey: "rules.action_types.reply_at_text" },
   { value: "replyImage", labelKey: "rules.action_types.reply_image" },
   { value: "deleteMessage", labelKey: "rules.action_types.recall" },
   { value: "muteUser", labelKey: "rules.action_types.mute" },
   { value: "executeCommand", labelKey: "rules.action_types.runcmd" },
   { value: "callPluginCommand", labelKey: "rules.action_types.plugin" },
 ];
+/* 每种动作的说明与参数输入提示：小白不看文档也能明白参数填什么 */
+const RULE_ACTION_META = {
+  replyText: { descKey: "rules.action_descs.reply_text", phKey: "rules.action_params_placeholders.reply_text" },
+  replyAtText: { descKey: "rules.action_descs.reply_at_text", phKey: "rules.action_params_placeholders.reply_at_text" },
+  replyImage: { descKey: "rules.action_descs.reply_image", phKey: "rules.action_params_placeholders.reply_image" },
+  deleteMessage: { descKey: "rules.action_descs.delete_message", phKey: "rules.action_params_placeholders.delete_message" },
+  muteUser: { descKey: "rules.action_descs.mute_user", phKey: "rules.action_params_placeholders.mute_user" },
+  executeCommand: { descKey: "rules.action_descs.execute_command", phKey: "rules.action_params_placeholders.execute_command" },
+  callPluginCommand: { descKey: "rules.action_descs.call_plugin_command", phKey: "rules.action_params_placeholders.call_plugin_command" },
+};
+/* userRole 条件的可选身份（后端比较值） */
+const RULE_ROLE_OPTIONS = [
+  { value: "owner", labelKey: "rules.condition_roles.owner" },
+  { value: "admin", labelKey: "rules.condition_roles.admin" },
+  { value: "member", labelKey: "rules.condition_roles.member" },
+];
+/* 各条件字段的一行说明 + 比较值输入提示 */
+const RULE_CONDITION_META = {
+  userRole: { hintKey: "rules.condition_field_hints.user_role", phKey: "rules.condition_value_placeholders.user_role" },
+  userId: { hintKey: "rules.condition_field_hints.user_id", phKey: "rules.condition_value_placeholders.user_id" },
+  groupId: { hintKey: "rules.condition_field_hints.group_id", phKey: "rules.condition_value_placeholders.group_id" },
+};
 const RULE_CONDITION_FIELDS = [
   { value: "userRole", labelKey: "rules.condition_fields.user_id" },
   { value: "userId", labelKey: "rules.condition_fields.qq" },
@@ -1133,6 +1156,78 @@ const RULE_PATTERN_PRESETS = [
   { labelKey: "rules.pattern_presets.bind_whitelist", value: "^绑定白名单(.+)$" },
   { labelKey: "rules.pattern_presets.number_cmd", value: "^#(\\d+)$" },
 ];
+/* 完整规则模板：选择后自动填入整条规则（触发方式/关键词/条件/动作），
+   文案（规则名/动作参数）经 i18n key 渲染，随界面语言变化 */
+const RULE_TEMPLATES = [
+  { value: "keyword_reply", labelKey: "rules.templates.keyword_reply" },
+  { value: "welcome", labelKey: "rules.templates.welcome" },
+  { value: "leave_notice", labelKey: "rules.templates.leave_notice" },
+  { value: "player_join", labelKey: "rules.templates.player_join" },
+  { value: "admin_cmd", labelKey: "rules.templates.admin_cmd" },
+  { value: "server_status", labelKey: "rules.templates.server_status" },
+  { value: "banned_word", labelKey: "rules.templates.banned_word" },
+];
+const RULE_TEMPLATE_DATA = {
+  keyword_reply: {
+    nameKey: "rules.templates.keyword_reply",
+    triggerType: "message", pattern: "^你好$", flags: "i", eventType: "",
+    conditions: [],
+    actions: [{ type: "replyText", paramsKey: "rules.templates.keyword_reply_params" }],
+    block: true,
+  },
+  welcome: {
+    nameKey: "rules.templates.welcome",
+    triggerType: "event", pattern: "", flags: "", eventType: "group.member_join",
+    conditions: [],
+    actions: [{ type: "replyAtText", paramsKey: "rules.templates.welcome_params" }],
+    block: false,
+  },
+  leave_notice: {
+    nameKey: "rules.templates.leave_notice",
+    triggerType: "event", pattern: "", flags: "", eventType: "group.member_leave",
+    conditions: [],
+    actions: [{ type: "replyText", paramsKey: "rules.templates.leave_notice_params" }],
+    block: false,
+  },
+  player_join: {
+    nameKey: "rules.templates.player_join",
+    triggerType: "event", pattern: "", flags: "", eventType: "server.player_join",
+    conditions: [],
+    actions: [{ type: "replyText", paramsKey: "rules.templates.player_join_params" }],
+    block: false,
+  },
+  admin_cmd: {
+    nameKey: "rules.templates.admin_cmd",
+    triggerType: "message", pattern: "^执行(.+)$", flags: "", eventType: "",
+    conditions: [{ field: "userRole", operator: "==", value: "admin" }],
+    actions: [
+      { type: "executeCommand", paramsKey: "rules.templates.admin_cmd_params" },
+      { type: "replyText", paramsKey: "rules.templates.admin_cmd_reply_params" },
+    ],
+    block: true,
+  },
+  server_status: {
+    nameKey: "rules.templates.server_status",
+    triggerType: "message", pattern: "^查服$", flags: "i", eventType: "",
+    conditions: [],
+    actions: [
+      { type: "executeCommand", params: "list" },
+      { type: "replyText", paramsKey: "rules.templates.server_status_params" },
+    ],
+    block: true,
+  },
+  banned_word: {
+    nameKey: "rules.templates.banned_word",
+    triggerType: "message", pattern: "违禁词", flags: "i", eventType: "",
+    conditions: [],
+    actions: [
+      { type: "deleteMessage", params: "" },
+      { type: "muteUser", params: "600" },
+      { type: "replyText", paramsKey: "rules.templates.banned_word_params" },
+    ],
+    block: true,
+  },
+};
 
 function ruleOptions(arr) {
   return arr.map((e) => ({ value: e.value, label: t(e.labelKey) }));
@@ -1173,6 +1268,27 @@ function onSelectOption(optEl) {
       host.querySelectorAll(".ls-option").forEach((o) =>
         o.classList.toggle("selected", o.dataset.value === ""));
     }, 0);
+    return;
+  }
+  if (id === "rule-template" && value) {
+    // 完整规则模板：自动填入整条规则（名称/触发方式/关键词/条件/动作）
+    applyRuleTemplate(value);
+    setTimeout(() => {
+      host.querySelector(".ls-label").textContent = t("rules.form.template_row_placeholder");
+      host.querySelector('input[type="hidden"]').value = "";
+      host.querySelectorAll(".ls-option").forEach((o) =>
+        o.classList.toggle("selected", o.dataset.value === ""));
+    }, 0);
+    return;
+  }
+  // 动作类型切换：说明文字与输入区随类型变化（如回复图片出现上传按钮）
+  if (id && id.startsWith("rule-action-type-")) {
+    rerenderEditorLists({ conditions: collectEditorConditions(), actions: collectEditorActions() });
+    return;
+  }
+  // 条件字段切换：userRole 显示身份下拉，其他字段显示文本输入
+  if (id && id.startsWith("rule-cond-field-")) {
+    rerenderEditorLists({ conditions: collectEditorConditions(), actions: collectEditorActions() });
   }
 }
 
@@ -1266,6 +1382,9 @@ document.addEventListener("click", (e) => {
     dispatchSpAction(spActionBtn.dataset.action || "", spActionBtn.dataset.name || "");
     return;
   }
+  /* 更新中心卡片：单独更新按钮 */
+  const spuUpdateBtn = e.target.closest("[data-spu-update]");
+  if (spuUpdateBtn) { updateSpuFromCard(spuUpdateBtn); return; }
   /* 市场卡片：安装按钮优先于卡片整体点击（原 stopPropagation 语义） */
   const marketInstallBtn = e.target.closest(".market-install-btn[data-id]");
   if (marketInstallBtn) { installMarketPlugin(marketInstallBtn.dataset.id || ""); return; }
@@ -1480,38 +1599,22 @@ function openRuleEditor(idx) {
 function renderRuleForm(rule) {
   const isMsg = rule.triggerType !== "event";
 
-  const conditionsHtml = (rule.conditions || []).map((c, i) =>
-    `<div class="file-item" style="flex-direction:column;align-items:stretch;gap:8px">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <strong style="font-size:13px">${esc(t("rules.form.condition_title", { n: i + 1 }))}</strong>
-        <button class="btn small danger" onclick="removeEditorItem('cond', ${i})">${esc(t("common.remove"))}</button>
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-        <div style="flex:1;min-width:120px">${buildSelect("rule-cond-field-" + i, ruleOptions(RULE_CONDITION_FIELDS), c.field, t("rules.form.field_placeholder"))}</div>
-        <div style="flex:1;min-width:100px">${buildSelect("rule-cond-op-" + i, ruleOptions(RULE_CONDITION_OPERATORS), c.operator, t("rules.form.operator_placeholder"))}</div>
-        <input type="text" id="rule-cond-val-${i}" value="${esc(c.value)}" placeholder="${esc(t("rules.form.value_placeholder"))}" style="flex:2;min-width:140px">
-      </div>
-    </div>`).join("") || '<div class="empty-state" style="padding:14px">' + esc(t("rules.form.no_conditions")) + '</div>';
-
-  const actionsHtml = (rule.actions || []).map((a, i) =>
-    `<div class="file-item" style="flex-direction:column;align-items:stretch;gap:8px">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <strong style="font-size:13px">${esc(t("rules.form.action_title", { n: i + 1 }))}</strong>
-        <button class="btn small danger" onclick="removeEditorItem('action', ${i})">${esc(t("common.remove"))}</button>
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-        <div style="flex:1;min-width:140px">${buildSelect("rule-action-type-" + i, ruleOptions(RULE_ACTION_TYPES), a.type, t("rules.form.action_type_placeholder"))}</div>
-      </div>
-      <textarea id="rule-action-params-${i}" rows="2" placeholder="${esc(t("rules.form.action_params_placeholder"))}" style="width:100%">${esc(a.params ?? "")}</textarea>
-    </div>`).join("") || '<div class="empty-state" style="padding:14px">' + esc(t("rules.form.no_actions")) + '</div>';
-
   const presetOpts = [
     { value: "", label: t("rules.form.template_first_option") },
     ...RULE_PATTERN_PRESETS.map((p) => ({ value: p.value, label: t(p.labelKey) })),
   ];
   const presetSelect = buildSelect("rule-preset", presetOpts, "", t("rules.form.template_placeholder"));
+  const templateOpts = [
+    { value: "", label: t("rules.form.template_row_first_option") },
+    ...RULE_TEMPLATES.map((p) => ({ value: p.value, label: t(p.labelKey) })),
+  ];
+  const templateSelect = buildSelect("rule-template", templateOpts, "", t("rules.form.template_row_placeholder"));
 
   return `<div class="form-row">
+    <label>${esc(t("rules.form.template_row"))}<span class="desc">${esc(t("rules.form.template_row_desc"))}</span></label>
+    <div class="ctrl">${templateSelect}</div>
+  </div>
+  <div class="form-row">
     <label>${esc(t("rules.form.rule_name"))}<span class="desc">${esc(t("rules.form.rule_name_desc"))}</span></label>
     <div class="ctrl"><input type="text" id="rule-name" value="${esc(rule.name || "")}" placeholder="${esc(t("rules.form.rule_name_placeholder"))}"></div>
   </div>
@@ -1556,14 +1659,16 @@ function renderRuleForm(rule) {
       <span>${esc(t("rules.form.conditions"))}</span>
       <button type="button" class="btn small ghost" onclick="addEditorCondition()">${esc(t("rules.form.add_condition"))}</button>
     </h3>
-    <div id="rule-conditions-list">${conditionsHtml}</div>
+    <p class="desc" style="margin:0 0 10px">${esc(t("rules.form.conditions_hint"))}</p>
+    <div id="rule-conditions-list">${renderConditionsList(rule.conditions)}</div>
   </div>
   <div class="section">
     <h3 style="display:flex;justify-content:space-between;align-items:center">
       <span>${esc(t("rules.form.actions"))}</span>
       <button type="button" class="btn small ghost" onclick="addEditorAction()">${esc(t("rules.form.add_action"))}</button>
     </h3>
-    <div id="rule-actions-list">${actionsHtml}</div>
+    <p class="desc" style="margin:0 0 10px">${esc(t("rules.form.actions_hint"))}</p>
+    <div id="rule-actions-list">${renderActionsList(rule.actions)}</div>
   </div>`;
 }
 
@@ -1605,7 +1710,8 @@ function collectEditorActions() {
 
 function addEditorCondition() {
   const conds = collectEditorConditions();
-  conds.push({ field: "userRole", operator: "==", value: "" });
+  // 默认一条可用的身份条件（管理员），用户添加后无需手填即可理解用法
+  conds.push({ field: "userRole", operator: "==", value: "admin" });
   rerenderEditorLists({ conditions: conds, actions: collectEditorActions() });
 }
 
@@ -1637,25 +1743,56 @@ function rerenderEditorLists({ conditions, actions }) {
 function renderConditionsList(conditions) {
   if (!conditions || !conditions.length)
     return '<div class="empty-state" style="padding:14px">' + esc(t("rules.form.no_conditions")) + '</div>';
-  return conditions.map((c, i) =>
-    `<div class="file-item" style="flex-direction:column;align-items:stretch;gap:8px">
+  return conditions.map((c, i) => {
+    const meta = RULE_CONDITION_META[c.field] || {};
+    const hint = meta.hintKey ? t(meta.hintKey) : "";
+    const ph = meta.phKey ? t(meta.phKey) : t("rules.form.value_placeholder");
+    // userRole 用身份下拉选择，普通用户无需手填英文身份值
+    const valueHtml = c.field === "userRole"
+      ? buildSelect("rule-cond-val-" + i, ruleOptions(RULE_ROLE_OPTIONS), c.value, t("rules.form.value_placeholder"))
+      : `<input type="text" id="rule-cond-val-${i}" value="${esc(c.value)}" placeholder="${esc(ph)}" style="flex:2;min-width:140px">`;
+    // userRole 后端仅支持等于/不等于，其余运算符恒不匹配——下拉里直接隐藏
+    const ops = c.field === "userRole"
+      ? RULE_CONDITION_OPERATORS.filter((o) => o.value === "==" || o.value === "!=")
+      : RULE_CONDITION_OPERATORS;
+    return `<div class="file-item" style="flex-direction:column;align-items:stretch;gap:8px">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <strong style="font-size:13px">${esc(t("rules.form.condition_title", { n: i + 1 }))}</strong>
         <button class="btn small danger" onclick="removeEditorItem('cond', ${i})">${esc(t("common.remove"))}</button>
       </div>
+      ${hint ? `<div class="desc" style="font-size:12px;line-height:1.5">${esc(hint)}</div>` : ""}
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <div style="flex:1;min-width:120px">${buildSelect("rule-cond-field-" + i, ruleOptions(RULE_CONDITION_FIELDS), c.field, t("rules.form.field_placeholder"))}</div>
-        <div style="flex:1;min-width:100px">${buildSelect("rule-cond-op-" + i, ruleOptions(RULE_CONDITION_OPERATORS), c.operator, t("rules.form.operator_placeholder"))}</div>
-        <input type="text" id="rule-cond-val-${i}" value="${esc(c.value)}" placeholder="${esc(t("rules.form.value_placeholder"))}" style="flex:2;min-width:140px">
+        <div style="flex:1;min-width:100px">${buildSelect("rule-cond-op-" + i, ruleOptions(ops), c.operator, t("rules.form.operator_placeholder"))}</div>
+        <div style="flex:2;min-width:140px">${valueHtml}</div>
       </div>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 }
 
 function renderActionsList(actions) {
   if (!actions || !actions.length)
     return '<div class="empty-state" style="padding:14px">' + esc(t("rules.form.no_actions")) + '</div>';
-  return actions.map((a, i) =>
-    `<div class="file-item" style="flex-direction:column;align-items:stretch;gap:8px">
+  return actions.map((a, i) => {
+    const meta = RULE_ACTION_META[a.type] || {};
+    const desc = meta.descKey ? t(meta.descKey) : "";
+    const ph = meta.phKey ? t(meta.phKey) : t("rules.form.action_params_placeholder");
+    let paramsHtml = "";
+    if (a.type === "deleteMessage") {
+      // 撤回消息无需参数：只读说明，不误导用户填内容
+      paramsHtml = `<textarea id="rule-action-params-${i}" rows="1" readonly placeholder="${esc(ph)}" style="width:100%;opacity:.75"></textarea>`;
+    } else if (a.type === "replyImage") {
+      // 回复图片：可直接上传本地图片（自动填入路径），也可手填图片链接
+      paramsHtml = `<textarea id="rule-action-params-${i}" rows="2" placeholder="${esc(ph)}" style="width:100%">${esc(a.params ?? "")}</textarea>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button type="button" class="btn small ghost" onclick="document.getElementById('rule-image-file-${i}').click()">${esc(t("rules.form.image_upload_button"))}</button>
+        <input type="file" id="rule-image-file-${i}" accept="image/png,image/jpeg,image/gif,image/webp" style="display:none" onchange="uploadRuleImage(this, ${i})">
+        <span id="rule-image-name-${i}" class="desc" style="font-size:12px"></span>
+      </div>`;
+    } else {
+      paramsHtml = `<textarea id="rule-action-params-${i}" rows="2" placeholder="${esc(ph)}" style="width:100%">${esc(a.params ?? "")}</textarea>`;
+    }
+    return `<div class="file-item" style="flex-direction:column;align-items:stretch;gap:8px">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <strong style="font-size:13px">${esc(t("rules.form.action_title", { n: i + 1 }))}</strong>
         <button class="btn small danger" onclick="removeEditorItem('action', ${i})">${esc(t("common.remove"))}</button>
@@ -1663,8 +1800,59 @@ function renderActionsList(actions) {
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <div style="flex:1;min-width:140px">${buildSelect("rule-action-type-" + i, ruleOptions(RULE_ACTION_TYPES), a.type, t("rules.form.action_type_placeholder"))}</div>
       </div>
-      <textarea id="rule-action-params-${i}" rows="2" placeholder="${esc(t("rules.form.action_params_placeholder"))}" style="width:100%">${esc(a.params ?? "")}</textarea>
-    </div>`).join("");
+      ${desc ? `<div class="desc" style="font-size:12px;line-height:1.5">${esc(desc)}</div>` : ""}
+      ${paramsHtml}
+    </div>`;
+  }).join("");
+}
+
+function applyRuleTemplate(value) {
+  const tpl = RULE_TEMPLATE_DATA[value];
+  if (!tpl) return;
+  const rule = {
+    id: editingRuleIndex >= 0 && rulesData[editingRuleIndex]
+      ? rulesData[editingRuleIndex].id
+      : "rule_" + Date.now(),
+    name: t(tpl.nameKey),
+    enabled: true,
+    triggerType: tpl.triggerType,
+    pattern: tpl.pattern,
+    flags: tpl.flags,
+    eventType: tpl.eventType || "",
+    conditions: (tpl.conditions || []).map((c) => ({ field: c.field, operator: c.operator, value: c.value })),
+    actions: (tpl.actions || []).map((a) => ({
+      type: a.type,
+      params: a.paramsKey ? t(a.paramsKey) : (a.params || ""),
+    })),
+    block: tpl.block !== false,
+  };
+  document.getElementById("rule-editor-body").innerHTML = renderRuleForm(rule);
+  toast(t("rules.form.template_applied", { name: rule.name }));
+}
+
+async function uploadRuleImage(input, idx) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const form = new FormData();
+  form.append("file", file);
+  try {
+    const res = await fetch("/api/rules/image", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + TOKEN },
+      body: form,
+    });
+    if (res.status === 401) { logout(true); return; }
+    const data = await res.json();
+    if (data.code !== 200) { toast(data.msg || t("rules.form.image_upload_failed", { error: "" }), true); return; }
+    const ta = document.getElementById("rule-action-params-" + idx);
+    if (ta) ta.value = data.data.path;
+    const nameEl = document.getElementById("rule-image-name-" + idx);
+    if (nameEl) nameEl.textContent = data.data.name || "";
+    toast(t("rules.form.image_uploaded"));
+  } catch (e) {
+    toast(t("rules.form.image_upload_failed", { error: e.message }), true);
+  }
+  input.value = "";
 }
 
 function saveRuleEditor() {
@@ -1760,6 +1948,7 @@ function dispatchSpAction(action, name) {
     case "update": openUpdateFlow(name); break;
     case "update-deps": updateSubpluginDependencies(name); break;
     case "install-deps": installSubpluginDeps(name); break;
+    case "install-requirements": installSubpluginRequirements(name); break;
     case "files": openFilesModal(name); break;
     case "copy-error": copySubpluginError(name); break;
     case "error-detail": toggleSubpluginErrorDetail(name); break;
@@ -1927,6 +2116,12 @@ async function loadSubplugins(opts) {
       const missingModules = Array.isArray(p.missing_modules) ? p.missing_modules : [];
       const hasMissing = missingDeps.length > 0 || missingModules.length > 0;
       const depsList = missingDeps.length ? missingDeps : missingModules;
+      // 插件级强制依赖（requires）：声明徽章 + 未满足时的补装入口
+      const requires = p.requires || {};
+      const reqSub = Array.isArray(requires.subplugins) ? requires.subplugins : [];
+      const reqEs = Array.isArray(requires.endstone) ? requires.endstone : [];
+      const missingRequirements = Array.isArray(p.missing_requirements) ? p.missing_requirements : [];
+      const hasMissingRequirements = missingRequirements.length > 0;
       delete subpluginDepsCache[p.name];
       delete subpluginErrorCache[p.name];
       if (hasMissing) subpluginDepsCache[p.name] = depsList;
@@ -1936,12 +2131,20 @@ async function loadSubplugins(opts) {
         market: marketOrigin,
         version: String(p.version || ""),
         dependencies: Array.isArray(p.dependencies) ? p.dependencies : [],
+        requires: [].concat(reqSub, reqEs),
         hasError: !!p.error,
         hasMissing,
+        hasMissingRequirements,
       };
 
       const missingBadge = hasMissing
         ? `<span class="tag red">${esc(t("subplugins.missing_deps_badge"))}</span>`
+        : "";
+      const requiresBadge = (reqSub.length || reqEs.length)
+        ? `<span class="tag cyan" title="${esc([].concat(reqSub, reqEs).join("、"))}">${esc(t("subplugins.requires_badge"))}: ${reqSub.length + reqEs.length}</span>`
+        : "";
+      const missingReqBadge = hasMissingRequirements
+        ? `<span class="tag red" title="${esc(missingRequirements.join("、"))}">${esc(t("subplugins.missing_requirements_badge"))}</span>`
         : "";
 
       const errorDetail = p.error
@@ -1957,16 +2160,19 @@ async function loadSubplugins(opts) {
       actions.push(spAction(t("subplugins.update_button"), "update"));
       if (hasConfig) actions.push(spAction(t("subplugins.config_button"), "config"));
       if (hasMissing) actions.push(spAction(t("pip_page.subplugin_install_deps"), "install-deps"));
+      if (hasMissingRequirements) actions.push(spAction(t("subplugins.install_requirements_button"), "install-requirements"));
 
       return `<div class="subplugin-card glass" data-sp-name="${esc(p.name)}">
         <div class="sp-head">
-          <span class="name">${esc(p.name)}</span>
+          <span class="name" title="${esc(p.name)}">${esc(p.name)}</span>
           <span class="tag blue">v${esc(p.version)}</span>
           <span class="tag gray">${esc(t("subplugins.priority"))}: ${esc(p.priority)}</span>
           ${status}
           ${marketBadge}
           ${updateBadge}
           ${missingBadge}
+          ${requiresBadge}
+          ${missingReqBadge}
         </div>
         <div class="sp-desc-row">
           <div class="sp-desc">${esc(p.description || t("subplugins.no_description"))}</div>
@@ -2021,14 +2227,20 @@ async function reloadSubplugins() {
 }
 
 async function uninstallPlugin(name) {
-  // 预检依赖：有可一并卸载的依赖时，弹窗询问是否连同卸载（列出具体依赖名）
+  // 预检依赖：有可一并卸载的依赖时，弹窗询问是否连同卸载（列出具体依赖名）；
+  // 存在反向依赖（其它子插件 requires 本插件）时警告其将无法加载
   let withDeps = false;
   try {
     const res = await api("GET", `/api/subplugins/${encodeURIComponent(name)}/uninstall-preview`);
     const d = res.data || {};
     const deps = Array.isArray(d.deps) ? d.deps : [];
     const kept = Array.isArray(d.kept_deps) ? d.kept_deps : [];
+    const dependents = Array.isArray(d.dependents) ? d.dependents : [];
     let msg = t("subplugins.uninstall_confirm", { name });
+    if (dependents.length) {
+      const names = dependents.map((x) => (x && x.name) || "").filter(Boolean);
+      msg += "\n\n" + t("subplugins.uninstall_dependents_warning", { deps: names.join("、") });
+    }
     if (kept.length) msg += "\n\n" + t("subplugins.uninstall_deps_kept", { deps: kept.join("、") });
     if (!await customConfirm(msg)) return;
     if (deps.length) {
@@ -3029,7 +3241,7 @@ function updateTaskLogModal(task) {
   }
 }
 
-function watchMarketTask(taskId, successMessage) {
+function watchMarketTask(taskId, successMessage, onDone) {
   if (marketTaskTimer) clearInterval(marketTaskTimer);
   openTaskLogModal(taskId, t("task_log_modal.market_task"));
   let running = false;
@@ -3050,9 +3262,11 @@ function watchMarketTask(taskId, successMessage) {
         toast(task.msg || t("marketplace.task_failed"), true);
       }
       if (taskLogState) taskLogState.doneHandled = true;
+      if (typeof onDone === "function") { try { onDone(!!task.success, task); } catch (_) { /* 回调异常不影响任务流程 */ } }
     } catch (e) {
       clearInterval(marketTaskTimer); marketTaskTimer = null;
       toast(e.message || t("marketplace.task_failed"), true);
+      if (typeof onDone === "function") { try { onDone(false, null); } catch (_) { /* ignore */ } }
     } finally { running = false; }
   };
   marketTaskTimer = setInterval(poll, 800);
@@ -3102,6 +3316,18 @@ async function openMarketDetail(marketId) {
   }
 }
 
+function formatRequiresMeta(v) {
+  // 市场版本的插件级强制依赖：子插件依赖安装时自动装齐，Endstone 插件需自行安装
+  const requires = (v && v.requires) || {};
+  const sub = Array.isArray(requires.subplugins) ? requires.subplugins : [];
+  const es = Array.isArray(requires.endstone) ? requires.endstone : [];
+  if (!sub.length && !es.length) return "";
+  const parts = [];
+  if (sub.length) parts.push(`${esc(t("marketplace.detail_requires_subplugins"))}: ${esc(sub.join(", "))}`);
+  if (es.length) parts.push(`${esc(t("marketplace.detail_requires_endstone"))}: ${esc(es.join(", "))}`);
+  return `<div class="ver-meta">${parts.join(" · ")}</div>`;
+}
+
 function renderMarketDetail(detail) {
   const content = document.getElementById("market-detail-content");
   if (!content) return;
@@ -3118,13 +3344,14 @@ function renderMarketDetail(detail) {
     const deps = Array.isArray(v.dependencies) && v.dependencies.length
       ? `<div class="ver-meta">${esc(t("marketplace.detail_dependencies"))}: ${esc(v.dependencies.join(", "))}</div>`
       : "";
+    const reqs = formatRequiresMeta(v);
     const minLb = v.min_lumenbridge ? `<div class="ver-meta">${esc(t("marketplace.detail_min_lb"))}: ${esc(v.min_lumenbridge)}</div>` : "";
     const date = v.published_at ? String(v.published_at).replace("T", " ").slice(0, 16) : "";
     return `<div class="market-version-item">
       <div style="flex:1;min-width:0">
         <span class="ver">v${esc(v.version || "?")}</span>
         ${date ? ` <span class="ver-meta">${esc(date)}</span>` : ""}
-        ${deps}${minLb}
+        ${deps}${reqs}${minLb}
         ${v.changelog ? `<div class="ver-changelog">${esc(v.changelog)}</div>` : ""}
       </div>
       <div class="ver-install">
@@ -3243,8 +3470,209 @@ async function checkMarketUpdates() {
   try {
     toast(t("marketplace.checking"));
     const res = await api("POST", "/api/market/check", {});
-    watchMarketTask(res.data.task_id, t("marketplace.check_complete"));
+    watchMarketCheckTask(res.data.task_id);
   } catch (e) { toast(e.message || t("marketplace.check_failed"), true); }
+}
+
+/* 检查更新任务：轮询进度 → 有更新弹"可更新子插件"卡片，无更新弹"均为最新版" */
+let marketCheckTimer = null;
+
+function watchMarketCheckTask(taskId) {
+  if (marketCheckTimer) clearInterval(marketCheckTimer);
+  openTaskLogModal(taskId, t("task_log_modal.market_task"));
+  let running = false;
+  const poll = async () => {
+    if (running) return;
+    running = true;
+    try {
+      const res = await api("GET", "/api/market/task/" + encodeURIComponent(taskId));
+      const task = res.data || {};
+      updateTaskLogModal(task);
+      if (!task.done) return;
+      clearInterval(marketCheckTimer); marketCheckTimer = null;
+      if (taskLogState) taskLogState.doneHandled = true;
+      closeTaskLogModal();
+      if (!task.success) {
+        toast(task.msg || t("marketplace.check_failed"), true);
+        return;
+      }
+      const updates = (task.result && task.result.updates) || {};
+      const pending = Object.entries(updates)
+        .filter(([, info]) => info && info.available && info.market_id)
+        .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+      if (!pending.length) {
+        showAllUpToDateModal(Object.keys(updates).length);
+        return;
+      }
+      openUpdateCenter(pending);
+    } catch (e) {
+      clearInterval(marketCheckTimer); marketCheckTimer = null;
+      toast(e.message || t("marketplace.check_failed"), true);
+    } finally { running = false; }
+  };
+  marketCheckTimer = setInterval(poll, 800);
+  poll();
+}
+
+/* 全部最新版提示：复用"已是最新版"弹窗（我知道了按钮居右） */
+function showAllUpToDateModal(count) {
+  const titleEl = document.querySelector("#latest-version-modal .latest-version-title");
+  const desc = document.getElementById("latest-version-desc");
+  const chip = document.getElementById("latest-version-chip");
+  if (titleEl) titleEl.textContent = t("marketplace.all_up_to_date_title");
+  if (desc) desc.textContent = t("marketplace.all_up_to_date_desc", { count: Number(count) || 0 });
+  if (chip) chip.textContent = "✓ " + t("marketplace.all_up_to_date_chip");
+  const modal = document.getElementById("latest-version-modal");
+  if (modal) modal.classList.add("show");
+}
+
+/* 更新中心：可更新子插件卡片 + 单独更新 + 一键更新全部 */
+let updateCenterState = null; // { pending: [[name, info], ...] }
+
+function openUpdateCenter(pending) {
+  updateCenterState = { pending: pending.map((entry) => [entry[0], entry[1]]) };
+  const list = document.getElementById("update-center-list");
+  const summary = document.getElementById("update-center-summary");
+  if (summary) summary.textContent = t("marketplace.update_center_summary", { count: pending.length });
+  refreshUpdateCenterApplyBtn();
+  if (list) {
+    list.innerHTML = pending.map(([name, info]) => {
+      const current = String((info && info.local_version) || "?");
+      const latest = String((info && info.latest_version) || "?");
+      return `<div class="spu-card" data-spu-name="${esc(name)}">
+        <div class="spu-head-row">
+          <span class="spu-name" title="${esc(name)}">${esc(name)}</span>
+          <span class="tag gray">v${esc(current)}</span>
+          <span class="spu-arrow">→</span>
+          <span class="tag blue">v${esc(latest)}</span>
+        </div>
+        <div class="spu-changelog">${esc(t("marketplace.update_loading_versions"))}</div>
+        <div class="spu-actions-row">
+          <select data-spu-version disabled><option value="${esc(latest)}">v${esc(latest)}</option></select>
+          <button class="btn small" data-spu-update data-name="${esc(name)}">${esc(t("marketplace.update_card_button"))}</button>
+        </div>
+      </div>`;
+    }).join("");
+    // 并行拉取每个插件的可更新版本列表（仅高于当前版本），填充下拉与更新日志
+    pending.forEach(([name, info]) => loadSpuVersions(name, info));
+  }
+  const modal = document.getElementById("update-center-modal");
+  if (modal) modal.classList.add("show");
+}
+
+function refreshUpdateCenterApplyBtn() {
+  const applyBtn = document.getElementById("update-center-apply-btn");
+  if (!applyBtn) return;
+  const count = updateCenterState ? updateCenterState.pending.length : 0;
+  applyBtn.textContent = t("marketplace.update_all_button") + (count ? " (" + count + ")" : "");
+  applyBtn.disabled = !count;
+}
+
+async function loadSpuVersions(name, info) {
+  const marketId = String((info && info.market_id) || "");
+  const current = String((info && info.local_version) || "");
+  let detail = null;
+  try {
+    const res = await api("GET", "/api/market/plugin/" + encodeURIComponent(marketId));
+    detail = res.data || {};
+  } catch (e) { detail = null; }
+  const cards = document.querySelectorAll("#update-center-list .spu-card[data-spu-name]");
+  const card = Array.from(cards).find((el) => el.dataset.spuName === name);
+  if (!card || !updateCenterState) return;
+  const changelogEl = card.querySelector(".spu-changelog");
+  const select = card.querySelector("[data-spu-version]");
+  const versions = detail && Array.isArray(detail.versions) ? detail.versions : [];
+  // 只保留版本号大于当前版本的选项（与市场更新弹窗同规则）
+  const newer = versions
+    .filter((v) => v && typeof v === "object" && compareVersions(String(v.version || ""), current) > 0)
+    .sort((a, b) => compareVersions(String(b.version || ""), String(a.version || "")));
+  if (changelogEl) {
+    const latestEntry = newer[0] || null;
+    const text = latestEntry && latestEntry.changelog
+      ? String(latestEntry.changelog)
+      : (detail && (detail.summary || detail.description)) || "";
+    changelogEl.textContent = text || t("marketplace.no_changelog");
+  }
+  if (select) {
+    if (newer.length) {
+      select.innerHTML = newer.map((v, idx) => {
+        const ver = String(v.version || "");
+        return `<option value="${esc(ver)}"${idx === 0 ? " selected" : ""}>v${esc(ver)}</option>`;
+      }).join("");
+    } else {
+      // 版本列表拉取失败：至少保留"更新到检查到的最新版"
+      const fallback = String((info && info.latest_version) || "");
+      select.innerHTML = `<option value="${esc(fallback)}">v${esc(fallback || "?")}</option>`;
+    }
+    select.disabled = false;
+  }
+}
+
+function removeUpdateCenterCard(name) {
+  const list = document.getElementById("update-center-list");
+  if (list) {
+    const cards = list.querySelectorAll(".spu-card[data-spu-name]");
+    Array.from(cards).forEach((el) => { if (el.dataset.spuName === name) el.remove(); });
+  }
+  if (updateCenterState) {
+    updateCenterState.pending = updateCenterState.pending.filter(([n]) => n !== name);
+    const summary = document.getElementById("update-center-summary");
+    if (summary) summary.textContent = t("marketplace.update_center_summary", { count: updateCenterState.pending.length });
+    if (!updateCenterState.pending.length) {
+      closeModal("update-center-modal");
+      updateCenterState = null;
+      showAllUpToDateModal(0);
+    } else {
+      refreshUpdateCenterApplyBtn();
+    }
+  }
+}
+
+async function updateSpuFromCard(btn) {
+  const card = btn.closest(".spu-card");
+  if (!card) return;
+  const name = card.dataset.spuName || "";
+  const select = card.querySelector("[data-spu-version]");
+  const version = select ? String(select.value || "") : "";
+  if (!name) return;
+  if (!await customConfirm(t("marketplace.update_confirm", { name }))) return;
+  card.classList.add("updating");
+  btn.disabled = true;
+  try {
+    const res = await api("POST", `/api/subplugins/${encodeURIComponent(name)}/market-update`, { version });
+    watchMarketTask(res.data.task_id, t("marketplace.update_success", { name }), (ok) => {
+      if (ok) {
+        removeUpdateCenterCard(name);
+      } else {
+        card.classList.remove("updating");
+        btn.disabled = false;
+      }
+    });
+  } catch (e) {
+    card.classList.remove("updating");
+    btn.disabled = false;
+    toast(e.message || t("marketplace.update_failed", { name }), true);
+  }
+}
+
+async function updateAllSubplugins() {
+  if (!updateCenterState || !updateCenterState.pending.length) return;
+  const count = updateCenterState.pending.length;
+  if (!await customConfirm(t("marketplace.update_all_confirm", { count }))) return;
+  const applyBtn = document.getElementById("update-center-apply-btn");
+  if (applyBtn) applyBtn.disabled = true;
+  document.querySelectorAll("#update-center-list .spu-card").forEach((el) => el.classList.add("updating"));
+  try {
+    const res = await api("POST", "/api/market/update-all", {});
+    watchMarketTask(res.data.task_id, t("marketplace.update_all_success"), () => {
+      closeModal("update-center-modal");
+      updateCenterState = null;
+    });
+  } catch (e) {
+    if (applyBtn) applyBtn.disabled = false;
+    document.querySelectorAll("#update-center-list .spu-card").forEach((el) => el.classList.remove("updating"));
+    toast(e.message || t("marketplace.update_all_failed"), true);
+  }
 }
 
 /* ─── 更新流程：单一更新按钮 → 市场更新 / 手动更新 ─── */
@@ -3358,6 +3786,7 @@ function renderMarketUpdateContent(detail, currentVersion, newerVersions) {
     const deps = Array.isArray(v.dependencies) && v.dependencies.length
       ? `<div class="ver-meta">${esc(t("marketplace.detail_dependencies"))}: ${esc(v.dependencies.join(", "))}</div>`
       : "";
+    const reqs = formatRequiresMeta(v);
     const minLb = v.min_lumenbridge ? `<div class="ver-meta">${esc(t("marketplace.detail_min_lb"))}: ${esc(v.min_lumenbridge)}</div>` : "";
     const date = v.published_at ? String(v.published_at).replace("T", " ").slice(0, 16) : "";
     return `<div class="market-ver-item${selected}" data-version="${esc(v.version || "")}">
@@ -3365,7 +3794,7 @@ function renderMarketUpdateContent(detail, currentVersion, newerVersions) {
       <div class="ver-body">
         <span class="ver">v${esc(v.version || "?")}</span>
         ${date ? ` <span class="ver-meta">${esc(date)}</span>` : ""}
-        ${deps}${minLb}
+        ${deps}${reqs}${minLb}
         ${v.changelog ? `<div class="ver-changelog">${esc(v.changelog)}</div>` : ""}
       </div>
     </div>`;
@@ -3431,6 +3860,16 @@ async function updateSubpluginDependencies(name) {
     const res = await api("POST", `/api/subplugins/${encodeURIComponent(name)}/update-deps`, {});
     watchMarketTask(res.data.task_id, t("marketplace.deps_update_success", { name }));
   } catch (e) { toast(e.message || t("marketplace.deps_update_failed", { name }), true); }
+}
+
+async function installSubpluginRequirements(name) {
+  // 插件级强制依赖补装：子插件依赖会从市场自动安装（像 pip 依赖那样），
+  // Endstone 插件依赖只能提示用户自行安装
+  if (!await customConfirm(t("subplugins.install_requirements_confirm", { name }))) return;
+  try {
+    const res = await api("POST", `/api/subplugins/${encodeURIComponent(name)}/install-requirements`, {});
+    watchMarketTask(res.data.task_id, t("subplugins.install_requirements_success", { name }));
+  } catch (e) { toast(e.message || t("subplugins.install_requirements_failed", { name, error: e.message }), true); }
 }
 
 

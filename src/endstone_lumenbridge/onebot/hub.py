@@ -1,13 +1,10 @@
 """多适配器管理枢纽（AdapterHub）。
 
-v1.2.0 起 LumenBridge 支持同时运行多个 OneBot v11 端点：
-- ``websocket``：直连 NapCat / Lagrange / LLOneBot 等协议端；
-- ``astrbot``：连接 AstrBot 插件端（astrbot_plugin_lumenbridge，协议同为 OneBot v11）。
-
-Hub 负责按 connections.json 的启用卡片创建 / 停止 / 热重建 OneBotAdapter 实例，
-并作为统一门面（facade）向模块与子插件提供与单适配器完全兼容的 OneBot API：
-- 发送类调用按群号智能路由（群属于哪个适配器就发给谁，未知群广播到全部）；
-- 查询类调用路由到主适配器（首个已连接实例）。
+支持同时运行多个 OneBot v11 端点：``websocket``（直连 NapCat / Lagrange /
+LLOneBot 等协议端）与 ``astrbot``（AstrBot 插件端）。Hub 按 connections.json
+的启用卡片创建 / 停止 / 热重建适配器实例，并作为统一门面提供与单适配器
+完全兼容的 OneBot API：发送类调用按群号智能路由（未知群广播到全部）；
+查询类调用路由到主适配器（首个已连接实例）。
 """
 
 from __future__ import annotations
@@ -128,11 +125,7 @@ class AdapterHub:
         return adapter
 
     def sync_from_manager(self) -> None:
-        """按 connections.json 当前状态差量重建适配器实例。
-
-        - 新增 / 配置变化的启用卡片：停止旧实例后创建并启动新实例；
-        - 删除或停用的卡片：停止并移除；
-        - 未变化的卡片：保持连接不动。
+        """按 connections.json 当前状态差量重建适配器实例（未变化卡片保持不动）。
 
         stop() 可能阻塞数秒（等待 WS 关闭与线程回收），持锁调用会阻塞
         其他 API 门面请求；因此锁内只做 diff 与待停/待建收集，锁外执行
@@ -172,7 +165,6 @@ class AdapterHub:
                 adapter.start()
                 self.logger.info(_t("hub.adapter_started", name=adapter.display_name))
             if not desired:
-                # 状态未变化时只告警一次，避免每次 WebUI 保存重复刷屏
                 if not self._warned_no_adapters:
                     self._warned_no_adapters = True
                     self.logger.warning(_t("hub.no_enabled_adapters"))
@@ -180,8 +172,7 @@ class AdapterHub:
                 self._warned_no_adapters = False
 
     def stop_all(self) -> None:
-        # 与 sync_from_manager 同理：stop() 可能阻塞数秒，
-        # 锁内只拷贝并清空，锁外逐个停止，避免阻塞 API 门面请求
+        # 与 sync_from_manager 同理：锁内拷贝清空，锁外逐个 stop()
         with self._lock:
             adapters = list(self._adapters.items())
             self._adapters.clear()

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import itertools
 import threading
 import traceback
 from collections import defaultdict
@@ -33,8 +34,7 @@ class EventBus:
     def once(self, event: str, handler: Callable[..., Any]) -> Callable[..., Any]:
         """注册一次性事件监听器，触发一次后自动移除"""
         with self._lock:
-            # 与 on() 一致去重：同一 handler 重复 once 只注册一次，
-            # 避免重载流程叠加注册后回调被连续触发多次
+            # 与 on() 一致去重，避免重载流程叠加注册
             if handler not in self._once_listeners[event]:
                 self._once_listeners[event].append(handler)
         return handler
@@ -62,7 +62,8 @@ class EventBus:
             handlers = list(self._listeners.get(event, []))
             once_handlers = self._once_listeners.pop(event, [])
 
-        for handler in handlers + once_handlers:
+        # chain 免去每条消息一次的列表拼接分配
+        for handler in itertools.chain(handlers, once_handlers):
             try:
                 handler(*args, **kwargs)
             except Exception:

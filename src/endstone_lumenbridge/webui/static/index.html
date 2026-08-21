@@ -342,7 +342,9 @@ tr:last-child td { border-bottom: none; }
 .tag.red { background: rgba(255,69,58,.14); color: var(--red); }
 .tag.gray { background: rgba(120,120,128,.14); color: var(--muted); }
 .tag.blue { background: var(--accent-soft); color: var(--accent); }
-@media (prefers-color-scheme: dark) { .tag.green { color: var(--green); } }
+.tag.orange { background: rgba(255,159,10,.15); color: #b25000; }
+.tag.cyan { background: rgba(50,173,230,.13); color: #0f6f9e; }
+@media (prefers-color-scheme: dark) { .tag.green { color: var(--green); } .tag.orange { color: #ffb454; } .tag.cyan { color: #5ac8fa; } }
 
 .form-row {
   display: flex; align-items: flex-start; gap: 14px;
@@ -531,13 +533,32 @@ textarea.file-editor {
 @media (max-width: 640px) { .iframe-wrap iframe { height: 70vh; } }
 
 .subplugin-card { padding: 13px 15px; border-radius: var(--radius-md); margin-bottom: 10px; }
-.sp-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.sp-head .name { font-size: 15px; font-weight: 700; }
-/* 描述固定两行截断（超出走浮层展开），保证所有子插件卡片高度一致 */
+/* 子插件列表：窄屏单列独占一行；宽屏（横屏电脑）固定两列并排。
+   列轨道用 minmax(0, 1fr)：轨道宽度只由容器决定，卡片内容（长描述、长名字、
+   长错误文本）无法把某一列撑宽，保证所有子插件卡片严格等宽；
+   align-items: stretch 让同一行的卡片拉伸到等高，卡片大小一致。 */
+#sp-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; align-items: start; }
+/* 视口 ≥1160px 时主内容区 ≥850px（减去侧栏 240 + 间距与内边距 66）：两列各 ≥420px */
+@media (min-width: 1160px) {
+  #sp-list { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; align-items: stretch; }
+  #sp-list .subplugin-card { margin-bottom: 0; min-width: 0; width: 100%; }
+  #sp-list .empty-state { grid-column: 1 / -1; }
+}
+/* 标题行固定单行：名称超长时省略号截断（悬停有 title 全名），
+   徽章不压缩，行高恒定 → 卡片高度不受名称/徽章数量影响 */
+.sp-head { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; min-width: 0; }
+.sp-head .name {
+  font-size: 15px; font-weight: 700; min-width: 0; flex: 0 1 auto;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sp-head .tag { flex: 0 0 auto; }
+/* 描述固定两行截断（超出走浮层展开）并固定占位两行：
+   短描述也保留两行空间，描述长短不影响卡片高度，所有卡片大小一致 */
 .sp-desc-row { display: flex; align-items: flex-end; gap: 6px; margin-top: 5px; }
 .sp-desc {
   color: var(--muted); font-size: 12.5px; line-height: 1.5; flex: 1; min-width: 0;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  min-height: 3em; /* 2 行 × 1.5 行高 */
 }
 .sp-desc-expand {
   display: none; width: 24px; height: 24px; flex: 0 0 24px; margin-bottom: 1px;
@@ -1044,12 +1065,12 @@ textarea.file-editor {
 }
 .market-card:hover { border-color: var(--accent); transform: translateY(-1px); box-shadow: 0 6px 18px rgba(0,0,0,.12); }
 .market-card .market-avatar {
-  width: 84px; flex: 0 0 84px; min-height: 84px; border-radius: 14px;
+  width: 84px; height: 84px; flex: 0 0 84px; border-radius: 14px;
   display: flex; align-items: center; justify-content: center;
   font-size: 26px; font-weight: 700; color: var(--muted);
   background: var(--input-bg); border: 1px solid var(--divider);
   background-size: cover; background-position: center;
-  overflow: hidden; align-self: stretch;
+  overflow: hidden; align-self: flex-start;
   transition: border-color .18s;
 }
 .market-card:hover .market-avatar { border-color: var(--accent); }
@@ -1193,6 +1214,33 @@ textarea.file-editor {
   animation: latest-blink 2s ease-in-out infinite;
 }
 @keyframes latest-blink { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+.latest-version-toolbar { justify-content: flex-end; }
+
+/* ---------------- 批量更新弹窗（子插件更新卡片 + 一键更新） ---------------- */
+.spu-card {
+  border: 1px solid var(--divider); border-radius: 12px; padding: 11px 13px;
+  margin-bottom: 10px; background: var(--input-bg);
+  transition: border-color .15s;
+}
+.spu-card:hover { border-color: var(--accent); }
+.spu-card.updating { opacity: .62; pointer-events: none; }
+.spu-head-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.spu-name { font-weight: 700; font-size: 14px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.spu-arrow { color: var(--muted); flex: 0 0 auto; }
+.spu-changelog {
+  margin-top: 6px; font-size: 12px; color: var(--muted); line-height: 1.55;
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 110px; overflow-y: auto;
+}
+.spu-actions-row { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
+.spu-actions-row select { flex: 1; min-width: 0; padding: 8px 10px; font-size: 13px; }
+.spu-updates-summary { font-size: 13px; color: var(--muted); margin: 2px 0 12px; }
+/* 更新中心卡片列表：弹窗内宽屏两列并排，窄屏单列 */
+.spu-list { display: grid; grid-template-columns: 1fr; gap: 10px; }
+.spu-list .spu-card { margin-bottom: 0; min-width: 0; }
+@media (min-width: 700px) {
+  .spu-list { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+}
 
 /* ---------------- 市场更新弹窗（版本选择 + 一键更新） ---------------- */
 .market-update-current { display: flex; align-items: center; gap: 7px; margin-top: 3px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
@@ -2061,6 +2109,21 @@ textarea.file-editor {
     </div>
     <div class="toolbar latest-version-toolbar">
       <button class="btn small" onclick="closeModal('latest-version-modal')" data-i18n="marketplace.already_latest_ok">我知道了</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask" id="update-center-modal" data-closable="true" onclick="maskClick(event,'update-center-modal')">
+  <div class="modal glass update-center-modal" style="max-width:860px">
+    <h3><span data-i18n="marketplace.update_center_title">可更新的子插件</span> <button class="close-x" onclick="closeModal('update-center-modal')">✕</button></h3>
+    <div class="modal-body">
+      <div class="spu-updates-summary" id="update-center-summary"></div>
+      <div id="update-center-list" class="spu-list"></div>
+    </div>
+    <div class="toolbar" style="margin:20px 0 0;justify-content:flex-end;align-items:center;gap:10px">
+      <span style="flex:1"></span>
+      <button class="btn small ghost" onclick="closeModal('update-center-modal')" data-i18n="common.close">关闭</button>
+      <button class="btn small" id="update-center-apply-btn" onclick="updateAllSubplugins()" data-i18n="marketplace.update_all_button">一键更新全部</button>
     </div>
   </div>
 </div>

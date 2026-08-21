@@ -1,30 +1,20 @@
 """QQ 官方机器人适配器（WebSocket 网关模式）—— 组合入口。
 
-对接 QQ 开放平台机器人 API（api.bot.qq.com）。本文件只保留适配器本体：
+对接 QQ 开放平台机器人 API（api.bot.qq.com）。本文件保留适配器本体：
 网关会话（Hello/Identify/Resume/心跳）、鉴权（access_token）、REST 通道、
-生命周期与 OneBot 兼容接口；其余职责拆分至 ``qqofficial`` 子包：
-
-- ``qqofficial/constants.py``   协议常量（OP 码 / Intents / 窗口 / 错误码）
-- ``qqofficial/utils.py``       HTTP 错误封装、业务码提取、消息内容解析
-- ``qqofficial/credentials.py`` 被动凭据池 / 入群 event_id / 主动补发栈
-- ``qqofficial/translate.py``   官方事件 → OneBot v11 事件包翻译
-- ``qqofficial/sender.py``      发送队列 / 富媒体上传 / 重试矩阵 / 补发
-
-消息范围：群消息（group_message_create 全量 / group_at_message_create @）、
-C2C 私聊（c2c_message_create）、频道（at_message_create / direct_message_create）
-及全部 notice / 扩展事件（OneBot 无语义的以官方事件名小写转发）。
-群标识为 group_openid（字符串），与 OneBot 数字群号不同，经 parse_groups_loose
-解析；事件包携带 ``domain="official"``（频道为 "guild"）与个人号域区分。
-
-实现为零外部依赖：REST 走 urllib（asyncio.to_thread），WS 走内嵌 websockets。
-事件包转换为 OneBot v11 格式后经 ``bus.emit("onebot.pack", ...)`` 派发，
-因此 dispatcher / chat_sync / 正则引擎 / 子插件全部复用。
+生命周期与 OneBot 兼容接口；其余职责拆分至 ``qqofficial`` 子包
+（constants 协议常量 / utils 工具 / credentials 凭据池 / translate 事件
+翻译 / sender 发送）。群标识为 group_openid（字符串），事件包携带
+``domain="official"``（频道为 "guild"）与个人号域区分。零外部依赖：REST
+走 urllib（asyncio.to_thread），WS 走内嵌 websockets；事件包转换为
+OneBot v11 格式后经 ``bus.emit("onebot.pack", ...)`` 派发复用下游。
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import queue
 import random
 import threading
 import time
@@ -94,7 +84,7 @@ websockets = import_websockets()
 
 # ---------------------------------------------------------------- 兼容别名
 # 历史版本常量 / 函数自本模块导入（tests/test_qqofficial.py 与文档引用），
-# 模块分离后统一 re-export；下划线名保持不变以兼容 monkeypatch。
+# 下划线名保持不变以兼容 monkeypatch。
 _API_DOMAIN = API_DOMAIN
 _SANDBOX_DOMAIN = SANDBOX_DOMAIN
 _TOKEN_URL = TOKEN_URL
@@ -188,6 +178,13 @@ class QQOfficialAdapter:
         self._running = False
         self._main_future: Any = None
 
+        # 入站事件派发队列：事件总线处理器链（正则命令 executeCommand
+        # 最长阻塞 command_timeout）绝不能在 WS 事件循环线程内同步执行——
+        # 心跳会停跳，ACK 看门狗判定半开连接并触发重连风暴
+        # （与 OneBotAdapter._dispatch_worker 同一设计动机）
+        self._dispatch_queue: queue.Queue | None = None
+        self._dispatch_thread: threading.Thread | None = None
+
         self._ws: Any = None
         self._heartbeat_task: asyncio.Task | None = None
 
@@ -196,7 +193,6 @@ class QQOfficialAdapter:
         self._last_seq: int = 0
         # 最近一次心跳 ACK（op 11）到达时间：心跳看门狗判定半开连接用
         self._last_ack_at: float = 0.0
-        # access_token 缓存
         self._access_token: str = ""
         self._token_expires: float = 0.0
         # asyncio.Lock 需绑定运行中的事件循环：__init__ 早于事件循环创建，
@@ -228,8 +224,7 @@ class QQOfficialAdapter:
         ws = self._ws
         if ws is None:
             return False
-        # websockets>=13 新 asyncio API 用 state（State.OPEN==1）；
-        # 旧 legacy API 才有 closed 属性，做双兼容。
+        # websockets 新旧 API 双兼容（详细原因见 _heartbeat_loop）
         state = getattr(ws, "state", None)
         if state is not None:
             return state == _WS_STATE_OPEN
@@ -317,6 +312,13 @@ class QQOfficialAdapter:
         if self._running:
             return
         self._running = True
+        self._dispatch_queue = queue.Queue(maxsize=2000)
+        self._dispatch_thread = threading.Thread(
+            target=self._dispatch_worker,
+            name=f"LumenBridge-QQOfficial-Dispatch-{self.adapter_id or 'default'}",
+            daemon=True,
+        )
+        self._dispatch_thread.start()
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
             target=self._run_loop,
@@ -364,11 +366,73 @@ class QQOfficialAdapter:
         self._main_future = None
         self._heartbeat_task = None
         self._ws = None
+        # 停止派发工作线程：哨兵入队（队满时靠 worker 的 _running 轮询兜底退出）
+        if self._dispatch_queue is not None:
+            try:
+                self._dispatch_queue.put_nowait(None)
+            except queue.Full:
+                pass
+        if self._dispatch_thread and self._dispatch_thread is not threading.current_thread():
+            self._dispatch_thread.join(timeout=2)
+        self._dispatch_queue = None
+        self._dispatch_thread = None
         self.sender.queue = None
         self.sender.task = None
         # 锁可能绑定旧事件循环，重置以便下次 start() 在新循环内重建
         self._token_lock = None
         self.logger.info(_t("adapter.stopped"))
+
+    def _emit_pack(self, pack: dict[str, Any]) -> None:
+        """入站事件包入派发队列（WS 事件循环线程调用，必须非阻塞）。
+
+        队满时丢最旧保最新（与 OneBotAdapter 同策略）：下游阻塞时宁可
+        丢弃旧事件也不能阻塞事件循环——心跳停跳会触发重连风暴。
+        """
+        q = self._dispatch_queue
+        if q is None:
+            # stop() 后残留调用（translator 尾部未完成的协程）直接透传，
+            # 保持语义不丢事件
+            try:
+                self.bus.emit("onebot.pack", pack)
+            except Exception:
+                pass
+            return
+        try:
+            q.put_nowait(pack)
+        except queue.Full:
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                q.put_nowait(pack)
+            except queue.Full:
+                pass
+
+    def _dispatch_worker(self) -> None:
+        """串行消费入站事件派发队列（FIFO 保序）。
+
+        退出条件双保险：收到哨兵 或 _running 已置 False（stop() 中
+        哨兵在队满时可能被 put_nowait 丢弃，靠 _running 轮询兜底退出）。
+        """
+        q = self._dispatch_queue
+        if q is None:
+            return
+        while True:
+            try:
+                data = q.get(timeout=1.0)
+            except queue.Empty:
+                if not self._running:
+                    return
+                continue
+            if data is None:
+                return
+            if not self._running:
+                return
+            try:
+                self.bus.emit("onebot.pack", data)
+            except Exception:
+                self.logger.exception(_t("adapter.forward_msg_error"))
 
     def _run_loop(self) -> None:
         loop = self._loop
@@ -389,7 +453,6 @@ class QQOfficialAdapter:
             loop.close()
 
     async def _main(self) -> None:
-        # 延迟创建 token 锁：确保绑定本适配器自有事件循环
         if self._token_lock is None:
             self._token_lock = asyncio.Lock()
         self.sender.start()
@@ -417,10 +480,12 @@ class QQOfficialAdapter:
                         self.bus.emit("bot.offline", self)
                     except Exception:
                         pass
-            # GROUP_MEMBER（1<<24）自适应降级：全新 Identify 的会话在收到
-            # READY 前即断开视为一次失败（权限不足被网关拒绝等），
-            # 连续达阈值后摘除该位重连，避免死循环拒连
-            if self._running and was_fresh_identify and not ready_before:
+            # 全新 Identify 在收到 READY 前即断开视为一次失败（权限不足
+            # 被网关拒连等），连续达阈值后摘除 GROUP_MEMBER 位避免死循环。
+            # 仅统计 WS 已建立后的失败（was_online）：网关地址获取阶段的
+            # 网络错误（DNS 未就绪等）与 Identify 权限无关，混入计数会在
+            # 启动期两次网络抖动后永久摘除订阅位（无恢复路径）
+            if self._running and was_fresh_identify and not ready_before and was_online:
                 ready_now = bool(self._session_id)
                 if ready_now:
                     self._identify_failures = 0
@@ -477,7 +542,6 @@ class QQOfficialAdapter:
 
     async def _access_token_async(self, *, force: bool = False) -> str:
         """获取（必要时刷新）access_token；force 用于 4004 后强制重取。"""
-        # None 防御：锁在 _main 开头创建，此处兜底保证早于 _main 调用时也可用
         if self._token_lock is None:
             self._token_lock = asyncio.Lock()
         async with self._token_lock:
@@ -565,6 +629,17 @@ class QQOfficialAdapter:
                         return reason
                 except Exception:
                     self.logger.exception(_t("qqofficial.dispatch_error"))
+            # 连接被服务端关闭：按关闭码判断会话是否已失效，失效则重置
+            # 会话状态让外层重连走全新 Identify（否则会带着死会话无限 Resume）
+            if self._running:
+                code = getattr(ws, "close_code", None)
+                if isinstance(code, int) and (
+                    code in _SESSION_RESET_CODES or code in _AUTH_FAIL_CODES
+                ):
+                    if not self.suppress_connection_log:
+                        self.logger.warning(_t("qqofficial.session_reset_code", code=code))
+                    self._session_id = ""
+                    self._last_seq = 0
         return SESSION_ENDED
 
     async def _on_gateway_message(self, raw: Any) -> str | None:
@@ -606,6 +681,10 @@ class QQOfficialAdapter:
         if op == OP_DISPATCH:
             seq = msg.get("s")
             if isinstance(seq, int) and seq > 0:
+                if seq <= self._last_seq:
+                    # Resume 补发重放去重：序号 <= 已处理最大序号的事件
+                    # 说明网关重放了断线前已派发过的消息，直接丢弃防重复下发
+                    return None
                 self._last_seq = seq
             await self._on_dispatch(msg)
             return None
@@ -678,8 +757,7 @@ class QQOfficialAdapter:
             }
         # OneBot v11 元事件对齐：连接建立后上报 lifecycle.connect，
         # 子插件经 meta_event.connect 订阅在官方/个人号适配器间行为一致
-        self.bus.emit(
-            "onebot.pack",
+        self._emit_pack(
             {
                 "self_id": self.app_id,
                 "time": int(time.time()),
@@ -688,7 +766,7 @@ class QQOfficialAdapter:
                 "sub_type": "connect",
                 "domain": "official",
                 "_lumen_adapter_id": self.adapter_id,
-            },
+            }
         )
         self.bus.emit("bot.online", self)
         self.logger.info(
@@ -704,12 +782,7 @@ class QQOfficialAdapter:
 
     # ------------------------------------------------------------ 入群审批
     def remember_group(self, group_openid: Any) -> None:
-        """记录动态发现的群 openid（收到该群的任意事件时调用）。
-
-        官方无群列表 API，「未配置群 openid = 全局转发」语义下的广播目标
-        只能从流入事件中学习。上限防爆内存；新群首次发现时提示管理员
-        可将其抄录进连接配置以固定目标。
-        """
+        """记录动态发现的群 openid：官方无群列表 API，广播目标从流入事件学习。"""
         key = str(group_openid or "").strip()
         if not key:
             return
@@ -725,11 +798,7 @@ class QQOfficialAdapter:
             )
 
     def broadcast_groups(self) -> list[str]:
-        """广播目标群列表：配置的 groups 优先，未配置时用动态发现的群。
-
-        chat_sync 出站广播调用；两者皆空返回空列表（调用方跳过发送，
-        不再向不存在的虚拟群 0 发送）。
-        """
+        """广播目标群列表：配置的 groups 优先，未配置时用动态发现的群（皆空返回空列表）。"""
         if self.groups:
             return list(self.groups)
         return list(self._discovered_groups)
@@ -746,11 +815,7 @@ class QQOfficialAdapter:
 
     # ------------------------------------------------------------ 消息撤回
     def remember_msg_scope(self, message_id: Any, kind: str, target: str) -> None:
-        """记录消息 id → (kind, target) 映射，供 delete_msg 反查群/私聊。
-
-        kind: "group"（撤回官方支持，机器人消息 2 分钟内、管理员可撤成员消息）
-              / "private"（官方无撤回接口，仅记录用于告警提示）。
-        """
+        """记录消息 id → (kind, target) 映射，供 delete_msg 反查群/私聊。"""
         key = str(message_id or "")
         if not key or not target:
             return
@@ -903,16 +968,14 @@ class QQOfficialAdapter:
     def __getattr__(self, name: str) -> Any:
         """未显式实现的 OneBot 方法统一降级：末参为回调时以 None 通知失败。
 
-        hub.__getattr__ 会把任意 OneBot 方法代理到适配器，QQ 官方协议
-        没有对应能力（禁言 / 撤回 / 群管理等），降级避免 AttributeError；
-        写操作（set_/delete_ 等）按 warning 记录，避免静默失败无感知。
+        QQ 官方协议没有对应能力（禁言 / 撤回 / 群管理等），降级避免
+        AttributeError；写操作按 warning 记录，避免静默失败无感知。
         """
         if name.startswith("_"):
             raise AttributeError(name)
 
         def _unsupported(*args: Any, **kwargs: Any) -> Any:
             self.logger.warning(_t("qqofficial.unsupported_action", action=name))
-            # 末参为回调时回调 None 通知失败（查询与写操作一致）
             if args and callable(args[-1]):
                 try:
                     args[-1](None)

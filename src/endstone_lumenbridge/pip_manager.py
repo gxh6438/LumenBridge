@@ -634,7 +634,13 @@ class PipManager:
                     if not line:
                         continue
                     if on_log:
-                        on_log(line)
+                        # 回调异常（WebUI 连接断开等）不能中断读取循环：
+                        # 异常逃逸会让 finally 只取消看门狗而不结束子进程，
+                        # pip 在后台继续安装变成无人管理的半安装状态
+                        try:
+                            on_log(line)
+                        except Exception:  # noqa: BLE001
+                            pass
                     stdout_tail.append(line)
                     if len(stdout_tail) > 30:
                         stdout_tail.pop(0)
@@ -642,6 +648,10 @@ class PipManager:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 process.kill()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
         finally:
             watchdog.cancel()
             stderr_thread.join(timeout=5)

@@ -9,6 +9,7 @@ import json
 import os
 import platform
 import re
+import secrets
 import threading
 import time
 import urllib.error
@@ -26,6 +27,7 @@ from ..i18n import (
     normalize_locale,
     t as _t,
 )
+from ..subplugin.requires import parse_requires_from_manifest
 from . import auth as auth_util
 from .configform import ConfigFormBuilder
 from .logbuffer import LogBuffer
@@ -184,7 +186,6 @@ class _NullLock:
         pass
 
 CONFIG_LABEL_KEYS: dict[str, str] = {
-    # v1.2.0：connection / admin_qq / main_group / sync 迁移至连接配置（适配器卡片）
     "debug": "debug",
     "language": "language",
     "whitelist": "whitelist.section",
@@ -233,6 +234,7 @@ CONFIG_LABEL_KEYS: dict[str, str] = {
     "commands.reload.allow_player": "commands.reload.allow_player",
     "commands.say.allow_player": "commands.say.allow_player",
     "commands.plugins.allow_player": "commands.plugins.allow_player",
+    "commands.update.allow_player": "commands.update.allow_player",
     "commands.pip.allow_in_game": "commands.pip.allow_in_game",
     "commands.pip.allow_player": "commands.pip.allow_player",
 }
@@ -301,6 +303,9 @@ class WebUIServer:
         self._pip_tasks_lock = threading.Lock()
         # 复用 plugin._pip_serial_lock：WebUI 与 marketplace 共享串行锁，避免并发写 site-packages 损坏元数据。
         self._pip_serial_lock = plugin._pip_serial_lock
+        # pip list 结果短缓存（时间戳, 列表）：避免前端并发刷新刷出多个 pip 子进程
+        self._pip_list_cache: tuple[float, list[dict[str, Any]]] | None = None
+        self._pip_list_lock = threading.Lock()
         self._market_tasks: dict[str, dict[str, Any]] = {}
         self._market_tasks_lock = threading.Lock()
 
@@ -359,11 +364,14 @@ class WebUIServer:
 
             libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
             SIG_DFL, SIG_IGN, SIGPIPE = 0, 1, 13
-            # signal() 返回旧处理器；仅当旧值为 SIG_DFL(0) 时保留 IGN，
-            # 否则恢复宿主已设置的处理器，避免覆盖 BDS 的 SIGPIPE 逻辑
+            # signal() 返回旧处理器（函数指针）；必须声明 restype 为
+            # c_void_p——默认按 c_int 截断 64 位指针后，恢复宿主处理器时
+            # 会跳转到坏地址导致进程崩溃
+            libc.signal.restype = ctypes.c_void_p
+            libc.signal.argtypes = [ctypes.c_int, ctypes.c_void_p]
             old = libc.signal(SIGPIPE, SIG_IGN)
-            if old not in (SIG_DFL, SIG_IGN):
-                libc.signal(SIGPIPE, old)
+            if old not in (SIG_DFL, SIG_IGN, None):
+                libc.signal(SIGPIPE, ctypes.c_void_p(old))
         except (OSError, AttributeError, ValueError):
             pass
 
@@ -419,6 +427,10 @@ class WebUIServer:
     LOGIN_FAIL_THRESHOLD = 5
     LOGIN_LOCK_BASE_SECONDS = 60.0
     LOGIN_LOCK_MAX_SECONDS = 900.0
+    # 失败计数衰减窗口：距上次失败超过该时长视为不再“连续”，计数清零。
+    # 没有衰减时“连续 5 次”会退化成“累计 5 次”——管理员一周内偶尔输错
+    # 5 次密码后锁定时长指数增长且永远无法恢复（锁定期间无法登录清零）
+    LOGIN_FAIL_DECAY_SECONDS = 300.0
 
     def _login_check_allowed(self, ip: str) -> tuple[bool, str]:
         """登录前置检查：锁定状态与请求频率窗口（H1）。返回 (是否放行, 提示消息)。"""
@@ -428,7 +440,8 @@ class WebUIServer:
             if len(self._login_guard) > 4096:
                 stale = [
                     key for key, state in self._login_guard.items()
-                    if state["locked_until"] <= now and now - state["window_start"] >= self.LOGIN_WINDOW_SECONDS
+                    if state["locked_until"] <= now
+                    and now - state.get("last_fail", 0.0) >= self.LOGIN_FAIL_DECAY_SECONDS
                 ]
                 for key in stale:
                     self._login_guard.pop(key, None)
@@ -437,11 +450,14 @@ class WebUIServer:
                 wait = int(state["locked_until"] - now) + 1
                 return False, f"登录失败次数过多，已临时锁定，请约 {wait} 秒后重试"
             if state is None:
-                state = {"fails": 0, "locked_until": 0.0, "window_start": now, "attempts": 0}
+                state = {"fails": 0, "locked_until": 0.0, "window_start": now, "attempts": 0, "last_fail": 0.0}
                 self._login_guard[ip] = state
             elif now - state["window_start"] >= self.LOGIN_WINDOW_SECONDS:
                 state["window_start"] = now
                 state["attempts"] = 0
+            # 失败计数衰减：实现注释声明的“连续失败”语义
+            if state["fails"] and now - state.get("last_fail", 0.0) >= self.LOGIN_FAIL_DECAY_SECONDS:
+                state["fails"] = 0
             if state["attempts"] >= self.LOGIN_MAX_ATTEMPTS_PER_WINDOW:
                 return False, "登录请求过于频繁，请稍后再试"
             state["attempts"] += 1
@@ -458,6 +474,7 @@ class WebUIServer:
                 self._login_guard.pop(ip, None)
                 return
             state["fails"] += 1
+            state["last_fail"] = now
             if state["fails"] >= self.LOGIN_FAIL_THRESHOLD:
                 exceed = state["fails"] - self.LOGIN_FAIL_THRESHOLD + 1
                 lock = min(self.LOGIN_LOCK_BASE_SECONDS * (2 ** (exceed - 1)), self.LOGIN_LOCK_MAX_SECONDS)
@@ -563,11 +580,35 @@ class WebUIServer:
                         t["log_lines"].append(line)
 
         def run_install() -> None:
-            # 任务须等"依赖安装 +（如需要）主线程重载"均完成才结束；旧实现提前标记 done 导致用户在重载前再次操作。
+            # 任务须等"依赖安装 +（如需要）主线程重载"均完成才结束。
             install_success = False
             install_msg = ""
             reload_success: bool | None = None
             reload_error = ""
+            if action == "uninstall":
+                # 卸载与安装共用任务框架：请求线程只拿 task_id 轮询，
+                # 不再无限期等待串行锁 + 同步跑子进程（原实现会把
+                # HTTP 请求线程挂起数分钟）
+                try:
+                    with self._pip_serial_lock:
+                        install_success, install_msg = mgr.uninstall(packages[0] if packages else "")
+                except Exception as exc:  # noqa: BLE001
+                    install_msg = str(exc)
+                with self._pip_tasks_lock:
+                    current = self._pip_tasks.get(task_id)
+                    if current:
+                        current.update({
+                            "done": True, "success": bool(install_success),
+                            "installation_success": bool(install_success),
+                            "reload_success": None,
+                            "reload_required": False,
+                            "msg": install_msg or ("卸载完成" if install_success else "卸载失败"),
+                            "status": "success" if install_success else "failed",
+                        })
+                # 环境已变更：失效 pip list 缓存
+                with self._pip_list_lock:
+                    self._pip_list_cache = None
+                return
             try:
                 # pip/uv 非线程安全：串行化所有安装操作，避免并发写 site-packages 损坏元数据
                 with self._pip_serial_lock:
@@ -643,6 +684,9 @@ class WebUIServer:
                         "msg": final_message,
                         "status": "success" if overall_success else "failed",
                     })
+            # 环境已变更：失效 pip list 缓存
+            with self._pip_list_lock:
+                self._pip_list_cache = None
 
         threading.Thread(target=run_install, name=f"lumen-pip-{task_id}", daemon=True).start()
         return task_id
@@ -663,7 +707,6 @@ class WebUIServer:
         }
         with self._market_tasks_lock:
             now = time.time()
-            # 低危：仅淘汰 5 分钟前已完成的任务，保留近期结果供前端轮询
             completed = sorted(
                 (
                     (key, value) for key, value in self._market_tasks.items()
@@ -673,8 +716,6 @@ class WebUIServer:
             )
             while len(self._market_tasks) >= 20 and completed:
                 self._market_tasks.pop(completed.pop(0)[0], None)
-            # 全部 running 时不再强制淘汰 running 任务（会破坏其状态更新），
-            # 直接拒绝新任务，由调用方返回"任务数过多"
             if len(self._market_tasks) >= 20:
                 return None
             self._market_tasks[task_id] = task
@@ -848,6 +889,33 @@ class _RequestHandler(BaseHTTPRequestHandler):
         query = {k: v[0] for k, v in urllib.parse.parse_qs(parsed.query).items()}
         return parsed.path, query
 
+    def _read_body_with_deadline(self, length: int) -> bytes | None:
+        """按总时限分块读取请求体（Slowloris dribble 防护）。
+
+        socket 超时只约束单次 recv：攻击者以每 29 秒 1 字节的速度 dribble
+        可无限期占用连接线程。read1 每次至多一次底层 recv，配合总时限
+        （按体积给足慢速上传余量，下限 30s）把线程占用时间从无限收敛到
+        有界。超时/中断即断连，防残留字节污染下一请求。
+        """
+        # 最低 16KB/s 吞吐给足余量：16MB 上限 → 256s；小 body → 30s 下限
+        deadline = time.monotonic() + max(30.0, min(300.0, length / 16384.0))
+        chunks: list[bytes] = []
+        remaining = length
+        while remaining > 0:
+            if time.monotonic() >= deadline:
+                self.close_connection = True
+                return None
+            try:
+                chunk = self.rfile.read1(min(remaining, 64 * 1024))
+            except OSError:
+                self.close_connection = True
+                return None
+            if not chunk:  # EOF：对端提前断开
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
     def _read_body(self) -> Any:
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -863,7 +931,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
             # 在 HTTP/1.1 keep-alive 下被当作下一次请求行解析，污染后续请求
             self.close_connection = True
             return None
-        raw = self.rfile.read(length)
+        raw = self._read_body_with_deadline(length)
+        if raw is None:
+            return None
+        self._body_consumed = True
         try:
             return json.loads(raw.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -919,7 +990,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
             if length > 0:
                 self._drain_request_body()
             return None
-        raw = self.rfile.read(length)
+        raw = self._read_body_with_deadline(length)
+        if raw is None:
+            return None
+        self._body_consumed = True
         # multipart body 第一个分隔符前有 \r\n，需剥除避免空 part
         prefix = b"\r\n--" + boundary
         if raw.startswith(prefix):
@@ -977,8 +1051,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
         ]
         if suffix == ".html":
             # HTML 不缓存，保证插件升级后页面骨架及时更新。
-            # 面板主要部署于内网（127.0.0.1），此前追加的 CSP / X-Frame-Options
-            # 头会静默拦截跨域背景图、内联脚本与 iframe 自定义页，已按要求撤销。
+            # 面板主要部署于内网（127.0.0.1），CSP / X-Frame-Options
+            # 头会静默拦截跨域背景图、内联脚本与 iframe 自定义页。
             headers.append(("Cache-Control", "no-cache"))
         # 静态资源缓存策略：图片/图标可长缓存；js/css/html 不缓存，保证插件升级后 UI 及时更新
         elif suffix in (".png", ".ico"):
@@ -1002,7 +1076,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
     def _check_auth(self, query: dict[str, str]) -> bool:
         header = self.headers.get("Authorization", "")
         token = header[7:] if header.startswith("Bearer ") else query.get("token", "")
-        # 经 AuthProvider 校验：签名 + 有效期 + token 版本号
         return self.webui.auth_provider.verify_token(token)
 
     def _unauthorized(self) -> None:
@@ -1011,6 +1084,16 @@ class _RequestHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         # 管理面板只支持同源访问，不为任意网站提供跨域预检授权：
         # 405 + 不回 Access-Control-Allow-* 头，预检必然失败。
+        # 带 body 的 OPTIONS 同样要消费/断连（M3 请求走私防护）：
+        # _route 的 finally 兜底不覆盖本方法，残留字节会在 keep-alive 下
+        # 被当作下一请求行解析
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            length = -1
+        if length > 0:
+            self._drain_request_body()
+            self.close_connection = True
         self._safe_send_headers(405, [
             ("Allow", "GET, POST, PUT, DELETE"),
             ("Content-Length", "0"),
@@ -1031,6 +1114,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     def _route(self, method: str) -> None:
         path, query = self._parse()
+        # keep-alive 连接同一 handler 实例会串行处理多个请求，逐请求重置消费标志
+        self._body_consumed = False
         try:
             # 公共 API：固定白名单 + 全部 /api/i18n/ 语言包路由
             if method == "GET" and (
@@ -1105,6 +1190,54 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"code": 500, "msg": _t("webui.msg.internal_error")}, 500)
             except Exception:
                 pass
+        finally:
+            self._drain_leftover_body()
+
+    def _drain_leftover_body(self) -> None:
+        """兜底消费未被路由读取的请求体（M3 请求走私防护）。
+
+        keep-alive 下残留 body 会被当作下一请求行解析导致 400 并断连；
+        声明长度超出消费上限时直接关闭连接兜底。
+        """
+        if getattr(self, "_body_consumed", True):
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            return
+        if length <= 0:
+            return
+        if length > _MAX_UPLOAD_BYTES + 64 * 1024:
+            self.close_connection = True
+            return
+        self._drain_request_body()
+
+    def _acquire_main_op(self, done: threading.Event) -> tuple[Callable[[], None], Callable[[], None]] | tuple[None, None]:
+        """主线程长操作互斥入口。返回 (finish, defer_release)；acquire 失败返回 (None, None)。
+
+        - finish()：调用方完成全部后续处理（如依赖卸载）后调用，幂等释放互斥锁
+        - defer_release()：等待超时放弃响应时调用——起守护线程等任务完成后兜底释放，
+          防止超时返回后后台任务仍在执行时又叠加新的主线程操作
+        """
+        if not self.webui._main_op_lock.acquire(blocking=False):
+            return None, None
+        released = threading.Event()
+
+        def finish() -> None:
+            if not released.is_set():
+                released.set()
+                try:
+                    self.webui._main_op_lock.release()
+                except RuntimeError:
+                    pass
+
+        def defer_release() -> None:
+            def _wait_and_release() -> None:
+                done.wait()
+                finish()
+            threading.Thread(target=_wait_and_release, daemon=True).start()
+
+        return finish, defer_release
 
     def _route_public_api(self, method: str, path: str, query: dict[str, str]) -> None:
         """公共 API（无需鉴权）：i18n 语言包与背景图配置，供登录页加载。"""
@@ -1190,6 +1323,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
     def _route_api(self, method: str, path: str, query: dict[str, str]) -> None:
         if method == "POST" and path == "/api/auth/login":
             body = self._read_body() or {}
+            # JSON 合法但非对象（如数组/字符串）时 body.get 会抛 AttributeError
+            if not isinstance(body, dict):
+                return self._send_json({"code": 400, "msg": _t("webui.msg.invalid_body")}, 400)
             # 限速 + 恒定时间密码比较
             ip = str(self.client_address[0]) if self.client_address else ""
             ok, gmsg = self.webui._login_check_allowed(ip)
@@ -1210,7 +1346,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         cm = plugin.config_manager
 
         if method == "GET" and path == "/api/overview":
-            adapter = plugin.adapter  # AdapterHub 门面（v1.2.0 多适配器）
+            adapter = plugin.adapter  # AdapterHub 门面
             primary = adapter.primary() if hasattr(adapter, "primary") else adapter
             # 在线玩家必须从游戏主线程读取，否则非主线程访问 BDS 数据会导致崩溃。
             players_box: list[list[str]] = [[]]
@@ -1239,7 +1375,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             if getattr(plugin, "regex_module", None):
                 rules_count = len(getattr(plugin.regex_module, "rules", []))
             sub_mgr = getattr(plugin, "subplugin_manager", None)
-            # 多账号机器人资料（v1.3.0）：每个启用的适配器一条；bot_profile 为首个（兼容）
+            # 多账号机器人资料：每个启用的适配器一条；bot_profile 为首个（兼容）
             profiles: list[dict[str, Any]] = []
             if hasattr(plugin, "bot_profiles_snapshot"):
                 profiles = plugin.bot_profiles_snapshot()
@@ -1349,7 +1485,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     "msg": _t("webui.msg.config_saved"),
                 })
 
-        # ------------------------------------------------ 连接配置（v1.2.0 适配器卡片）
+        # ------------------------------------------------ 连接配置
         if path == "/api/connections":
             connections = getattr(plugin, "connections", None)
             if connections is None:
@@ -1542,6 +1678,29 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     regex.save_rules(body)
                 return self._send_json({"code": 200, "msg": _t("webui.msg.rules_saved")})
 
+        if method == "POST" and path == "/api/rules/image":
+            # 正则规则「回复图片」动作的图片上传：存到数据目录 rules_images/ 下
+            # （该目录在 image() 本地白名单内，动作执行时可直接按路径读取发送）
+            file_info = self._read_multipart_file()
+            if not file_info:
+                return self._send_json({"code": 400, "msg": _t("webui.msg.rules_image_invalid")}, 400)
+            filename, content = file_info
+            ext = Path(filename).suffix.lower().lstrip(".")
+            if ext == "jpeg":
+                ext = "jpg"
+            if ext not in ("png", "jpg", "gif", "webp"):
+                return self._send_json({"code": 400, "msg": _t("webui.msg.rules_image_type")}, 400)
+            if len(content) > 8 * 1024 * 1024:
+                return self._send_json({"code": 400, "msg": _t("webui.msg.rules_image_too_large")}, 400)
+            img_dir = Path(plugin.data_folder) / "rules_images"
+            img_dir.mkdir(parents=True, exist_ok=True)
+            fname = f"rule_{int(time.time() * 1000)}_{secrets.token_hex(4)}.{ext}"
+            try:
+                (img_dir / fname).write_bytes(content)
+            except OSError as exc:
+                return self._send_json({"code": 500, "msg": _t("webui.msg.rules_image_write_failed", error=exc)}, 500)
+            return self._send_json({"code": 200, "data": {"path": str(img_dir / fname), "name": fname}})
+
         if path == "/api/whitelist":
             wl = getattr(plugin, "whitelist_module", None)
             if method == "GET":
@@ -1698,6 +1857,18 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return self._send_json({"code": 429, "msg": "任务数过多，请稍后再试"}, 429)
             return self._send_json({"code": 200, "data": {"task_id": task_id}})
 
+        if method == "POST" and path == "/api/market/update-all":
+            client = getattr(plugin, "marketplace", None)
+            if client is None or not client.enabled:
+                return self._send_json({"code": 403, "msg": "插件市场未配置或未启用"}, 403)
+            def _run_update_all(log, progress):
+                log(_t("task_log.checking_updates"))
+                return client.update_all(log=log, progress=progress)
+            task_id = self.webui._start_market_task("update_all", _run_update_all)
+            if task_id is None:
+                return self._send_json({"code": 429, "msg": "任务数过多，请稍后再试"}, 429)
+            return self._send_json({"code": 200, "data": {"task_id": task_id}})
+
         if method == "POST" and path == "/api/market/install":
             client = getattr(plugin, "marketplace", None)
             body = self._read_body() or {}
@@ -1750,6 +1921,30 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 progress(100, _t("task_log.done"))
                 return result
             task_id = self.webui._start_market_task("dependencies_update", _run_deps_update)
+            if task_id is None:
+                return self._send_json({"code": 429, "msg": "任务数过多，请稍后再试"}, 429)
+            return self._send_json({"code": 200, "data": {"task_id": task_id}})
+
+        # 插件级强制依赖（requires）补装：子插件依赖从市场自动安装（像 pip 依赖那样）
+        m = re.fullmatch(r"/api/subplugins/([A-Za-z0-9_\-]+)/install-requirements", path)
+        if m and method == "POST":
+            client = getattr(plugin, "marketplace", None)
+            if client is None or not client.enabled:
+                return self._send_json({"code": 403, "msg": "插件市场未配置或未启用"}, 403)
+            mgr = plugin.subplugin_manager
+            if mgr is None:
+                return self._send_json({"code": 500, "msg": _t("webui.msg.subplugin_manager_unavailable")}, 500)
+            name = m.group(1)
+            with mgr._lock:
+                if mgr.subplugins.get(name) is None:
+                    return self._send_json({"code": 404, "msg": _t("webui.msg.subplugin_not_found")}, 404)
+            def _run_requirements_install(log, progress):
+                log(_t("task_log.installing_requirements", name=name))
+                progress(20, _t("task_log.installing_deps"))
+                result = client.install_plugin_requirements(name, log=log, progress=progress)
+                progress(100, _t("task_log.done"))
+                return result
+            task_id = self.webui._start_market_task("requirements_install", _run_requirements_install)
             if task_id is None:
                 return self._send_json({"code": 429, "msg": "任务数过多，请稍后再试"}, 429)
             return self._send_json({"code": 200, "data": {"task_id": task_id}})
@@ -1824,6 +2019,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 with mgr._lock:
                     for name, sp in mgr.subplugins.items():
                         manifest = sp.manifest if isinstance(sp.manifest, dict) else {}
+                        declaration = parse_requires_from_manifest(manifest)
                         data.append({
                             "name": name,
                             "version": manifest.get("version", "?"),
@@ -1834,6 +2030,11 @@ class _RequestHandler(BaseHTTPRequestHandler):
                             "error": sp.error,
                             "missing_deps": list(sp.missing_deps),
                             "missing_modules": list(sp.missing_modules),
+                            "missing_requirements": list(sp.missing_requirements),
+                            "requires": {
+                                "subplugins": [r.display() for r in declaration.subplugins],
+                                "endstone": [r.display() for r in declaration.endstone],
+                            },
                             "dependencies": list(manifest.get("dependencies", []) or []),
                             "market": dict(manifest.get("_market", {})) if isinstance(manifest.get("_market", {}), dict) else {},
                             "market_update": dict(market_updates.get(name, {})),
@@ -1858,101 +2059,120 @@ class _RequestHandler(BaseHTTPRequestHandler):
             return self._send_json({"code": 404, "msg": _t("webui.msg.subplugin_not_found")}, 404)
 
         if method == "POST" and path == "/api/subplugins/reload":
-            # 主线程长操作互斥：上一操作超时后台仍在执行时，拒绝叠加新操作
-            if not self.webui._main_op_lock.acquire(blocking=False):
+            done = threading.Event()
+            finish, defer = self._acquire_main_op(done)
+            if finish is None:
                 return self._send_json({"code": 409, "msg": "另一主线程操作正在执行，请稍后再试"}, 409)
+            count = [0]
+            err = [""]
+
+            def do_reload() -> None:
+                try:
+                    if plugin.subplugin_manager:
+                        count[0] = plugin.subplugin_manager.reload_all()
+                except Exception as e:
+                    err[0] = str(e)
+                finally:
+                    done.set()
+
             try:
-                done = threading.Event()
-                count = [0]
-                err = [""]
-
-                def do_reload() -> None:
-                    try:
-                        if plugin.subplugin_manager:
-                            count[0] = plugin.subplugin_manager.reload_all()
-                    except Exception as e:
-                        err[0] = str(e)
-                    finally:
-                        done.set()
-
                 plugin.run_on_main(do_reload)
-                done.wait(timeout=10)
-                if not done.is_set():
-                    return self._send_json({"code": 504, "msg": _t("webui.msg.reload_timeout")}, 504)
+            except Exception as e:  # noqa: BLE001
+                # 调度失败（服务器关停等）：任务未入队，done 永不置位，
+                # 必须立即释放互斥锁，否则所有主线程操作接口永久 409
+                finish()
+                return self._send_json({"code": 500, "msg": _t("webui.msg.reload_failed", error=e)}, 500)
+            done.wait(timeout=10)
+            if not done.is_set():
+                defer()
+                return self._send_json({"code": 504, "msg": _t("webui.msg.reload_timeout")}, 504)
+            try:
                 if err[0]:
                     return self._send_json({"code": 500, "msg": _t("webui.msg.reload_failed", error=err[0])}, 500)
                 return self._send_json({"code": 200, "msg": _t("webui.msg.subplugin_reload_success", count=count[0])})
             finally:
-                self.webui._main_op_lock.release()
+                finish()
 
         m = re.fullmatch(r"/api/subplugins/([A-Za-z0-9_\-]+)/reload", path)
         if m and method == "POST":
             name = m.group(1)
             if not plugin.subplugin_manager:
                 return self._send_json({"code": 500, "msg": _t("webui.msg.subplugin_not_found")}, 500)
-            # 主线程长操作互斥：上一操作超时后台仍在执行时，拒绝叠加新操作
-            if not self.webui._main_op_lock.acquire(blocking=False):
+            done = threading.Event()
+            finish, defer = self._acquire_main_op(done)
+            if finish is None:
                 return self._send_json({"code": 409, "msg": "另一主线程操作正在执行，请稍后再试"}, 409)
+            ok = [False]
+            err = [""]
+
+            def do_reload_one() -> None:
+                try:
+                    ok[0] = plugin.subplugin_manager.reload_one(name)
+                except Exception as e:
+                    err[0] = str(e)
+                finally:
+                    done.set()
+
             try:
-                done = threading.Event()
-                ok = [False]
-                err = [""]
-
-                def do_reload_one() -> None:
-                    try:
-                        ok[0] = plugin.subplugin_manager.reload_one(name)
-                    except Exception as e:
-                        err[0] = str(e)
-                    finally:
-                        done.set()
-
                 plugin.run_on_main(do_reload_one)
-                done.wait(timeout=15)
-                if not done.is_set():
-                    return self._send_json({"code": 504, "msg": _t("webui.msg.reload_timeout")}, 504)
+            except Exception as e:  # noqa: BLE001
+                # 调度失败：任务未入队，立即释放互斥锁（同上，防永久 409）
+                finish()
+                return self._send_json({"code": 500, "msg": _t("webui.msg.reload_failed", error=e)}, 500)
+            done.wait(timeout=15)
+            if not done.is_set():
+                defer()
+                return self._send_json({"code": 504, "msg": _t("webui.msg.reload_timeout")}, 504)
+            try:
                 if err[0]:
                     return self._send_json({"code": 500, "msg": _t("webui.msg.subplugin_reload_one_failed", name=name)}, 500)
                 if ok[0]:
                     return self._send_json({"code": 200, "msg": _t("webui.msg.subplugin_reload_one_success", name=name)})
                 return self._send_json({"code": 400, "msg": _t("webui.msg.subplugin_reload_one_failed", name=name)}, 400)
             finally:
-                self.webui._main_op_lock.release()
+                finish()
 
         if method == "POST" and path == "/api/reload":
-            # 主线程长操作互斥：上一操作超时后台仍在执行时，拒绝叠加新操作
-            if not self.webui._main_op_lock.acquire(blocking=False):
+            done = threading.Event()
+            finish, defer = self._acquire_main_op(done)
+            if finish is None:
                 return self._send_json({"code": 409, "msg": "另一主线程操作正在执行，请稍后再试"}, 409)
+            err = [""]
+
+            def do_framework_reload() -> None:
+                try:
+                    plugin.config_manager.load()
+                    plugin._init_i18n()
+                    # 失效 pip manager 缓存使新配置生效；加锁避免与 _get_pip_manager 双检锁竞态。
+                    with plugin._pip_manager_lock:
+                        plugin._pip_manager = None
+                    # 连接参数只在适配器重建后生效。
+                    plugin.reload_onebot_connection()
+                    if plugin.regex_module:
+                        plugin.regex_module.reload_rules()
+                    if plugin.subplugin_manager:
+                        plugin.subplugin_manager.reload_all()
+                except Exception as e:
+                    err[0] = str(e)
+                finally:
+                    done.set()
+
             try:
-                done = threading.Event()
-                err = [""]
-
-                def do_framework_reload() -> None:
-                    try:
-                        plugin.config_manager.load()
-                        plugin._init_i18n()
-                        # 失效 pip manager 缓存使新配置生效；加锁避免与 _get_pip_manager 双检锁竞态。
-                        with plugin._pip_manager_lock:
-                            plugin._pip_manager = None
-                        # 连接参数只在适配器重建后生效；旧实现仅 reload 配置/规则，导致总览页显示旧连接模式。
-                        plugin.reload_onebot_connection()
-                        if plugin.regex_module:
-                            plugin.regex_module.reload_rules()
-                        if plugin.subplugin_manager:
-                            plugin.subplugin_manager.reload_all()
-                    except Exception as e:
-                        err[0] = str(e)
-                    finally:
-                        done.set()
-
                 plugin.run_on_main(do_framework_reload)
-                done.wait(timeout=20)
-                if not done.is_set():
-                    return self._send_json({"code": 504, "msg": _t("webui.msg.reload_timeout")}, 504)
+            except Exception as e:  # noqa: BLE001
+                # 调度失败：任务未入队，立即释放互斥锁（同上，防永久 409）
+                finish()
+                return self._send_json({"code": 500, "msg": _t("webui.msg.reload_failed", error=e)}, 500)
+            done.wait(timeout=20)
+            if not done.is_set():
+                defer()
+                return self._send_json({"code": 504, "msg": _t("webui.msg.reload_timeout")}, 504)
+            try:
                 if err[0]:
                     return self._send_json({"code": 500, "msg": _t("webui.msg.reload_failed", error=err[0])}, 500)
                 return self._send_json({"code": 200, "msg": _t("webui.msg.reload_success")})
             finally:
-                self.webui._main_op_lock.release()
+                finish()
 
         if method == "POST" and path == "/api/pip/install":
             body = self._read_body() or {}
@@ -2025,10 +2245,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return self._send_json({"code": 500, "msg": _t("pip.manager_unavailable")}, 500)
             if not mgr.enable:
                 return self._send_json({"code": 403, "msg": _t("pip.disabled")}, 403)
-            # 持 _pip_serial_lock：与 install 路径互斥，避免并发卸载/安装损坏 site-packages 元数据
-            with self.webui._pip_serial_lock:
-                success, msg = mgr.uninstall(package)
-            return self._send_json({"code": 200 if success else 400, "msg": msg}, 200 if success else 400)
+            # 改走异步任务：原实现在请求线程内无限期等待 _pip_serial_lock
+            # 再同步跑 pip 子进程（最长 60s），期间 HTTP 请求永久挂起
+            task_id = self.webui._start_pip_task(mgr, [package], "uninstall")
+            if task_id is None:
+                return self._send_json({"code": 429, "msg": "任务数过多，请稍后再试"}, 429)
+            return self._send_json({"code": 200, "data": {"task_id": task_id}})
 
         if method == "GET" and path == "/api/pip/list":
             mgr = self.webui._get_pip_manager_for_plugin(plugin)
@@ -2036,7 +2258,16 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return self._send_json({"code": 500, "msg": _t("pip.manager_unavailable")}, 500)
             if not mgr.enable:
                 return self._send_json({"code": 403, "msg": _t("pip.disabled")}, 403)
-            pkgs = mgr.list_packages()
+            # pip list 是同步子进程（冷启动 1-3s）：10s 缓存避免前端并发
+            # 刷新刷出多个 pip 进程
+            now = time.time()
+            with self.webui._pip_list_lock:
+                cached = self.webui._pip_list_cache
+                if cached is not None and now - cached[0] < 10.0:
+                    pkgs = cached[1]
+                else:
+                    pkgs = mgr.list_packages()
+                    self.webui._pip_list_cache = (now, pkgs)
             # 标记受保护包（不修改原对象，构造新 dict）
             from ..pip_manager import PROTECTED_PACKAGES, _normalize
             protected_norm = {_normalize(p) for p in PROTECTED_PACKAGES}
@@ -2102,6 +2333,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 if not schema:
                     return self._send_json({"code": 404, "msg": _t("webui.msg.plugin_no_config")}, 404)
                 body = self._read_body() or {}
+                # 非 dict JSON（list/str/number）会让下方 body.items() 抛
+                # AttributeError 落入兜底 500；与其他 POST 端点口径一致返回 400
+                if not isinstance(body, dict):
+                    return self._send_json({"code": 400, "msg": _t("webui.msg.invalid_body")}, 400)
 
                 def _type_ok(item: dict[str, Any], v: Any) -> bool:
                     """按 schema item 的 type 校验值类型，非法类型直接跳过不写入"""
@@ -2129,7 +2364,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     for item in list(schema["items"]):
                         if item["key"] in body:
                             value = body[item["key"]]
-                            # 类型不匹配的值跳过，不把任意类型写入配置
                             if _type_ok(item, value):
                                 item["val"] = value
                 for key, value in body.items():
@@ -2167,6 +2401,13 @@ class _RequestHandler(BaseHTTPRequestHandler):
             # 请求线程超时返回后不再二次等待，避免请求线程被继续占用
             result: list[Any] = [False, _t("webui.msg.install_timeout"), ""]
             done = threading.Event()
+            # 安装与 reload/uninstall 同为主线程长操作：必须经 _main_op_lock
+            # 串行化，否则并发读写 subplugins 字典与插件目录会产生半安装状态
+            finish, defer = self._acquire_main_op(done)
+            if finish is None:
+                _cleanup_tmp_zip()
+                return self._send_json({"code": 409, "msg": "另一主线程操作正在执行，请稍后再试"}, 409)
+            deferred = False
 
             def do_install() -> None:
                 try:
@@ -2178,12 +2419,21 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     _cleanup_tmp_zip()
 
             try:
-                plugin.run_on_main(do_install)
-            except Exception as e:  # noqa: BLE001
-                # 调度失败时 do_install 不会执行，须在此清理临时文件
-                _cleanup_tmp_zip()
-                return self._send_json({"code": 500, "msg": _t("webui.msg.install_exception", error=e)}, 500)
-            done.wait(timeout=30)
+                try:
+                    plugin.run_on_main(do_install)
+                except Exception as e:  # noqa: BLE001
+                    # 调度失败时 do_install 不会执行，须在此清理临时文件
+                    _cleanup_tmp_zip()
+                    return self._send_json({"code": 500, "msg": _t("webui.msg.install_exception", error=e)}, 500)
+                if not done.wait(timeout=30):
+                    # 超时路径锁交由 defer 的守护线程兜底释放（等任务真正完成），
+                    # 不能被 finally 的 finish() 覆盖，否则 defer 形同虚设
+                    defer()
+                    deferred = True
+                    return self._send_json({"code": 400, "msg": _t("webui.msg.install_timeout")}, 400)
+            finally:
+                if not deferred:
+                    finish()
             ok, msg, name = bool(result[0]), str(result[1]), str(result[2])
             loaded = False
             manager = plugin.subplugin_manager
@@ -2250,7 +2500,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 )
                 return self._send_json({"code": 400, "msg": "下载失败"}, 400)
             if sha256:
-                # C5：提供哈希时强校验，不匹配拒绝安装
                 actual_hash = hashlib.sha256(data).hexdigest()
                 if not hmac.compare_digest(actual_hash, sha256):
                     self.webui.logger.warning(
@@ -2271,10 +2520,14 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 except OSError:
                     pass
 
-            # 临时文件清理统一由 do_install2 的 finally 负责（含超时场景），
-            # 请求线程超时返回后不再二次等待，避免请求线程被继续占用
             result2: list[Any] = [False, _t("webui.msg.install_timeout"), ""]
             done2 = threading.Event()
+            # 与 upload 安装端点同款主线程操作互斥（见上方注释）
+            finish2, defer2 = self._acquire_main_op(done2)
+            if finish2 is None:
+                _cleanup_tmp_zip2()
+                return self._send_json({"code": 409, "msg": "另一主线程操作正在执行，请稍后再试"}, 409)
+            deferred2 = False
 
             def do_install2() -> None:
                 try:
@@ -2286,12 +2539,18 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     _cleanup_tmp_zip2()
 
             try:
-                plugin.run_on_main(do_install2)
-            except Exception as e:  # noqa: BLE001
-                # 调度失败时 do_install2 不会执行，须在此清理临时文件
-                _cleanup_tmp_zip2()
-                return self._send_json({"code": 500, "msg": _t("webui.msg.install_exception", error=e)}, 500)
-            done2.wait(timeout=30)
+                try:
+                    plugin.run_on_main(do_install2)
+                except Exception as e:  # noqa: BLE001
+                    _cleanup_tmp_zip2()
+                    return self._send_json({"code": 500, "msg": _t("webui.msg.install_exception", error=e)}, 500)
+                if not done2.wait(timeout=30):
+                    defer2()
+                    deferred2 = True
+                    return self._send_json({"code": 400, "msg": _t("webui.msg.install_timeout")}, 400)
+            finally:
+                if not deferred2:
+                    finish2()
             ok, msg, name = bool(result2[0]), str(result2[1]), str(result2[2])
             loaded = False
             manager = plugin.subplugin_manager
@@ -2308,19 +2567,33 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
         m = re.fullmatch(r"/api/subplugins/([A-Za-z0-9_\-]+)/uninstall-preview", path)
         if m and method == "GET":
-            # 卸载预检：前端据此弹窗询问"是否连同卸载依赖项（列出具体依赖名）"
+            # 卸载预检：前端据此弹窗询问"是否连同卸载依赖项（列出具体依赖名）"，
+            # 并在存在反向依赖（其它子插件 requires 本插件）时警告其将无法加载
             try:
                 removable, kept = self._compute_uninstall_deps(plugin, m.group(1))
             except Exception as exc:  # noqa: BLE001
                 return self._send_json({"code": 400, "msg": str(exc)}, 400)
-            return self._send_json({"code": 200, "data": {"deps": removable, "kept_deps": kept}})
+            dependents: list[dict[str, Any]] = []
+            mgr = plugin.subplugin_manager
+            if mgr is not None:
+                try:
+                    dependents = mgr.dependents_of(m.group(1))
+                except Exception:  # noqa: BLE001 - 反向依赖查询失败不影响卸载预检
+                    dependents = []
+            return self._send_json({"code": 200, "data": {"deps": removable, "kept_deps": kept, "dependents": dependents}})
 
         m = re.fullmatch(r"/api/subplugins/([A-Za-z0-9_\-]+)", path)
         if m and method == "DELETE":
             mgr = plugin.subplugin_manager
-            # 主线程长操作互斥：上一操作超时后台仍在执行时，拒绝叠加新操作
-            if not self.webui._main_op_lock.acquire(blocking=False):
+            if mgr is None:
+                return self._send_json({"code": 500, "msg": _t("webui.msg.subplugin_manager_unavailable")}, 500)
+            done3 = threading.Event()
+            finish, defer = self._acquire_main_op(done3)
+            if finish is None:
                 return self._send_json({"code": 409, "msg": "另一主线程操作正在执行，请稍后再试"}, 409)
+            # 超时路径锁交由 defer 的守护线程兜底释放（等任务真正完成），
+            # 不能被 finally 的 finish() 覆盖，否则 defer 形同虚设
+            deferred = False
             try:
                 # with_deps=1：连同卸载不被其它子插件使用的 pip 依赖（先在卸载前计算，
                 # 卸载后该子插件已从字典移除、manifest 不可得）
@@ -2332,7 +2605,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     except Exception:  # noqa: BLE001 - 预检失败不影响主卸载流程
                         removable = []
                 result3: list[Any] = [False, _t("webui.msg.uninstall_timeout")]
-                done3 = threading.Event()
 
                 def do_uninstall() -> None:
                     try:
@@ -2342,20 +2614,29 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     finally:
                         done3.set()
 
-                plugin.run_on_main(do_uninstall)
-                done3.wait(timeout=15)
-                # pip 卸载走子进程，在 HTTP 线程执行即可，不占用游戏主线程
+                try:
+                    plugin.run_on_main(do_uninstall)
+                except Exception as e:  # noqa: BLE001
+                    # 调度失败：任务未入队，done3 永不置位，立即释放锁（防永久 409）
+                    return self._send_json({"code": 500, "msg": _t("webui.msg.uninstall_exception", error=e)}, 500)
+                if not done3.wait(timeout=15):
+                    defer()
+                    deferred = True
+                    return self._send_json({"code": 504, "msg": _t("webui.msg.uninstall_timeout")}, 504)
+                # pip 卸载走子进程，在 HTTP 线程执行即可，不占用游戏主线程；
+                # 必须持 _pip_serial_lock：与市场安装任务并发写 site-packages 会损坏包元数据
                 if result3[0] and removable:
                     removed: list[str] = []
                     pip_mgr = self.webui._get_pip_manager_for_plugin(plugin)
                     if pip_mgr is not None:
-                        for dep in removable:
-                            try:
-                                ok_dep, _msg_dep = pip_mgr.uninstall(dep)
-                            except Exception:  # noqa: BLE001
-                                ok_dep = False
-                            if ok_dep:
-                                removed.append(dep)
+                        with plugin._pip_serial_lock:
+                            for dep in removable:
+                                try:
+                                    ok_dep, _msg_dep = pip_mgr.uninstall(dep)
+                                except Exception:  # noqa: BLE001
+                                    ok_dep = False
+                                if ok_dep:
+                                    removed.append(dep)
                     if removed:
                         result3[1] = str(result3[1]) + "；" + _t(
                             "webui.msg.uninstall_deps_removed", deps=", ".join(removed)
@@ -2364,7 +2645,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     return self._send_json({"code": 200, "msg": str(result3[1])})
                 return self._send_json({"code": 400, "msg": str(result3[1])}, 400)
             finally:
-                self.webui._main_op_lock.release()
+                if not deferred:
+                    finish()
 
         # 注意：插件名仅允许字母数字下划线连字符（禁止 . 防路径穿越，如 "..")
         m = re.fullmatch(r"/api/subplugins/([A-Za-z0-9_\-]+)/files", path)
@@ -2406,15 +2688,19 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return self._send_json({"code": 500, "msg": _t("webui.msg.subplugin_manager_unavailable")}, 500)
             plugins_base = mgr.plugins_dir.resolve()
             folder = (mgr.plugins_dir / m.group(1)).resolve()
-            # 二次校验：folder 必须仍在 plugins_dir 之下
             try:
                 folder.relative_to(plugins_base)
             except ValueError:
                 return self._send_json({"code": 403, "msg": _t("webui.msg.forbidden_path")}, 403)
             rel = query.get("path", "")
-            target = (folder / rel).resolve()
             # 防路径穿越：用 relative_to 而非字符串前缀匹配
             if not rel:
+                return self._send_json({"code": 403, "msg": _t("webui.msg.forbidden_path")}, 403)
+            try:
+                # %00 解码出的 NUL 会让 resolve() 抛 ValueError（embedded null
+                # byte），必须捕获后按非法路径处理而不是 500
+                target = (folder / rel).resolve()
+            except (ValueError, OSError):
                 return self._send_json({"code": 403, "msg": _t("webui.msg.forbidden_path")}, 403)
             try:
                 target.relative_to(folder)

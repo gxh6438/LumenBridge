@@ -20,9 +20,9 @@ RECONNECT_MAX_DELAY = 60.0
 # 连接间隔默认值（毫秒）：两次网关连接尝试之间的最小等待时间
 DEFAULT_CONNECT_INTERVAL = 60000
 # WS 关闭码语义（参考 qq-botpy）：4004 鉴权失败需重取 token；
-# 9001/9005 不可恢复会话，需全新 Identify
+# 4006 Resume seq 无效 / 4009 会话过期 / 9001/9005 不可恢复会话，需全新 Identify
 AUTH_FAIL_CODES = {4004}
-SESSION_RESET_CODES = {9001, 9005}
+SESSION_RESET_CODES = {4006, 4009, 9001, 9005}
 
 # 网关会话结束原因（_gateway_session 返回值）：
 # ended=正常断开（连接关闭/接收结束）；reconnect=服务端要求重连（OP_RECONNECT）；

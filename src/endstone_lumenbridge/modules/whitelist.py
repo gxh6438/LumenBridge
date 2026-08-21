@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -60,6 +62,10 @@ _REMOVE_SUCCESS_MARKERS = (
     "已从白名单",
     "已從白名單",
 )
+# pending 操作超时：正常命令 6s 内完成；超过该时限仍残留的 pending 视为
+# 回调丢失（关服/禁用窗口期 run_on_main 任务被静默丢弃），自动过期防止
+# 用户被"操作进行中"永久锁死
+_PENDING_TIMEOUT = 60.0
 
 
 class WhitelistModule:
@@ -71,13 +77,13 @@ class WhitelistModule:
         self.bus = plugin.bus
         self.adapter = plugin.adapter
 
-        # 双域存储：个人号域 whitelist.json / 官方域 whitelist_official.json
-        #（运行数据统一存放于 data/ 子目录，见迁移脚本 migrate_storage.py）
+        # 运行数据统一存放于 data/ 子目录（见迁移脚本 migrate_storage.py）
         self.path = Path(plugin.data_folder) / "data" / "whitelist.json"
         self.path_official = Path(plugin.data_folder) / "data" / "whitelist_official.json"
         self._data_lock = threading.RLock()
-        self._pending_qq: set[str] = set()
-        self._pending_xbox: set[str] = set()
+        # pending 操作记录（key → 开始时刻）：带时间戳以便超时自愈
+        self._pending_qq: dict[str, float] = {}
+        self._pending_xbox: dict[str, float] = {}
         self.bindings: list[dict[str, Any]] = self._load(self.path)
         self.bindings_official: list[dict[str, Any]] = self._load(self.path_official)
 
@@ -111,9 +117,20 @@ class WhitelistModule:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+            # 损坏时先把原文件备份为 .corrupt 再返回空：白名单是用户数据
+            # 价值最高的文件，下次 add_binding 落盘会直接覆写原文件，
+            # 不备份则全部绑定永久丢失（与 regex_engine 同款防护）
+            try:
+                shutil.copy2(path, path.with_name(path.name + ".corrupt"))
+            except OSError:
+                pass
             self.logger.error(_t("whitelist.log.parse_error"))
             return []
         if not isinstance(data, list):
+            try:
+                shutil.copy2(path, path.with_name(path.name + ".corrupt"))
+            except OSError:
+                pass
             self.logger.error(_t("whitelist.log.not_array"))
             return []
 
@@ -222,17 +239,26 @@ class WhitelistModule:
     def _begin_operation(self, qq: int | str, xbox: str) -> bool:
         qid = str(qq)
         xbox_key = self._normalize_xbox(xbox).casefold()
+        now = time.monotonic()
         with self._data_lock:
+            # 超时自愈：回调丢失（run_on_main 任务在关服/禁用窗口被丢弃）时，
+            # 残留 pending 会让该用户此后所有请求永远收到"操作进行中"
+            expired_qq = [k for k, t in self._pending_qq.items() if now - t > _PENDING_TIMEOUT]
+            for k in expired_qq:
+                self._pending_qq.pop(k, None)
+            expired_xbox = [k for k, t in self._pending_xbox.items() if now - t > _PENDING_TIMEOUT]
+            for k in expired_xbox:
+                self._pending_xbox.pop(k, None)
             if qid in self._pending_qq or xbox_key in self._pending_xbox:
                 return False
-            self._pending_qq.add(qid)
-            self._pending_xbox.add(xbox_key)
+            self._pending_qq[qid] = now
+            self._pending_xbox[xbox_key] = now
             return True
 
     def _end_operation(self, qq: int | str, xbox: str) -> None:
         with self._data_lock:
-            self._pending_qq.discard(str(qq))
-            self._pending_xbox.discard(self._normalize_xbox(xbox).casefold())
+            self._pending_qq.pop(str(qq), None)
+            self._pending_xbox.pop(self._normalize_xbox(xbox).casefold(), None)
 
     @staticmethod
     def _classify_allowlist_output(action: str, output: str) -> str:
@@ -411,7 +437,14 @@ class WhitelistModule:
 
         domain = self._domain_of(pack)
         raw = str(pack.get("raw_message", "")).strip()
-        user_id = (pack.get("sender") or {}).get("user_id") or pack.get("user_id")
+        sender = pack.get("sender")
+        if not isinstance(sender, dict):
+            sender = {}
+        user_id = sender.get("user_id") or pack.get("user_id")
+        # 畸形包（user_id=None）直接忽略：str(None)="None" 会写入
+        # qid="None" 脏数据，污染后续按 QQ 号查询的绑定
+        if user_id is None or str(user_id) == "None":
+            return
         # 关键词为空字符串时 startswith("") 恒为 True、所有消息都会进入绑定分支，
         # 统一回退默认关键词
         bind_kw = str(self.conf.get("bind_keyword") or "绑定白名单")
@@ -497,7 +530,9 @@ class WhitelistModule:
         直接用白名单名。个人号域经 get_stranger_info 异步查询（超时/失败
         回调 None，同样兜底），回调保证触发（adapter.call_api 语义）。
         """
-        sender = pack.get("sender") or {}
+        sender = pack.get("sender")
+        if not isinstance(sender, dict):
+            sender = {}
         inline = str(sender.get("card") or sender.get("nickname") or "").strip()
         if inline:
             then(inline)

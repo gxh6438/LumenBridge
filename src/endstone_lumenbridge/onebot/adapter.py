@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import queue
 import random
 import threading
 import uuid
@@ -26,6 +27,8 @@ USER_AGENT = f"LumenBridge/{__version__} (Endstone)"
 
 API_TIMEOUT = 10.0
 SEND_QUEUE_SIZE = 100
+# 入站事件派发队列容量：超出时丢最旧保内存（与发送队列同策略）
+DISPATCH_QUEUE_SIZE = 2000
 # websockets 连接状态枚举值 OPEN（IntEnum，值为 1）
 _WS_STATE_OPEN = getattr(getattr(websockets, "State", None), "OPEN", 1)
 
@@ -57,8 +60,8 @@ class OneBotAdapter:
         self.listen_port = listen_port
         self.access_token = access_token
         self.bot_qq = bot_qq
-        # 多适配器元数据（v1.2.0）：id 对应 connections.json 卡片；type 为
-        # websocket（直连协议端）或 astrbot（AstrBot 插件端，协议同为 OneBot v11）
+        # 多适配器元数据：id 对应 connections.json 卡片；type 为 websocket
+        #（直连协议端）或 astrbot（AstrBot 插件端，协议同为 OneBot v11）
         self.adapter_id = adapter_id
         self.adapter_name = adapter_name
         self.adapter_type = adapter_type
@@ -81,6 +84,11 @@ class OneBotAdapter:
         self._pending: dict[str, asyncio.Future] = {}
         self._sender_task: asyncio.Task | None = None
         self._main_future: Any = None
+        # 入站事件派发队列 + 专用工作线程：下游处理器（正则命令执行等）
+        # 可能阻塞数十秒，在 WS 事件循环内同步派发会停跳心跳（20s/10s）
+        # 导致对端主动断连、发送队列积压丢包
+        self._dispatch_queue: "queue.Queue[dict[str, Any] | None] | None" = None
+        self._dispatch_thread: threading.Thread | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -112,6 +120,13 @@ class OneBotAdapter:
         if self._running:
             return
         self._running = True
+        self._dispatch_queue = queue.Queue(maxsize=DISPATCH_QUEUE_SIZE)
+        self._dispatch_thread = threading.Thread(
+            target=self._dispatch_worker,
+            name=f"LumenBridge-Dispatch-{self.adapter_id or 'default'}",
+            daemon=True,
+        )
+        self._dispatch_thread.start()
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
             target=self._run_loop,
@@ -120,6 +135,35 @@ class OneBotAdapter:
         )
         self._thread.start()
         self._main_future = asyncio.run_coroutine_threadsafe(self._main(), self._loop)
+
+    def _dispatch_worker(self) -> None:
+        """串行消费入站事件派发队列（FIFO 保序）。
+
+        事件总线处理器链（正则命令执行最长可阻塞 command_timeout，默认
+        5s 上限 60s）绝不能在 WS 事件循环线程内同步执行：心跳会停跳，
+        对端按 ping_timeout 断开健康连接并触发无谓重连。
+
+        退出条件双保险：收到哨兵包 或 _running 已置 False（stop() 中
+        哨兵在队满时可能被 put_nowait 丢弃，靠 _running 轮询兜底退出）。
+        """
+        q = self._dispatch_queue
+        if q is None:
+            return
+        while True:
+            try:
+                data = q.get(timeout=1.0)
+            except queue.Empty:
+                if not self._running:
+                    return
+                continue
+            if data is None:
+                return
+            if not self._running:
+                return
+            try:
+                self.bus.emit("onebot.pack", data)
+            except Exception:
+                self.logger.exception(_t("adapter.forward_msg_error"))
 
     def stop(self) -> None:
         """优雅关闭连接、取消后台任务并回收事件循环线程。"""
@@ -165,9 +209,19 @@ class OneBotAdapter:
         except Exception:
             pass
         if loop.is_running():
-            loop.call_soon_threadsafe(loop.stop)
+            loop.call_soon_threadsafe(loop.stop())
         if self._thread and self._thread is not threading.current_thread():
             self._thread.join(timeout=5)
+        # 停止派发工作线程：哨兵入队（队满时让位丢弃，正在关停无所谓）
+        if self._dispatch_queue is not None:
+            try:
+                self._dispatch_queue.put_nowait(None)
+            except queue.Full:
+                pass
+        if self._dispatch_thread and self._dispatch_thread is not threading.current_thread():
+            self._dispatch_thread.join(timeout=2)
+        self._dispatch_queue = None
+        self._dispatch_thread = None
         # 先取消主协程 Future 再丢弃引用，确保任务能收到取消信号
         if self._main_future is not None:
             try:
@@ -376,7 +430,28 @@ class OneBotAdapter:
         # 适配器实例；onebot.pack 保持单参 (pack) 以兼容子插件监听约定
         if self.adapter_id and "_lumen_adapter_id" not in data:
             data["_lumen_adapter_id"] = self.adapter_id
-        self.bus.emit("onebot.pack", data)
+        self._dispatch_pack(data)
+
+    def _dispatch_pack(self, data: dict[str, Any]) -> None:
+        """把事件包交给派发工作线程（保序）；未启动时退化为同步派发。
+
+        未 start() 的实例（测试桩直接调 _dispatch_raw）没有派发队列，
+        同步派发保持旧行为。
+        """
+        q = self._dispatch_queue
+        if q is None:
+            self.bus.emit("onebot.pack", data)
+            return
+        try:
+            q.put_nowait(data)
+        except queue.Full:
+            # 派发积压超限：丢最旧保最新（与发送队列同策略），留日志排查
+            try:
+                q.get_nowait()
+                q.put_nowait(data)
+            except (queue.Empty, queue.Full):
+                pass
+            self.logger.warning(_t("adapter.dispatch_queue_dropped"))
 
     def _drop_pack(self, dropped: Any) -> None:
         """丢弃一个待发包：带 echo 的请求立即以 None 完成 Future（避免调用方等到超时），

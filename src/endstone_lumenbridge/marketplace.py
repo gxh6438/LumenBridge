@@ -2,19 +2,21 @@
 
 不信任网络下载：所有市场插件必须先核对发布记录中的 SHA-256，再交给
 SubPluginManager 已有的 ZIP 路径穿越防护流程。
+
+除 pip 依赖外，这里还负责子插件声明的插件级依赖（``requires``）：
+Endstone 插件缺失时收集进结果提示用户安装；子插件缺失且市场在售时，
+像 pip 依赖那样自动下载安装（递归处理依赖自身的依赖）。
 """
 
 from __future__ import annotations
 
 import hashlib
 import hmac
-import importlib
 import json
 import os
 import re
 import secrets
 import shutil
-import sys
 import tempfile
 import zipfile
 import threading
@@ -25,8 +27,18 @@ import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .subplugin.requires import (
+    PluginRequirement,
+    RequiresDeclaration,
+    check_endstone_requirements,
+    parse_requires_from_manifest,
+)
+
 if TYPE_CHECKING:
     from .plugin import LumenBridgePlugin
+
+# requires 递归解析的最大层级：超过视为循环依赖（A→B→A）或恶意嵌套
+_MAX_REQUIREMENT_DEPTH = 8
 
 _MARKET_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
 _VERSION_RE = re.compile(r"^[0-9A-Za-z.+-]{3,80}$")
@@ -171,7 +183,6 @@ class MarketplaceClient:
         parsed = urllib.parse.urlparse(value)
         if parsed.scheme in {"http", "https"} and parsed.netloc:
             return value
-        # 相对路径：以 / 开头直接挂在站点根下，否则补一个 /
         if not value.startswith("/"):
             value = "/" + value
         root = self._site_root(base)
@@ -211,10 +222,8 @@ class MarketplaceClient:
         request = urllib.request.Request(url, headers=headers)
         limit = 8 * 1024 * 1024
         try:
-            # SSRF 防护不依赖对内网地址的额外校验：此前此处导入了 webui.server
-            # 中不存在的 _validate_public_http_url，导致所有封面代理请求必然
-            # 抛 ImportError（封面全部无法加载）。同主机白名单 + 重定向主机
-            # 固定 + 大小/类型限制已足够约束该代理端点。
+            # SSRF 防护不依赖对内网地址的额外校验：同主机白名单 + 重定向
+            # 主机固定 + 大小/类型限制已足够约束该代理端点。
             with self._open(request) as response:
                 # H2：重定向不得离开配置的市场站点
                 final_host = (urllib.parse.urlsplit(response.geturl()).hostname or "").lower()
@@ -714,7 +723,239 @@ class MarketplaceClient:
         log("依赖安装完成，子插件已重载")
         return True, message
 
-    def install(self, market_id: str, requested_version: str = "", *, upgrade_dependencies: bool = False, log=None, progress=None) -> dict[str, Any]:
+    # ------------------------------------------------------------------
+    # 插件级强制依赖（requires）：子插件依赖自动安装 / Endstone 依赖提示
+    # ------------------------------------------------------------------
+
+    def _read_installed_requires(self, plugin_name: str) -> RequiresDeclaration:
+        """读取已安装子插件的 requires 声明（优先运行记录，退回磁盘清单）。"""
+        manager = self.plugin.subplugin_manager
+        if manager is None:
+            return RequiresDeclaration()
+        with manager._lock:
+            sp = manager.subplugins.get(plugin_name)
+            if sp is not None:
+                return parse_requires_from_manifest(sp.manifest)
+        try:
+            from .subplugin.loader import _read_manifest_dict
+
+            manifest = _read_manifest_dict(manager.plugins_dir / plugin_name / "lumen.json")
+        except OSError:
+            manifest = None
+        return parse_requires_from_manifest(manifest)
+
+    def _find_market_plugin_by_manifest_name(self, name: str) -> dict[str, Any] | None:
+        """按子插件名（lumen.json 的 name）在市场精确匹配插件。
+
+        服务端支持 ``manifest_name`` 精确过滤；旧版服务端会忽略该参数返回
+        未过滤列表，因此客户端必须逐项核对 ``manifest_name`` 字段，防止
+        把同名关键词的无关插件当成依赖装进来。
+        """
+        try:
+            data = self._request_json("market/plugins", query={"manifest_name": name, "limit": "20"})
+        except MarketplaceError as exc:
+            self.logger.warning(f"[Market] 按子插件名搜索市场失败: {name} ({exc})")
+            return None
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            return None
+        for item in items:
+            if not isinstance(item, dict) or str(item.get("manifest_name") or "") != name:
+                continue
+            market_id = str(item.get("id") or "")
+            if not _MARKET_ID_RE.fullmatch(market_id):
+                continue
+            try:
+                return self.plugin_detail(market_id)
+            except MarketplaceError as exc:
+                self.logger.warning(f"[Market] 获取依赖插件详情失败: {market_id} ({exc})")
+                return None
+        return None
+
+    @staticmethod
+    def _select_release_for_requirement(detail: dict[str, Any], req: PluginRequirement) -> dict[str, Any] | None:
+        """从详情版本列表中选出满足约束的最高版本（不依赖列表顺序）。"""
+        versions = detail.get("versions", [])
+        if not isinstance(versions, list):
+            return None
+        best: dict[str, Any] | None = None
+        best_version = ""
+        for item in versions:
+            if not isinstance(item, dict):
+                continue
+            if not isinstance(item.get("download_url"), str) or not isinstance(item.get("sha256"), str):
+                continue
+            version = str(item.get("version") or "")
+            if not _VERSION_RE.fullmatch(version):
+                continue
+            if req.op and not req.satisfied_by(version):
+                continue
+            if best is None or _version_tuple(version) > _version_tuple(best_version):
+                best, best_version = item, version
+        return best
+
+    def _ensure_subplugin_requirement(
+        self,
+        req: PluginRequirement,
+        *,
+        plugin_name: str,
+        log=None,
+        progress=None,
+        _dep_depth: int = 0,
+        _dep_chain: tuple[str, ...] = (),
+    ) -> tuple[bool, str]:
+        """确保一条子插件依赖已满足；缺失时从市场自动安装（递归处理其依赖）。
+
+        返回 (是否满足, 说明)：满足且本次未安装时说明为空；本次新装时说明
+        为依赖名；无法满足时说明为原因（含提示安装/升级的完整信息）。
+        """
+        log = log or (lambda _msg: None)
+        progress = progress or (lambda _pct, _label="": None)
+        if req.name in _dep_chain:
+            chain = " → ".join(_dep_chain + (req.name,))
+            return False, f"循环依赖: {chain}，请修正相关子插件的 requires 声明"
+        manager = self.plugin.subplugin_manager
+        if manager is None:
+            return False, "子插件管理器不可用"
+        with manager._lock:
+            dep = manager.subplugins.get(req.name)
+            local_version = str(dep.manifest.get("version") or "") if dep is not None else ""
+        if dep is not None and dep.loaded and req.satisfied_by(local_version):
+            return True, ""
+        if dep is not None and not dep.loaded and req.satisfied_by(local_version):
+            # 已安装且版本满足，但没加载成功：被清单禁用或自身加载失败，
+            # 市场重装同一版本会被拒绝，升级也解决不了——提示用户处理
+            return False, (
+                f"依赖 {req.display()} 已安装（v{local_version}）但未加载，"
+                "可能被禁用或自身加载失败，请到子插件页面查看其错误信息"
+            )
+
+        # 未安装 / 版本不满足 → 市场按 manifest_name 精确匹配自动安装（像 pip 依赖那样）
+        detail = self._find_market_plugin_by_manifest_name(req.name)
+        if detail is None:
+            return False, f"缺少子插件依赖 {req.display()}：插件市场中没有找到，请手动安装后再试"
+        release = self._select_release_for_requirement(detail, req)
+        if release is None:
+            return False, f"缺少子插件依赖 {req.display()}：市场中所有版本均不满足该约束"
+        version = str(release.get("version") or "")
+        if dep is not None and not _is_newer(version, local_version):
+            if not req.satisfied_by(local_version):
+                return False, (
+                    f"依赖 {req.display()} 不满足：本地 v{local_version}，"
+                    f"市场可提供的最高满足版本为 v{version}，无法升级"
+                )
+            return False, (
+                f"依赖 {req.display()} 已安装（v{local_version}）但未加载，"
+                "可能被禁用或自身加载失败，请到子插件页面查看其错误信息"
+            )
+        market_id = str(detail.get("id") or "")
+        log(f"正在安装子插件依赖 {req.display()}（来自插件市场 {market_id}）")
+        try:
+            self.install(market_id, version, log=log, progress=progress, _dep_depth=_dep_depth, _dep_chain=_dep_chain)
+        except MarketplaceError as exc:
+            return False, f"自动安装依赖 {req.display()} 失败：{exc}"
+        with manager._lock:
+            dep = manager.subplugins.get(req.name)
+            if dep is not None and dep.loaded and req.satisfied_by(str(dep.manifest.get("version") or "")):
+                return True, req.name
+        return False, f"依赖 {req.display()} 已安装但仍未成功加载，请查看子插件页面错误信息"
+
+    def install_plugin_requirements(
+        self,
+        plugin_name: str,
+        *,
+        log=None,
+        progress=None,
+        _dep_depth: int = 1,
+        _dep_chain: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        """补齐已安装子插件的插件级依赖（requires），像 pip 依赖那样自动安装。
+
+        - 子插件依赖：本地已满足则跳过；否则到市场按 manifest_name 精确
+          匹配并自动安装满足约束的最高版本（递归处理其自身依赖）
+        - Endstone 插件依赖：无法代装，缺失时收集进 missing 提示用户安装
+
+        返回 ``{"ok", "message", "installed", "missing", "endstone_missing"}``；
+        ``ok=False`` 不代表目标插件安装失败，只代表依赖未能全部满足。
+        """
+        log = log or (lambda _msg: None)
+        progress = progress or (lambda _pct, _label="": None)
+        empty = {"ok": True, "message": "", "installed": [], "missing": [], "endstone_missing": []}
+        if _dep_depth > _MAX_REQUIREMENT_DEPTH:
+            chain = " → ".join(_dep_chain)
+            return {
+                "ok": False,
+                "message": f"依赖层级过深（可能存在循环依赖）：{chain}",
+                "installed": [], "missing": [], "endstone_missing": [],
+            }
+        declaration = self._read_installed_requires(plugin_name)
+        if declaration.empty:
+            return dict(empty)
+        manager = self.plugin.subplugin_manager
+        if manager is None:
+            return dict(empty)
+        if declaration.invalid:
+            log(f"注意：{plugin_name} 的 requires 声明存在无法解析的项: {', '.join(declaration.invalid)}")
+
+        installed: list[str] = []
+        missing: list[str] = []
+
+        # Endstone 插件依赖：只能提示安装，无法自动处理。
+        # server 不可用（None）→ 无法核实，不误报缺失
+        endstone_missing: list[str] = []
+        if declaration.endstone:
+            try:
+                installed_endstone = manager._installed_endstone_plugins()
+            except Exception:  # noqa: BLE001 - 服务器 API 不可用时按无法核实处理
+                installed_endstone = None
+            if installed_endstone is None:
+                log(f"注意：无法获取服务器插件列表，跳过 {plugin_name} 的 Endstone 插件依赖核实")
+            else:
+                for req, _actual in check_endstone_requirements(declaration.endstone, installed_endstone):
+                    endstone_missing.append(req.display())
+
+        # 子插件依赖：缺什么补什么
+        for req in declaration.subplugins:
+            if req.name == plugin_name:
+                continue
+            ok, note = self._ensure_subplugin_requirement(
+                req, plugin_name=plugin_name, log=log, progress=progress,
+                _dep_depth=_dep_depth, _dep_chain=_dep_chain,
+            )
+            if ok:
+                if note:
+                    installed.append(note)
+            else:
+                missing.append(note)
+
+        # 本次装了新依赖 → 热重载目标插件，让其 requires 检查重新通过
+        if installed:
+            progress(98, "正在热重载子插件")
+            try:
+                self._run_on_main_wait(lambda: manager.reload_one(plugin_name), timeout=30)
+            except MarketplaceError as exc:
+                log(f"依赖安装完成，但热重载 {plugin_name} 失败：{exc}")
+
+        ok = not missing and not endstone_missing
+        parts: list[str] = []
+        if installed:
+            parts.append(f"已自动安装依赖: {', '.join(installed)}")
+        if endstone_missing:
+            parts.append(
+                "缺少 Endstone 插件 " + ", ".join(endstone_missing)
+                + "，请安装对应插件并重启服务器后重试"
+            )
+        if missing:
+            parts.append("; ".join(missing))
+        return {
+            "ok": ok,
+            "message": "；".join(parts),
+            "installed": installed,
+            "missing": missing,
+            "endstone_missing": endstone_missing,
+        }
+
+    def install(self, market_id: str, requested_version: str = "", *, upgrade_dependencies: bool = False, log=None, progress=None, _dep_depth: int = 0, _dep_chain: tuple[str, ...] = ()) -> dict[str, Any]:
         log = log or (lambda _msg: None)
         progress = progress or (lambda _pct, _label="": None)
         log(f"正在获取插件详情: {market_id}")
@@ -744,6 +985,11 @@ class MarketplaceClient:
             dep_ok, dep_message = self._install_declared_dependencies(
                 name, [str(x) for x in dependencies], upgrade=upgrade_dependencies, log=log, progress=progress
             )
+            # 插件级强制依赖（requires）：子插件依赖自动安装，Endstone 依赖提示安装
+            requirements = self.install_plugin_requirements(
+                name, log=log, progress=progress,
+                _dep_depth=_dep_depth + 1, _dep_chain=_dep_chain + (name,),
+            )
             loaded = False
             with manager._lock:
                 installed = manager.subplugins.get(name)
@@ -757,6 +1003,11 @@ class MarketplaceClient:
                 "message": message,
                 "dependencies_ok": dep_ok,
                 "dependencies_message": dep_message,
+                "requirements_ok": bool(requirements.get("ok")),
+                "requirements_message": str(requirements.get("message") or ""),
+                "requirements_installed": list(requirements.get("installed") or []),
+                "missing_requirements": list(requirements.get("missing") or []) + list(requirements.get("endstone_missing") or []),
+                "endstone_missing": list(requirements.get("endstone_missing") or []),
                 "restart_required": not loaded,
             }
         finally:
@@ -860,7 +1111,9 @@ class MarketplaceClient:
             origin["last_checked_at"] = timestamp
             manifest_path = subplugin.folder / "lumen.json"
             try:
-                manifest_path.write_text(json.dumps(subplugin.manifest, ensure_ascii=False, indent=4), encoding="utf-8")
+                tmp_path = manifest_path.with_name(manifest_path.name + ".tmp")
+                tmp_path.write_text(json.dumps(subplugin.manifest, ensure_ascii=False, indent=4), encoding="utf-8")
+                os.replace(tmp_path, manifest_path)
             except OSError:
                 pass
 
@@ -891,6 +1144,73 @@ class MarketplaceClient:
                 raise MarketplaceError(f"目标版本 v{requested_version} 不高于当前版本 v{local_version}，已拒绝降级更新")
             log(f"目标更新版本: v{requested_version}")
         return self.install(market_id, requested_version, upgrade_dependencies=update_dependencies, log=log, progress=progress)
+
+    def update_all(self, *, log=None, progress=None) -> dict[str, Any]:
+        """一键更新全部有新版本的市场子插件到最新版。
+
+        单个插件失败不中断其余更新（逐个隔离）；进度按插件数量均分，
+        每个插件内部再由 install 的下载/安装阶段细分。
+        """
+        log = log or (lambda _msg: None)
+        progress = progress or (lambda _pct, _label="": None)
+        log("正在检查所有子插件的可用更新...")
+        updates = self.check_subplugin_updates(force=True)
+        pending = [
+            (name, info) for name, info in sorted(updates.items())
+            if info.get("available") and info.get("market_id")
+        ]
+        total = len(pending)
+        results: list[dict[str, Any]] = []
+        if not total:
+            return {"total": 0, "updated": [], "failed": [], "message": "没有需要更新的子插件"}
+
+        for idx, (name, info) in enumerate(pending):
+            base = idx * 90 // total
+            span = max(1, (idx + 1) * 90 // total - base)
+            label = f"[{idx + 1}/{total}] {name}"
+            log(f"开始更新 {label}: v{info.get('local_version', '?')} → v{info.get('latest_version', '?')}")
+            entry = {
+                "name": name,
+                "market_id": str(info.get("market_id") or ""),
+                "from_version": str(info.get("local_version") or ""),
+                "to_version": "",
+                "ok": False,
+                "error": "",
+            }
+            try:
+                # 默认参数在 def 时求值，绑定本轮 base/span/label：
+                # 否则闭包引用循环变量，回调整发（如 pip 输出线程延迟触发）时
+                # 会读到后续迭代的值，进度条与标签错乱
+                def _sub_progress(
+                    pct: float,
+                    _label: str = "",
+                    *,
+                    _base: int = base,
+                    _span: int = span,
+                    _fallback_label: str = label,
+                ) -> None:
+                    progress(_base + int(pct * _span / 100), _label or _fallback_label)
+
+                result = self.update(name, "", update_dependencies=True, log=log, progress=_sub_progress)
+                entry["ok"] = True
+                entry["to_version"] = str(result.get("version") or info.get("latest_version") or "")
+                log(f"{label} 更新成功")
+            except Exception as exc:  # noqa: BLE001
+                # 单个失败（网络/市场数据/安装器）不阻断批量更新其余插件
+                entry["error"] = str(exc)
+                self.logger.warning(f"[Market] 批量更新 {name} 失败: {exc}")
+                log(f"{label} 更新失败: {exc}")
+            results.append(entry)
+
+        ok_count = sum(1 for r in results if r["ok"])
+        fail_count = total - ok_count
+        progress(100, "完成")
+        return {
+            "total": total,
+            "updated": [r for r in results if r["ok"]],
+            "failed": [r for r in results if not r["ok"]],
+            "message": f"批量更新完成: 成功 {ok_count} 个, 失败 {fail_count} 个",
+        }
 
     def update_dependencies(self, plugin_name: str, *, log=None, progress=None) -> dict[str, Any]:
         log = log or (lambda _msg: None)
@@ -1041,7 +1361,7 @@ class MarketplaceClient:
                 "wheel": target.name,
                 "backup_directory": str(backup_dir) if backup_dir.exists() else "",
                 "staged_at": int(time.time()),
-                # v1.1.0 起支持进程内热重载（apply_framework_update），不再强制重启
+                # 支持进程内热重载（apply_framework_update），无需强制重启
                 "restart_required": False,
             }
             receipt_dir = Path(self.plugin.data_folder) / "data"
@@ -1068,16 +1388,20 @@ class MarketplaceClient:
     def apply_framework_update(self, *, delay_ticks: int = 20, log=None, progress=None) -> dict[str, Any]:
         """暂存新 wheel 并调度进程内热重载，实现"自动更新、立即生效"。
 
-        已验证（endstone 0.11.x PyPI 包 plugin_loader.py）：
-        - 用户把 wheel 放进 plugins/ 后，Endstone 内部本来就走
-          ``pip install <wheel> --prefix plugins/.local`` 再从 entry point 实例化；
-        - ``PluginManager`` 在运行期暴露 ``disable_plugin`` / ``load_plugin``
-          / ``enable_plugin``，其中 ``load_plugin`` 会重新 pip install 指定 wheel。
+        热重载走 Endstone 官方 ``Server.reload()``（即 ``/reload`` 命令的同
+        一实现，endstone 0.11.x ``server.cpp``）：``disablePlugins`` →
+        ``clearPlugins``（清空插件注册表）→ ``reloadData`` → ``loadPlugins``
+        （重建 PythonPluginLoader：自动清理 sys.modules 中 endstone_* 模块
+        与 plugins/.local 旧发行版，再 pip install plugins/ 下全部 wheel）→
+        ``enablePlugins``。
 
-        因此热重载序列为：禁用自身（on_disable 完整清理）→ 清理
-        plugins/.local 内旧版 endstone_lumenbridge 目录与模块缓存 →
-        ``load_plugin(新 wheel)`` → ``enable_plugin(新实例)``。新实例的
-        on_enable 会重新启动 WebUI 等组件，面板自动恢复。
+        不能用 ``disable_plugin`` + ``load_plugin`` 手工替换：disable 只停用
+        不注销，旧插件名仍留在 PluginManager 的 lookup_names_ 里，
+        ``load_plugin`` 会被 "Another plugin with the same name has been
+        loaded" 拒绝。只有 clearPlugins 才清注册表，而这正是 reload 的一部分。
+
+        注意 reload 语义与 ``/reload`` 一致：服务器上所有 Endstone 插件都会
+        重载（非仅 LumenBridge 自身）。
         """
         log = log or (lambda _msg: None)
         progress = progress or (lambda _pct, _label="": None)
@@ -1094,57 +1418,54 @@ class MarketplaceClient:
         old_plugin.logger.info(f"[Update] 已暂存 v{version}，{delay_ticks} tick 后开始热重载")
         log(f"已暂存 v{version}，{delay_ticks} tick 后开始热重载")
 
-        def _restore_backup(reason: str) -> None:
-            logger.error(f"[Update] {reason}；正在回滚旧 wheel，重启服务器可恢复旧版本")
+        def _restore_backup(reason: str) -> bool:
+            """移除失败的新 wheel 并放回最近的旧 wheel，返回是否放回成功。"""
+            logger.error(f"[Update] {reason}")
             try:
+                target.unlink(missing_ok=True)
                 if backup_directory:
                     backup_dir = Path(backup_directory)
                     for wheel in sorted(backup_dir.glob("endstone_lumenbridge-*.whl"), reverse=True):
                         shutil.copyfile(wheel, plugins_dir / wheel.name)
-                        break
+                        return True
             except OSError:
                 pass
+            return False
+
+        def _trigger_reload(server: Any) -> None:
+            reload_api = getattr(server, "reload", None)
+            if callable(reload_api):
+                reload_api()
+            else:  # 旧版 Endstone 无 Server.reload 绑定，回退命令派发
+                server.dispatch_command(server.command_sender, "reload")
 
         def _hot_swap() -> None:
             # 运行在服务器主线程；只使用局部引用，禁用后不再触碰旧插件对象
+            server = old_plugin.server
+            manager = server.plugin_manager
             try:
-                log("正在禁用旧版本...")
-                server = old_plugin.server
-                manager = server.plugin_manager
-                manager.disable_plugin(old_plugin)
-                log("正在清理旧版本缓存...")
-                # 与 PythonPluginLoader._invalidate_caches 同步：清除旧版模块与
-                # plugins/.local 内的旧发行版目录，避免新旧两份 dist-info 并存
-                for name in list(sys.modules):
-                    if name == "endstone_lumenbridge" or name.startswith("endstone_lumenbridge."):
-                        del sys.modules[name]
-                importlib.invalidate_caches()
-                import site as _site
-
-                prefix = str(plugins_dir / ".local")
-                for site_dir in _site.getsitepackages(prefixes=[prefix]):
-                    if not os.path.isdir(site_dir):
-                        continue
-                    if os.path.commonpath([os.path.abspath(site_dir), os.path.abspath(prefix)]) != os.path.abspath(prefix):
-                        continue
-                    if os.path.abspath(site_dir) == os.path.abspath(prefix):
-                        continue
-                    for directory in os.listdir(site_dir):
-                        if directory.replace("-", "_").startswith("endstone_lumenbridge"):
-                            shutil.rmtree(os.path.join(site_dir, directory), ignore_errors=True)
-                log(f"正在安装 LumenBridge v{version}...")
-                new_plugin = manager.load_plugin(str(target))
-                if new_plugin is None:
-                    raise RuntimeError("新版本插件加载失败（load_plugin 返回空）")
-                log("正在启用新版本...")
-                manager.enable_plugin(new_plugin)
-                if not manager.is_plugin_enabled(new_plugin):
-                    raise RuntimeError("新版本插件启用失败")
-                log(f"热重载完成，当前版本 v{version}")
-                new_plugin.logger.info(f"[Update] 热重载完成，当前版本 v{version}")
+                log("正在热重载（等同 /reload，服务器插件将全部重载）...")
+                _trigger_reload(server)
+                new_plugin = manager.get_plugin("lumenbridge")
+                if new_plugin is None or not manager.is_plugin_enabled(new_plugin):
+                    raise RuntimeError("热重载后未检测到已启用的 LumenBridge 插件")
+                log(f"热重载完成，当前版本 v{new_plugin.version}")
+                new_plugin.logger.info(f"[Update] 热重载完成，当前版本 v{new_plugin.version}")
             except Exception as exc:  # noqa: BLE001
                 logger.error(f"[Update] 热重载失败：{exc}")
-                _restore_backup("热重载未完成")
+                if _restore_backup("已回滚旧 wheel，正在再次热重载以恢复旧版本"):
+                    try:
+                        _trigger_reload(server)
+                        recovered = manager.get_plugin("lumenbridge")
+                        if recovered is not None and manager.is_plugin_enabled(recovered):
+                            logger.error(
+                                f"[Update] 已恢复旧版本 v{recovered.version} 运行；"
+                                "新版本更新失败，请检查服务器日志或联系开发者"
+                            )
+                            return
+                    except Exception as exc2:  # noqa: BLE001
+                        logger.error(f"[Update] 恢复旧版本时出错：{exc2}")
+                logger.error("[Update] 自动恢复未完成，请重启服务器以恢复 LumenBridge 运行")
 
         old_plugin.run_on_main(_hot_swap, delay=delay_ticks)
         return {"scheduled": True, "to_version": version, "wheel": target.name, "restart_required": False}

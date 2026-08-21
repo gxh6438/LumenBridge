@@ -9,9 +9,16 @@
         "desc": "示例子插件",
         "load": true,                # 是否加载
         "priority": "main",          # pre / main / post 三段加载顺序
-        "min_v": ""                  # 最低 LumenBridge 版本要求（可选）
+        "min_v": "",                 # 最低 LumenBridge 版本要求（可选）
+        "dependencies": [],          # 第三方 pip 依赖，如 ["openai>=1.0.0"]
+        "requires": {                # 插件级强制依赖（可选）
+            "subplugins": ["economy>=1.2.0"],   # 依赖其它子插件
+            "endstone": ["some-plugin>=2.0"]    # 依赖 Endstone 插件
+        }
     }
 
+``requires`` 约束见 :mod:`.requires`。子插件依赖缺失时（市场有的）安装流程
+会像 pip 依赖那样自动装齐；Endstone 插件依赖缺失时在报错中提示用户安装。
 入口文件 ``main.py`` 必须暴露 ``on_load(lumen)``，可选暴露 ``on_unload(lumen)``。
 """
 
@@ -34,6 +41,12 @@ from typing import TYPE_CHECKING, Any
 from .. import __version__
 from ..i18n import t as _t
 from .context import LumenContext
+from .requires import (
+    RequiresDeclaration,
+    check_endstone_requirements,
+    parse_requires_from_manifest,
+    version_tuple,
+)
 
 if TYPE_CHECKING:
     from ..plugin import LumenBridgePlugin
@@ -49,7 +62,7 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 # 市场下载另有压缩包大小上限，但高压缩比 ZIP 仍可在解压时耗尽磁盘与内存。
 _MAX_ZIP_ENTRIES = 2000
 _MAX_ZIP_FILE_BYTES = 64 * 1024 * 1024
-# M30：解压总上限从 256MB 收紧到 64MB，进一步压缩 ZIP 炸弹的破坏面
+# 总解压上限 64MB：进一步压缩 ZIP 炸弹的破坏面
 _MAX_ZIP_TOTAL_BYTES = 64 * 1024 * 1024
 
 
@@ -64,12 +77,8 @@ def _is_safe_name(name: str) -> bool:
 
 def _read_manifest_dict(path: Path) -> dict[str, Any] | None:
     """安全读取 lumen.json：返回 dict；内容损坏（非法 JSON / 非 UTF-8 /
-    合法 JSON 但非对象如 null/123/[]）时返回 None，绝不向上抛异常。
-
-    旧实现只捕获 (JSONDecodeError, OSError)：
-    - 非 UTF-8 字节抛 UnicodeDecodeError 不被捕获；
-    - manifest.update(null)/update("str") 抛 TypeError/ValueError 不被捕获，
-      discover() 中单个坏清单会阻断全部子插件加载。
+    合法 JSON 但非对象如 null/123/[]）时返回 None，绝不向上抛异常，
+    避免单个坏清单阻断 discover() 全部子插件加载。
     """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -88,10 +97,8 @@ def _ensure_under(folder: Path, base: Path) -> bool:
 
 
 def _write_manifest_atomic(path: Path, manifest: dict[str, Any]) -> None:
-    """tmp 文件 + os.replace 原子写 lumen.json，防进程中断留下半个清单文件。
-
-    参考 modules/regex_engine.py 的 _write_rules_atomic 模式；直接 write_text
-    在写入中途崩溃/断电会留下截断 JSON，下次启动被当作"损坏清单"跳过加载。
+    """tmp 文件 + os.replace 原子写 lumen.json，防进程中断留下半个清单文件
+    （截断 JSON 下次启动会被当作"损坏清单"跳过加载）。
     """
     temp = path.with_name(path.name + ".tmp")
     temp.write_text(
@@ -108,6 +115,8 @@ DEFAULT_MANIFEST = {
     "priority": "main",
     "min_v": "",
     "dependencies": [],  # 第三方 pip 依赖声明，如 ["openai>=1.0.0", "pillow"]
+    # 插件级强制依赖（可选）：{"subplugins": ["a>=1.0"], "endstone": ["b>=2.0"]}
+    "requires": {"subplugins": [], "endstone": []},
 }
 
 
@@ -127,6 +136,8 @@ class SubPlugin:
         self.error: str = ""
         self.missing_deps: list[str] = []
         self.missing_modules: list[str] = []
+        # 未满足的插件级依赖（requires）描述，供 WebUI 展示与“装依赖”入口
+        self.missing_requirements: list[str] = []
 
 
 class SubPluginManager:
@@ -186,7 +197,19 @@ class SubPluginManager:
         with self._lock:
             # 清理历史遗留的字节码缓存（含已禁用子插件的），保持子插件目录整洁
             self._purge_pycache(self.plugins_dir)
-            for sp in self.discover():
+            # 拓扑排序：被依赖的子插件先加载，避免 requires 检查误报
+            for sp in self._order_by_requirements(self.discover()):
+                dup = self.subplugins.get(sp.name)
+                if dup is not None and dup.folder != sp.folder:
+                    self.logger.warning(
+                        _t(
+                            "subplugin_runtime.log.name_conflict",
+                            name=sp.name,
+                            old=dup.folder.name,
+                            new=sp.folder.name,
+                        )
+                    )
+                    continue
                 if not sp.manifest.get("load", True):
                     self.logger.info(_t("subplugin_runtime.log.disabled", name=sp.name))
                     sp.loaded = False
@@ -211,6 +234,19 @@ class SubPluginManager:
             pass
 
     def _load_one(self, sp: SubPlugin) -> bool:
+        # 同名冲突防护：另一目录已占用该名时拒绝加载——否则新记录覆盖
+        # 旧记录后，旧目录的模块成为孤儿（事件回调持续触发且永无卸载入口）
+        existing = self.subplugins.get(sp.name)
+        if existing is not None and existing is not sp and existing.folder != sp.folder:
+            self.logger.warning(
+                _t(
+                    "subplugin_runtime.log.name_conflict",
+                    name=sp.name,
+                    old=existing.folder.name,
+                    new=sp.folder.name,
+                )
+            )
+            return False
         context: LumenContext | None = None
         module_name = f"lumenbridge_sub_{sp.folder.name}"
         try:
@@ -261,6 +297,7 @@ class SubPluginManager:
             else:
                 sp.missing_deps = []
                 sp.missing_modules = []
+            sp.missing_requirements = []
 
             # min_v 版本闸：声明的最低 LumenBridge 版本高于当前 → 拒绝加载
             unmet = self._unmet_min_version(sp.manifest)
@@ -268,6 +305,7 @@ class SubPluginManager:
                 sp.loaded = False
                 sp.missing_deps = []
                 sp.missing_modules = []
+                sp.missing_requirements = []
                 sp.error = _t(
                     "subplugin_runtime.error.version_unmet",
                     required=unmet,
@@ -284,12 +322,26 @@ class SubPluginManager:
                 )
                 return False
 
+            # 插件级强制依赖（requires）：Endstone 插件缺失 → 提示安装；
+            # 子插件缺失/版本不符/未加载 → 拒绝加载（市场安装流程会自动装子插件依赖）
+            req_error = self._check_plugin_requirements(sp)
+            if req_error:
+                sp.loaded = False
+                sp.error = req_error
+                self.subplugins[sp.name] = sp
+                self.logger.warning(
+                    _t(
+                        "subplugin_runtime.log.require_unmet",
+                        name=sp.name,
+                        error=req_error,
+                    )
+                )
+                return False
+
             context = LumenContext(self.plugin, sp.name, sp.folder)
 
             for key in [k for k in sys.modules if k == module_name or k.startswith(module_name + ".")]:
                 del sys.modules[key]
-            # pyc 校验粒度可能只有 1 秒：同一秒覆盖 main.py 且长度未变时 exec_module
-            # 会错误复用旧 pyc，故加载前清理全部字节码缓存强制重新编译
             self._purge_pycache(sp.folder)
 
             spec = importlib.util.spec_from_file_location(
@@ -331,6 +383,7 @@ class SubPluginManager:
             sp.error = ""
             sp.missing_deps = []
             sp.missing_modules = []
+            sp.missing_requirements = []
             self.subplugins[sp.name] = sp
             self.logger.info(
                 _t("subplugin_runtime.log.load_success", name=sp.name, version=sp.manifest.get('version', '?'), desc=sp.manifest.get('desc', ''))
@@ -364,6 +417,135 @@ class SubPluginManager:
             return self.plugin._get_pip_manager()
         except Exception:
             return None
+
+    def _installed_endstone_plugins(self) -> dict[str, str] | None:
+        """当前服务器已加载的 Endstone 插件：名称(小写) → 版本。
+
+        server / plugin_manager 在测试桩或异常环境下可能不可用，
+        此时返回 None（与“确实没有任何插件”的空 dict 区分），
+        Endstone 依赖检查按“无法核实”处理（不阻断）。
+        """
+        try:
+            manager = self.plugin.server.plugin_manager
+            plugins = manager.get_plugins()
+        except Exception:
+            return None
+        installed: dict[str, str] = {}
+        for p in plugins or []:
+            try:
+                name = str(getattr(p, "name", "") or "").strip()
+                if not name:
+                    continue
+                installed[name.lower()] = str(getattr(p, "version", "") or "")
+            except Exception:
+                continue
+        return installed
+
+    def _check_plugin_requirements(self, sp: SubPlugin) -> str:
+        """检查 requires 声明；全部满足返回 ""，否则返回错误信息（已 i18n）。
+
+        必须在持 _lock 状态下调用（读取 self.subplugins）。
+        """
+        declaration = parse_requires_from_manifest(sp.manifest)
+        if declaration.empty:
+            return ""
+        if declaration.invalid:
+            # 无效声明项不阻断加载，但提示作者修正
+            self.logger.warning(
+                _t(
+                    "subplugin_runtime.log.requires_invalid_items",
+                    name=sp.name,
+                    items=", ".join(declaration.invalid),
+                )
+            )
+
+        problems: list[str] = []
+
+        # Endstone 插件依赖：只能提示安装，无法自动处理。
+        # server 不可用（None）→ 无法核实，不阻断（避免测试桩/异常环境下误杀）
+        if declaration.endstone:
+            installed = self._installed_endstone_plugins()
+            if installed is None:
+                self.logger.warning(
+                    _t("subplugin_runtime.log.require_endstone_unverifiable", name=sp.name)
+                )
+            else:
+                for req, actual in check_endstone_requirements(declaration.endstone, installed):
+                    problems.append(_t(
+                        "subplugin_runtime.error.require_endstone_missing",
+                        req=req.display(),
+                    ))
+                    sp.missing_requirements.append(req.display())
+
+        # 子插件依赖：必须已加载且版本满足
+        for req in declaration.subplugins:
+            if req.name == sp.name:
+                # 自依赖视为声明错误，忽略之（不阻断）
+                continue
+            dep = self.subplugins.get(req.name)
+            if dep is None:
+                problems.append(_t(
+                    "subplugin_runtime.error.require_subplugin_missing",
+                    req=req.display(),
+                ))
+                sp.missing_requirements.append(req.display())
+                continue
+            if not dep.loaded:
+                problems.append(_t(
+                    "subplugin_runtime.error.require_subplugin_not_loaded",
+                    name=req.name,
+                ))
+                sp.missing_requirements.append(req.display())
+                continue
+            actual_version = str(dep.manifest.get("version", "") or "")
+            if not req.satisfied_by(actual_version):
+                problems.append(_t(
+                    "subplugin_runtime.error.require_subplugin_version",
+                    name=req.name,
+                    op=req.op,
+                    required=req.version,
+                    current=actual_version or "?",
+                ))
+                sp.missing_requirements.append(req.describe_unmet(actual_version))
+
+        if not problems:
+            return ""
+        return "\n".join(problems)
+
+    def _order_by_requirements(self, plugins: list[SubPlugin]) -> list[SubPlugin]:
+        """按声明的子插件依赖做稳定拓扑排序（被依赖者先加载）。
+
+        priority 段内保持 discover() 的原顺序；仅对“依赖了本批次内其它
+        插件”的声明建立顺序约束。循环依赖时剩余插件按原顺序追加，
+        各自的加载检查会报“依赖未加载”，自然暴露环。
+        """
+        batch_names = {sp.name for sp in plugins}
+        dep_names: dict[str, set[str]] = {}
+        for sp in plugins:
+            declaration = parse_requires_from_manifest(sp.manifest)
+            dep_names[sp.name] = {
+                name for name in declaration.subplugin_names()
+                if name in batch_names and name != sp.name
+            }
+        ordered: list[SubPlugin] = []
+        placed: set[str] = set()
+        pending = list(plugins)
+        while pending:
+            remaining: list[SubPlugin] = []
+            progressed = False
+            for sp in pending:
+                if dep_names[sp.name] <= placed:
+                    ordered.append(sp)
+                    placed.add(sp.name)
+                    progressed = True
+                else:
+                    remaining.append(sp)
+            if not progressed:
+                # 循环依赖：按原顺序加载，让各自检查报错
+                ordered.extend(remaining)
+                break
+            pending = remaining
+        return ordered
 
     @staticmethod
     def _extract_module_name(package_spec: str) -> str:
@@ -426,7 +608,19 @@ class SubPluginManager:
         with self._lock:
             for name in list(self.subplugins):
                 self._unload_one(name)
-            for sp in self.discover():
+            # 与 load_all 相同的拓扑排序，保证依赖先于依赖者加载
+            for sp in self._order_by_requirements(self.discover()):
+                dup = self.subplugins.get(sp.name)
+                if dup is not None and dup.folder != sp.folder:
+                    self.logger.warning(
+                        _t(
+                            "subplugin_runtime.log.name_conflict",
+                            name=sp.name,
+                            old=dup.folder.name,
+                            new=sp.folder.name,
+                        )
+                    )
+                    continue
                 if not sp.manifest.get("load", True):
                     self.logger.info(_t("subplugin_runtime.log.disabled", name=sp.name))
                     sp.loaded = False
@@ -438,7 +632,6 @@ class SubPluginManager:
 
     def reload_one(self, name: str) -> bool:
         """热重载单个子插件（全程持 _lock 避免与并发 install/uninstall 竞态）"""
-        # 防路径穿越：拒绝包含 . / \\ 等路径字符的输入
         if not _is_safe_name(name):
             return False
         with self._lock:
@@ -460,8 +653,8 @@ class SubPluginManager:
                 # 二次校验：防符号链接等绕过
                 if not _ensure_under(folder, self.plugins_dir):
                     return False
-            if sp:
-                self._unload_one(name)
+            # 先完成全部校验再卸载：清单损坏 / 入口缺失 / 已禁用时
+            # 直接返回，正在运行的实例不受影响（校验失败先卸载会让插件凭空消失）
             if not folder.is_dir() or not (folder / ENTRY_NAME).is_file():
                 return False
             manifest = dict(DEFAULT_MANIFEST)
@@ -469,28 +662,26 @@ class SubPluginManager:
             if manifest_path.is_file():
                 mdata = _read_manifest_dict(manifest_path)
                 if mdata is None:
-                    # M28 口径：清单存在但损坏 → 记 error 并拒绝重载，
-                    # 绝不回退默认 load=True 继续执行其代码
+                    # M28 口径：清单损坏拒绝重载，绝不回退默认 load=True
                     self.logger.error(_t("subplugin_runtime.log.manifest_failed", name=folder.name, manifest=MANIFEST_NAME))
                     return False
                 manifest.update(mdata)
-            # H13：尊重 manifest 的 load:false 禁用开关——
-            # 禁用的插件不允许经热重载强行加载（此前 reload_one 无视该开关）
+            # H13：尊重 manifest 的 load:false 禁用开关，禁用的插件不允许经热重载强行加载
             if not manifest.get("load", True):
                 self.logger.warning(f"[子插件] {name} 插件已被禁用，拒绝重载")
                 return False
+            if sp:
+                self._unload_one(name)
             new_sp = SubPlugin(folder, manifest)
             return self._load_one(new_sp)
 
     def set_enabled(self, name: str, enable: bool) -> bool:
         """开关子插件（写回清单 load 字段）"""
-        # 防路径穿越
         if not _is_safe_name(name):
             return False
         with self._lock:
             sp = self.subplugins.get(name)
             folder = sp.folder if sp else self.plugins_dir / name
-            # 二次校验：folder 必须在 plugins_dir 之下
             if not _ensure_under(folder, self.plugins_dir):
                 return False
             manifest_path = folder / MANIFEST_NAME
@@ -502,7 +693,6 @@ class SubPluginManager:
                     self.logger.error(_t("subplugin_runtime.log.manifest_save_failed", name=name, error="invalid manifest"))
                     return False
                 manifest["load"] = enable
-                # 低危：原子写（tmp + os.replace），防中断留下半个清单文件
                 _write_manifest_atomic(manifest_path, manifest)
                 if sp:
                     sp.manifest["load"] = enable
@@ -518,6 +708,11 @@ class SubPluginManager:
                 sp.loaded = False
                 sp.error = ""
                 self.subplugins[name] = sp
+            elif enable:
+                # 与禁用立即卸载对称：启用后立即尝试加载，否则开关打开后
+                # 插件仍不运行，需手动 reload 才生效（reload_one 内部重读
+                # 清单并做完整校验，加载失败会以 error 记录供 WebUI 展示）
+                self.reload_one(name)
         if enable:
             self.logger.info(_t("subplugin_runtime.log.toggle_enabled", name=name))
         else:
@@ -538,9 +733,31 @@ class SubPluginManager:
                     "error": sp.error,
                     "missing_deps": list(sp.missing_deps),
                     "missing_modules": list(sp.missing_modules),
+                    "missing_requirements": list(sp.missing_requirements),
                 }
                 for sp in self.subplugins.values()
             ]
+
+    def dependents_of(self, name: str) -> list[dict[str, Any]]:
+        """列出依赖指定子插件的其它子插件（供卸载/禁用前反向依赖警告）。
+
+        返回 ``[{"name": 依赖者, "loaded": 是否已加载, "req": 约束原文}]``，
+        无依赖者时为空列表。读取的是当前记录的 manifest 声明，
+        不依赖依赖者是否加载成功。
+        """
+        with self._lock:
+            result: list[dict[str, Any]] = []
+            for sp in self.subplugins.values():
+                if sp.name == name:
+                    continue
+                declaration = parse_requires_from_manifest(sp.manifest)
+                for req in declaration.subplugins:
+                    if req.name == name:
+                        result.append(
+                            {"name": sp.name, "loaded": sp.loaded, "req": req.display()}
+                        )
+                        break
+            return result
 
     def status_text_lines(self) -> list[str]:
         """文本格式状态行，供 /lumen plugins 命令输出"""
@@ -551,11 +768,15 @@ class SubPluginManager:
                     state = _t("subplugin_runtime.log.status_enabled")
                 elif sp.missing_deps:
                     state = _t("subplugin_runtime.log.status_missing_deps")
+                elif sp.missing_requirements:
+                    state = _t("subplugin_runtime.log.status_missing_requirements")
                 else:
                     state = _t("subplugin_runtime.log.status_failed")
                 line = f"{sp.name} v{sp.manifest.get('version', '?')} [{state}] - {sp.manifest.get('desc', '')}"
                 if sp.missing_deps:
                     line += f"  ← {_t('subplugin_runtime.log.missing_deps_short', deps=', '.join(sp.missing_deps))}"
+                elif sp.missing_requirements:
+                    line += f"  ← {_t('subplugin_runtime.log.missing_requirements_short', deps=', '.join(sp.missing_requirements))}"
                 lines.append(line)
             return lines or [_t("subplugin_runtime.log.status_empty")]
 
@@ -635,7 +856,6 @@ class SubPluginManager:
                                     break
                                 entry_written += len(chunk)
                                 total_written += len(chunk)
-                                # 单文件 / 总量任一超限立即中止
                                 if entry_written > _MAX_ZIP_FILE_BYTES or total_written > _MAX_ZIP_TOTAL_BYTES:
                                     return False, _t("subplugin_runtime.log.install_zip_limit"), ""
                                 dst.write(chunk)
@@ -679,73 +899,76 @@ class SubPluginManager:
                 ), name
 
             dest = self.plugins_dir / name
-            # 二次校验：防符号链接绕过
             if not _ensure_under(dest, self.plugins_dir):
                 return False, _t("subplugin_runtime.log.install_path_traversal"), ""
-            if dest.exists():
-                old_manifest_path = dest / MANIFEST_NAME
-                old_version = "0"
-                if old_manifest_path.is_file():
-                    old_data = _read_manifest_dict(old_manifest_path)
-                    if old_data is not None:
-                        old_version = str(old_data.get("version", "0") or "0")
-                new_version = manifest.get("version", "0")
-                # 低危：旧目录无清单（old=0）且新包 version 缺失/解析为 0 时，
-                # 0 视为"未知版本"放行升级（允许覆盖安装），不再被 0<=0 卡死
-                new_tuple = self._version_tuple(new_version)
-                if new_tuple != (0,) and new_tuple <= self._version_tuple(old_version):
-                    return False, _t("subplugin_runtime.log.install_version_too_low", name=name, old=old_version, new=new_version), name
-                # 升级：先卸载；备份用户数据文件 → 全量替换目录（清掉已删除/改名的旧代码）→ 回填数据文件
-                # _lock 为 RLock（_unload_one 内部取锁可重入）：升级全程持锁，
-                # 防并发 install/uninstall/reload 在备份-rmtree-回填中间态抢入
-                with self._lock:
+            # 检查与替换全程持锁（RLock 可重入）：升级与新装均防并发
+            # install/uninstall/reload 在 exists 检查-替换中间态抢入
+            with self._lock:
+                if dest.exists():
+                    old_manifest_path = dest / MANIFEST_NAME
+                    old_version = "0"
+                    if old_manifest_path.is_file():
+                        old_data = _read_manifest_dict(old_manifest_path)
+                        if old_data is not None:
+                            old_version = str(old_data.get("version", "0") or "0")
+                    new_version = manifest.get("version", "0")
+                    # 低危：旧目录无清单（old=0）且新包 version 缺失/解析为 0 时，
+                    # 0 视为"未知版本"放行升级（允许覆盖安装），不再被 0<=0 卡死
+                    new_tuple = self._version_tuple(new_version)
+                    if new_tuple != (0,) and new_tuple <= self._version_tuple(old_version):
+                        return False, _t("subplugin_runtime.log.install_version_too_low", name=name, old=old_version, new=new_version), name
+                    # 升级：先卸载；递归备份用户数据（非 .py/.pyc，含嵌套目录，
+                    # 子插件常把数据写进 data/ 等子目录，仅顶层白名单会丢数据）
+                    # → 全量替换目录（清掉已删除/改名的旧代码）→ 回填数据文件
                     self._unload_one(name)
-                    _data_suffixes = {".json", ".db", ".sqlite", ".sqlite3", ".txt", ".yaml", ".yml", ".csv", ".log"}
                     preserved: dict[str, Path] = {}
-                    for old in dest.iterdir():
-                        if old.is_file() and old.suffix.lower() in _data_suffixes:
-                            preserved[old.name] = old
+                    for old in dest.rglob("*"):
+                        # 代码文件不保留（新包自带）：.py/.pyc 之外还有原生
+                        # 扩展（.so/.pyd/.dll）——把旧二进制当用户数据回填
+                        # 会覆盖新包二进制，ABI 不匹配直接崩溃
+                        if old.is_file() and old.suffix.lower() not in {
+                            ".py", ".pyc", ".pyo", ".so", ".pyd", ".dll",
+                        }:
+                            preserved[str(old.relative_to(dest))] = old
                     backup_dir = Path(tempfile.mkdtemp(prefix="lumen_upgrade_"))
                     upgrade_ok = False
-                    try:
-                        for fname, fpath in preserved.items():
+
+                    def _restore_preserved(target_dir: Path) -> None:
+                        # 把备份数据回填到目录（升级失败兜底 / 成功后覆盖新包同名文件）
+                        for rel in preserved:
+                            backed = backup_dir / rel
+                            if not backed.is_file():
+                                continue
+                            target = target_dir / rel
                             try:
-                                shutil.copy2(fpath, backup_dir / fname)
+                                target.parent.mkdir(parents=True, exist_ok=True)
+                                shutil.copy2(backed, target)
+                            except OSError as e:
+                                self.logger.warning(
+                                    _t("subplugin_runtime.log.upgrade_restore_failed", name=name, file=rel, error=e)
+                                )
+
+                    try:
+                        for rel, fpath in preserved.items():
+                            try:
+                                backed = backup_dir / rel
+                                backed.parent.mkdir(parents=True, exist_ok=True)
+                                shutil.copy2(fpath, backed)
                             except OSError:
                                 pass
                         shutil.rmtree(dest, ignore_errors=True)
                         if dest.exists():
                             # 清理半途失败：把已备份的数据文件回填旧目录，防丢失
-                            for fname in preserved:
-                                backed = backup_dir / fname
-                                if backed.is_file():
-                                    try:
-                                        shutil.copy2(backed, dest / fname)
-                                    except OSError:
-                                        pass
+                            _restore_preserved(dest)
                             return False, _t("subplugin_runtime.log.install_failed_cleanup", name=name), name
                         try:
                             shutil.copytree(root, dest)
                         except OSError:
                             # 新代码写入失败（磁盘满/权限）：回填用户数据文件到半成品目录
-                            for fname in preserved:
-                                backed = backup_dir / fname
-                                if backed.is_file():
-                                    try:
-                                        shutil.copy2(backed, dest / fname)
-                                    except OSError:
-                                        pass
+                            _restore_preserved(dest)
                             raise
                         # 用户数据优先于新包自带同名文件
-                        for fname in preserved:
-                            backed = backup_dir / fname
-                            if backed.is_file():
-                                try:
-                                    shutil.copy2(backed, dest / fname)
-                                except OSError as e:
-                                    self.logger.warning(
-                                        _t("subplugin_runtime.log.upgrade_restore_failed", name=name, file=fname, error=e)
-                                    )
+                        _restore_preserved(dest)
                         upgrade_ok = True
                     finally:
                         if upgrade_ok:
@@ -755,23 +978,24 @@ class SubPluginManager:
                             self.logger.warning(
                                 _t("subplugin_runtime.log.upgrade_backup_kept", name=name, path=str(backup_dir))
                             )
-                action = _t("subplugin_runtime.log.install_action_upgrade", version=manifest.get('version', '?'))
-            else:
-                shutil.copytree(root, dest)
-                action = _t("subplugin_runtime.log.install_action_install", version=manifest.get('version', '?'))
+                    action = _t("subplugin_runtime.log.install_action_upgrade", version=manifest.get('version', '?'))
+                else:
+                    shutil.copytree(root, dest)
+                    action = _t("subplugin_runtime.log.install_action_install", version=manifest.get('version', '?'))
 
-            # 低危：原子写（tmp + os.replace），防中断留下半个清单文件
-            _write_manifest_atomic(dest / MANIFEST_NAME, manifest)
+                # 清单写入必须与目录替换同锁：锁外写入时并发 reload_all/
+                # discover 可在中间态抢先加载该目录（同名同 folder 重复加载、
+                # 监听器重复注册），并发 set_enabled 还会与固定 tmp 文件名
+                # （lumen.json.tmp）交错产出损坏清单
+                _write_manifest_atomic(dest / MANIFEST_NAME, manifest)
 
-            sp = SubPlugin(dest, manifest)
-            if manifest.get("load", True):
-                # _load_one 会写 subplugins 字典，持锁调用避免竞态
-                with self._lock:
+                sp = SubPlugin(dest, manifest)
+                if manifest.get("load", True):
+                    # _load_one 会写 subplugins 字典，持锁调用避免竞态
                     ok = self._load_one(sp)
-                if not ok:
-                    return True, _t("subplugin_runtime.log.install_load_failed", name=name, action=action), name
-            else:
-                with self._lock:
+                    if not ok:
+                        return True, _t("subplugin_runtime.log.install_load_failed", name=name, action=action), name
+                else:
                     self.subplugins[name] = sp
             self.logger.info(_t("subplugin_runtime.log.install_web_success", name=name, action=action))
             return True, _t("subplugin_runtime.log.install_success_msg", name=name, action=action), name
@@ -780,7 +1004,6 @@ class SubPluginManager:
 
     def uninstall(self, name: str) -> tuple[bool, str]:
         """卸载并删除子插件目录"""
-        # 防路径穿越
         if not _is_safe_name(name):
             return False, _t("subplugin_runtime.log.uninstall_path_illegal")
         folder = None
@@ -796,7 +1019,6 @@ class SubPluginManager:
                     folder = candidate
             if folder is None or not folder.is_dir():
                 return False, _t("subplugin_runtime.log.uninstall_not_exist", name=name)
-            # 安全检查：目录必须位于 plugins_dir 下
             if not _ensure_under(folder, self.plugins_dir):
                 return False, _t("subplugin_runtime.log.uninstall_path_illegal")
             # rmtree 可能因 Windows 文件占用失败

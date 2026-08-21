@@ -1,8 +1,8 @@
 """内置第三方库加载器：websockets 内嵌在 lib/ 随插件分发，避免手动安装依赖。
 
-M25：lib/ 目录改为追加到 sys.path 尾部（append 而非 insert(0)）——磁盘上
-已安装的合格 websockets（>= 14）优先解析，内嵌版本仅在环境中没有任何可用
-websockets 时兜底命中，不抢占系统/其他插件的版本解析优先级。
+lib/ 目录追加到 sys.path 尾部（append 而非 insert(0)）：磁盘上已安装的合格
+websockets（>= 14）优先解析，内嵌版本仅在环境中没有任何可用 websockets 时
+兜底命中，不抢占系统/其他插件的版本解析优先级。
 """
 
 import logging
@@ -14,11 +14,7 @@ _LOG = logging.getLogger(__name__)
 
 
 def setup_lib_path() -> None:
-    """将插件内置的 lib 目录追加到模块搜索路径尾部（M25：append 而非 insert(0)）。
-
-    追加到尾部意味着 site-packages 等既有路径中的已安装版本优先解析，
-    内嵌版本只作"磁盘上没有 websockets"时的兜底，不影响他方版本。
-    """
+    """将插件内置的 lib 目录追加到模块搜索路径尾部（append 而非 insert(0)）。"""
     lib_path = str(Path(__file__).parent / "lib")
     if lib_path not in sys.path:
         sys.path.append(lib_path)
@@ -49,14 +45,14 @@ def _is_websockets_compatible(module: Any) -> bool:
 def import_websockets() -> Any:
     """导入 websockets：优先复用进程中已加载且合格的版本（不破坏其他插件）。
 
-    M25 行为约定（返回值语义不变：成功返回模块，失败抛 ImportError）：
+    行为约定（成功返回模块，失败抛 ImportError）：
 
     1. sys.modules 已有合格 websockets（版本 >= 14，或已由他方提供且 API
        齐全）→ 直接复用，不再注入任何路径；
     2. 否则把内置 lib/ 追加到 sys.path 尾部后再导入——磁盘上已安装的合格
        版本位于更前的搜索路径会优先命中，内嵌版本仅兜底；
-    3. 不再 purge sys.modules 中的 websockets*（旧实现的全量清理会破坏进程
-       内其他已依赖该版本的插件）；若最终命中的是过旧版本，仅告警提示连接
+    3. 不 purge sys.modules 中的 websockets*（全量清理会破坏进程内其他
+       已依赖该版本的插件）；若最终命中的是过旧版本，仅告警提示连接
        时可能因缺少 additional_headers 报错，按现状返回该模块。
     """
     cached = sys.modules.get("websockets")

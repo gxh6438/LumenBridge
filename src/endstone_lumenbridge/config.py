@@ -14,8 +14,7 @@ from typing import Any
 from .i18n import t as _t
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    # v1.2.0 起 connection / admin_qq / main_group / sync 迁移至 connections.json
-    # （见 connections.ConnectionManager），由适配器卡片单独配置。
+    # connection / admin_qq / main_group / sync 由适配器卡片单独配置（见 connections.ConnectionManager）
     "debug": False,
 
     # "auto" = 启动时自动检测 Endstone 服务器语言
@@ -82,6 +81,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "reload": {"allow_player": False},
         "say": {"allow_player": False},
         "plugins": {"allow_player": False},
+        "update": {"allow_player": False},
         "pip": {
             "allow_in_game": False,
             "allow_player": False,
@@ -97,7 +97,7 @@ def _is_nonempty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-# v1.2.0 起迁出 config.json 的旧连接键（加载时迁移到 connections.json 后剥离）
+# 旧版连接键：加载时迁移到 connections.json 后剥离
 LEGACY_CONNECTION_KEYS = ("connection", "admin_qq", "main_group", "sync")
 
 
@@ -177,11 +177,11 @@ def _validate_effective_config(config: dict[str, Any]) -> None:
 
 
 def _strip_deprecated_pip_fields(config: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-    """移除已废弃字段：pip.allow_all / allow_list（v1.1.0）、旧版连接键（v1.2.0）
-    与 marketplace.report_api_key（点赞/举报已改为完全匿名会话，无需密钥）。
+    """移除已废弃字段：pip.allow_all / allow_list、旧版连接键与
+    marketplace.report_api_key（点赞/举报已改为完全匿名会话，无需密钥）。
 
     旧配置或旧浏览器标签页仍可能在完整表单提交中携带这些键；其余未知键仍严格拒绝。
-    v1.2.0 起连接键迁移到 connections.json，这里仅剥离不校验。
+    连接键由 connections.json 接管，这里仅剥离不校验。
     """
     sanitized = copy.deepcopy(config)
     changed = False
@@ -240,7 +240,7 @@ class ConfigManager:
         self._raw: dict[str, Any] = {}
         # 旧版 config.json 中迁移前的连接配置载荷（首次生成 connections.json 时消费）
         self.legacy_connection: dict[str, Any] = {}
-        # 连接管理器（v1.2.0）：connection/sync/main_group/admin_qq 的委托数据源
+        # 连接管理器：connection/sync/main_group/admin_qq 的委托数据源
         self._connections: Any = None
         # 保护 cm.data 的读改写，避免 WebUI 并发 POST 互相覆盖
         self._save_lock = threading.RLock()
@@ -357,7 +357,7 @@ class ConfigManager:
 
     @property
     def connection(self) -> dict[str, Any]:
-        """委托视图：主 WebSocket 适配器的连接配置（v1.2.0 起存于 connections.json）。"""
+        """委托视图：主 WebSocket 适配器的连接配置（存于 connections.json）。"""
         if self._connections is not None:
             primary = self._connections.primary_websocket()
             if primary:
@@ -400,11 +400,15 @@ class ConfigManager:
         return []
 
     @property
-    def admin_keys(self) -> list[str]:
-        """管理员标识宽松并集（含 QQ 官方域 openid 字符串），供跨域权限判定。"""
+    def admin_keys(self) -> frozenset[str]:
+        """管理员标识宽松并集（含 QQ 官方域 openid 字符串），供跨域权限判定。
+
+        返回缓存 frozenset：正则引擎的条件判定在每条消息上做成员检查，
+        旧实现每次持锁遍历全部适配器并重新解析 CSV。
+        """
         if self._connections is not None:
-            return self._connections.all_admin_keys()
-        return []
+            return self._connections.admin_key_set()
+        return frozenset()
 
     @property
     def debug(self) -> bool:

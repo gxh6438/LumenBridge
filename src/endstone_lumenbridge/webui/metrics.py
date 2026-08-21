@@ -187,8 +187,6 @@ class ServerMetricsCollector:
         return total, available if available is not None else 0
 
     def _sample_windows(self) -> None:
-        # 整个采样纳入 self._lock：_prev_cpu/_prev_time 的读写
-        # 与 start/stop/snapshot 并发时保持一致（RLock 可重入）
         with self._lock:
             mem = self._win_mem_status()
             if mem is None:

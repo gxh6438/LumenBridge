@@ -1,15 +1,10 @@
-"""QQ 官方机器人回复凭据管理。
+"""QQ 官方机器人回复凭据管理（借鉴 Gensokyo 懒池 / AtoP 机制）。
 
-集中管理三类发送凭据（借鉴 Gensokyo 懒池 / AtoP 机制）：
-1. 被动凭据池：入站消息 msg_id 池化，同一 msg_id 配递增 msg_seq
-   可多次回复（群 5 次 / 单聊 4 次，见 constants）；
-2. 入群 event_id：机器人入群事件自带，可作被动回复凭据且
-   不消耗主动额度（窗口见 EVENT_ID_WINDOW）；
-3. 主动补发栈：主动消息被拒（22009）后暂存，待下次被动回复
-   成功时借剩余额度补发。
-
-线程安全：入池发生在适配器事件循环，取出可能来自不同协程，
-统一以 threading.Lock 保护（锁不绑定事件循环）。
+三类凭据：被动 msg_id 池（同一 msg_id 配递增 msg_seq 可多次回复，群 5
+次 / 单聊 4 次，见 constants）；入群 event_id（可作被动回复凭据且不消耗
+主动额度）；主动补发栈（22009 被拒后暂存，待被动回复成功时借剩余额度
+补发）。线程安全：入池与取出可能来自不同协程，统一以 threading.Lock
+保护（锁不绑定事件循环）。
 """
 
 from __future__ import annotations
@@ -63,9 +58,8 @@ class CredentialsStore:
     def take_passive(self, target: str) -> tuple[str, int] | None:
         """从池中取出被动凭据 (msg_id, msg_seq)；无可用凭据返回 None。
 
-        官方规则：同一 msg_id 配递增 msg_seq 最多回复 max_seq 次（群 5 / C2C 4）。
-        优先取未用过（uses=0）的凭据以摊平限额；否则取最新的（Gensokyo 懒池
-        语义）；全部用尽或过期返回 None（调用方降级主动发送）。
+        优先取未用过（uses=0）的凭据以摊平限额；否则取最新的（Gensokyo
+        懒池语义）；全部用尽或过期返回 None（调用方降级主动发送）。
         """
         now = time.time()
         with self._lock:
@@ -85,6 +79,44 @@ class CredentialsStore:
             self.passive[target] = pool
             return msg_id, next_seq
 
+    def purge_passive(self, target: str, msg_id: str) -> None:
+        """服务端判定 msg_id 过期（40034005）时移除池中该凭据。
+
+        本地窗口与官方过期判定存在偏差：不清理则后续消息会反复取到
+        已失效凭据，每条都白白消耗一轮重试。
+        """
+        if not target or not msg_id:
+            return
+        with self._lock:
+            pool = self.passive.get(target)
+            if not pool:
+                return
+            remain = [entry for entry in pool if entry[0] != msg_id]
+            if remain:
+                self.passive[target] = remain
+            else:
+                self.passive.pop(target, None)
+
+    def sync_passive_seq(self, target: str, msg_id: str, seq: int) -> None:
+        """发送成功后回写实际消耗的 msg_seq。
+
+        post_message 重试期间 body 内 seq 已递增（规避官方去重），
+        池计数若不跟进，下次取出的 seq 会与官方已消费的序号重复，
+        该回复被官方按 (msg_id, msg_seq) 去重静默丢弃。
+        仅前进不后退：并发补发路径完成顺序可能与取出顺序不同。
+        """
+        if not target or not msg_id:
+            return
+        with self._lock:
+            pool = self.passive.get(target)
+            if not pool:
+                return
+            for i, entry in enumerate(pool):
+                if entry[0] == msg_id:
+                    if seq + 1 > entry[2]:
+                        pool[i] = (entry[0], entry[1], seq + 1, entry[3], entry[4])
+                    break
+
     # ------------------------------------------------------------ 入群 event_id
     def cache_event_id(self, target: str, event_id: Any) -> None:
         """缓存机器人入群事件的 event_id：可作被动回复凭据，不消耗主动额度。"""
@@ -103,6 +135,15 @@ class CredentialsStore:
             self.event_ids.pop(target, None)
             return ""
         return event_id
+
+    def purge_event_id(self, target: str) -> None:
+        """官方判定 event_id 无效（40034025）时移除缓存。
+
+        不清理则窗口内后续每条发往该目标的消息都会先白白消耗一轮
+        重试（必失败）再降级主动通道（群聊必被拒），消息连锁丢失。
+        """
+        if target:
+            self.event_ids.pop(target, None)
 
     # ------------------------------------------------------------ 主动补发栈
     def push_active(self, item: ActiveItem) -> bool:
@@ -125,6 +166,20 @@ class CredentialsStore:
             if not queue:
                 self.active_stack.pop(target, None)
             return item
+
+    def unshift_active(self, item: ActiveItem) -> bool:
+        """条目回栈首（push_active 是尾部追加）。
+
+        flush_active_stack 凭据耗尽时取出的队首消息必须回队首，
+        追加到尾部会让最旧的消息排到最后，补发顺序错乱。
+        """
+        target = item[1]
+        with self._lock:
+            queue = self.active_stack.setdefault(target, [])
+            if len(queue) >= ACTIVE_STACK_MAX:
+                return False
+            queue.insert(0, item)
+            return True
 
     def active_size(self, target: str) -> int:
         """目标补发栈当前长度（日志用）。"""

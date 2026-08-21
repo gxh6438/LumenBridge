@@ -1,6 +1,6 @@
 """QQ 官方机器人工具函数：HTTP 错误封装、业务错误码提取、消息内容解析。
 
-从适配器主文件拆出，供 translate / sender / 主适配器共用，无外部依赖。
+供 translate / sender / 主适配器共用，无外部依赖。
 """
 
 from __future__ import annotations
@@ -86,10 +86,9 @@ def content_segments(content: Any, self_id: str = "") -> tuple[list[dict[str, An
     """把官方 content 按原始顺序解析为 (text/at 交错的消息段列表, 纯文本)。
 
     - @机器人自身 的触发标记连同其后空白一并剥离（不应进入转发内容）；
-    - @其他成员 **就地** 转 at 段：此前实现先剥掉全部 @ 标记、再把 at 段
-      统一追加到消息末尾，导致 "你好@xxx你好呀" 被转发成 "你好你好呀@xxx"；
-    - 表情标记转 [表情] 文本。
-    纯文本不含任何 @ 标记（与 plain_content 一致），供 raw_message 使用。
+    - @其他成员 **就地** 转 at 段，保持原始位置（"你好@xxx你好呀" 不被
+      重排成 "你好你好呀@xxx"）；
+    - 表情标记转 [表情] 文本。纯文本不含 @ 标记，供 raw_message 使用。
     """
     text = str(content or "")
     segments: list[dict[str, Any]] = []
@@ -164,10 +163,9 @@ def normalize_at_markers(content: Any) -> str:
     """出站格式转换器：任意风格的 @ 标记统一转为官方文本链标准格式。
 
     <qqbot-at-user id="id" />（自闭合、斜杠前带空格）配合 markdown 载体
-    （msg_type=2）是经 Gensokyo-ForSpark 实测可渲染真实 @ 的组合；旧协议
-    <@!id> / <@id>（已弃用）与旧社区写法 <at id=""></at> 一并归一化。
-    转换只换标记壳、id 原样保留（openid / unionid 均可，由官方侧解析）；
-    已是标准格式的标记不受影响（幂等）；空 id 的占位标记整体丢弃。
+    是实测可渲染真实 @ 的组合（详见 OUT_MENTION_RE 注释）；旧协议与旧
+    社区写法一并归一化。id 原样保留（openid / unionid 均可，由官方侧
+    解析）；已是标准格式的标记不受影响（幂等）；空 id 占位标记丢弃。
     """
 
     def _tag(uid: str) -> str:
@@ -202,10 +200,8 @@ def escape_markdown_text(content: Any) -> str:
 def markdown_to_plain_text(content: Any) -> str:
     """markdown 载体降级纯文本通路：反转义 + @ 标记还原为可读文本。
 
-    markdown 能力未开通被拒时降级纯文本发送；纯文本通道 @ 不渲染
-    （Gensokyo 实测显示原文），官方文本链标记还原为 @Openid前8位
-    可读文本（学 Gensokyo 兜底，避免整段标记原样刷在群里），
-    并反转义 markdown 转义字符（去掉 \\ 前缀）。
+    纯文本通道 @ 不渲染（Gensokyo 实测显示原文），官方文本链标记还原为
+    @Openid前8位 可读文本（避免整段标记原样刷在群里），并反转义转义字符。
     """
 
     def _to_nick(m: "re.Match[str]") -> str:
@@ -219,9 +215,9 @@ def markdown_to_plain_text(content: Any) -> str:
 def read_local_media(path: str) -> bytes | None:
     """读取本地媒体文件（file:/// 前缀 / 绝对路径 / base64:// 内联）；超限返回 None。
 
-    base64:// 是 OneBot v11 标准内联格式（msgbuilder.image(bytes) 即生成它），
-    个人号协议端原生支持；官方域必须在本地解码后走 files 接口的 file_data
-    通道上传，此前未处理导致 base64 图片被静默丢弃（无日志无报错）。
+    base64:// 是 OneBot v11 标准内联格式（msgbuilder.image(bytes) 即生成
+    它），个人号协议端原生支持；官方域须本地解码后走 files 接口的
+    file_data 通道上传，否则图片会被静默丢弃（无日志无报错）。
     """
     if path.startswith("base64://"):
         try:
@@ -243,12 +239,10 @@ def read_local_media(path: str) -> bytes | None:
 def extract_payload(message: Any) -> tuple[str, dict[str, Any] | None]:
     """把 OneBot 消息统一为 (纯文本, 富媒体描述)。
 
-    富媒体描述：{"type": "image"|"video"|"record", "url": str|None, "data": bytes|None}
-    首个富媒体段生效（官方单条消息仅支持一个媒体）。
-    出站 @ 统一归一化：at 段与文本中的 @ 标记字面量（<@!id> / <@id> /
-    <at id=""></at> 等）经 normalize_at_markers 转换为官方文本链标准格式
-    <qqbot-at-user id="openid" />；sender 检测后切换 markdown 载体发送
-    （Gensokyo-ForSpark 实测可渲染组合）。
+    富媒体描述：{"type": "image"|"video"|"record", "url": str|None, "data":
+    bytes|None}，首个富媒体段生效（官方单条消息仅支持一个媒体）。
+    出站 @ 统一经 normalize_at_markers 归一为官方文本链标准格式，sender
+    检测后切换 markdown 载体发送（实测可渲染组合）。
     """
     # 单个消息段 dict（如 {"type": "text", ...}）等价于单元素列表，
     # 否则会走 str(dict) 分支把整段序列化成 repr 字符串发给用户

@@ -1,6 +1,6 @@
 """群服互通聊天同步模块：双向同步群服消息并推送游戏事件通知，模板占位符为 %s。
 
-v1.2.0 起每个适配器卡片拥有独立的群服互通配置：入站消息按来源适配器的配置渲染，
+每个适配器卡片拥有独立的群服互通配置：入站消息按来源适配器的配置渲染，
 出站广播按各适配器各自的群列表与格式发送；AstrBot 适配器未配置群列表时发送到
 虚拟群 0（由 AstrBot 插件端按其 UMO 配置分发）。
 """
@@ -36,17 +36,6 @@ def replace_placeholders(template: str, *args: Any) -> str:
     return re.sub(r"%s", _sub, template)
 
 
-def _strip_mc_codes(text: str) -> str:
-    """过滤 Minecraft 颜色码（§ 加格式字符）与残余 § 字符。
-
-    仅用于群 → 服方向：群昵称与消息内容可能携带 § 字符，若不过滤会注入
-    服务器聊天的颜色 / 格式控制；发往 QQ 的方向不调用本函数。
-    """
-    if not isinstance(text, str):
-        return str(text)
-    return re.sub(r"§.", "", text).replace("§", "")
-
-
 class ChatSyncModule:
     """双向消息同步 + 游戏事件通知（多适配器）"""
 
@@ -60,12 +49,17 @@ class ChatSyncModule:
 
     # ------------------------------------------------------------------ 配置
     def _sync_config(self, pack: dict[str, Any] | None = None) -> dict[str, Any]:
-        """取来源适配器（无来源时取主适配器）的群服互通配置。"""
+        """取来源适配器（无来源时取主适配器）的群服互通配置。
+
+        读取走 get_view 免深拷贝：本方法在每条群消息上调用，
+        deepcopy 整张适配器卡片是纯浪费；配置只在 update()/create()
+        整体替换，引用读取安全。
+        """
         connections = getattr(self.plugin, "connections", None)
         if connections is not None:
             adapter_id = str((pack or {}).get("_lumen_adapter_id", "") or "")
             if adapter_id:
-                cfg = connections.get(adapter_id)
+                cfg = connections.get_view(adapter_id)
                 if cfg and isinstance(cfg.get("sync"), dict):
                     return cfg["sync"]
             primary = connections.primary_websocket()
@@ -151,15 +145,10 @@ class ChatSyncModule:
             # 截断含 "..." 后总长不超过 max_len；max_len 过小时退化为硬截断
             content = content[: max_len - 3] + "..." if max_len > 3 else content[:max_len]
 
-        # 群 → 服方向：仅过滤昵称 / 消息内容注入的 MC 颜色码（§），
-        # 模板 chat_to_server_format 自带的颜色码（如 §b）是用户配置，必须保留
-        sender_name = _strip_mc_codes(sender_name)
-        content = _strip_mc_codes(content)
         line = replace_placeholders(
             conf.get("chat_to_server_format", "[群聊] %s: %s"), sender_name, content
         )
 
-        # WS 线程 -> 游戏主线程
         def broadcast() -> None:
             self.plugin.server.broadcast_message(
                 f"{ColorFormat.AQUA}{line}{ColorFormat.RESET}"
