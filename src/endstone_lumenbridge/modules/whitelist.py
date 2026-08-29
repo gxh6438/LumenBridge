@@ -213,8 +213,16 @@ class WhitelistModule:
             for other in (*self.bindings, *self.bindings_official):
                 if str(other.get("xbox", "")).casefold() == name.casefold():
                     return False
-            bindings.append({"qid": qid, "xbox": name})
-            self._save_list_locked(path, bindings)
+            entry = {"qid": qid, "xbox": name}
+            bindings.append(entry)
+            try:
+                self._save_list_locked(path, bindings)
+            except OSError as exc:
+                # 写盘失败回滚内存态：否则内存里已有绑定而磁盘没有，
+                # 重启后绑定"凭空消失"，运行期间查询/解绑也与磁盘不一致
+                bindings.remove(entry)
+                self.logger.error(_t("whitelist.log.save_failed", path=path, exc=exc))
+                return False
             return True
 
     def remove_binding_by_qq(self, qq: int | str, domain: str = "qq") -> dict[str, Any] | None:
@@ -224,8 +232,15 @@ class WhitelistModule:
             entry = next((b for b in bindings if str(b.get("qid")) == qid), None)
             if not entry:
                 return None
+            index = bindings.index(entry)
             bindings.remove(entry)
-            self._save_list_locked(path, bindings)
+            try:
+                self._save_list_locked(path, bindings)
+            except OSError as exc:
+                # 同 add_binding：写盘失败恢复内存条目，保持内存与磁盘一致
+                bindings.insert(index, entry)
+                self.logger.error(_t("whitelist.log.save_failed", path=path, exc=exc))
+                return None
             return dict(entry)
 
     def remove_binding_by_xbox(self, xbox: str) -> dict[str, Any] | None:

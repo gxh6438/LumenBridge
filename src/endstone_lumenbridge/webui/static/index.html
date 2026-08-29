@@ -266,20 +266,43 @@ input:focus, textarea:focus, select:focus {
   z-index: 60;
   padding: 7px 4px;
   border-radius: 24px;
-  justify-content: space-around;
   background: rgba(255, 255, 255, 0.6) !important;
   -webkit-backdrop-filter: blur(32px) saturate(180%);
   backdrop-filter: blur(32px) saturate(180%);
   box-shadow: 0 10px 36px rgba(0, 0, 0, 0.16);
   border: 1px solid rgba(255,255,255,.5);
 }
+/* 可滚动 tab 条：tab 固定舒适宽度不再挤压（含子插件注册的动态 tab），
+   横向溢出滚动；激活 tab 由 JS 平滑滚动居中（scrollIntoView 语义） */
+.tabbar-scroll {
+  display: flex; align-items: stretch;
+  overflow-x: auto; overflow-y: hidden;
+  scrollbar-width: none; -ms-overflow-style: none;
+  -webkit-overflow-scrolling: touch;
+  scroll-behavior: smooth;
+}
+.tabbar-scroll::-webkit-scrollbar { display: none; }
+/* 两侧渐隐提示：仅该侧还有未滚入视野的 tab 时显示（JS 按 scrollLeft 切换） */
+.tabbar-fade {
+  position: absolute; top: 0; bottom: 0; width: 26px; z-index: 1;
+  pointer-events: none; opacity: 0; transition: opacity .15s;
+}
+.tabbar-fade.left { left: 0; border-radius: 24px 0 0 24px;
+  background: linear-gradient(to right, rgba(255,255,255,.55), transparent); }
+.tabbar-fade.right { right: 0; border-radius: 0 24px 24px 0;
+  background: linear-gradient(to left, rgba(255,255,255,.55), transparent); }
+.tabbar.edge-left .tabbar-fade.left { opacity: 1; }
+.tabbar.edge-right .tabbar-fade.right { opacity: 1; }
 .tab-item {
   display: flex; flex-direction: column; align-items: center; gap: 2px;
   border: none; background: transparent; color: var(--muted);
-  font-size: 10.5px; padding: 5px 4px; border-radius: 14px; min-width: 0; flex: 1;
+  font-size: 10.5px; padding: 5px 4px; border-radius: 14px;
+  min-width: 58px; flex: 0 0 auto;
   transition: color .15s, transform .15s;
 }
 .tab-item svg { width: 20px; height: 20px; }
+/* 子插件自定义 tab 的文本图标（emoji/字符）：与 SVG 图标同占位 */
+.tab-item .tab-icon-text { font-size: 17px; line-height: 20px; height: 20px; font-weight: 500; }
 .tab-item.active { color: var(--accent); }
 .tab-item:active { transform: scale(.88); }
 
@@ -360,6 +383,118 @@ tr:last-child td { border-bottom: none; }
   .form-row > .ctrl { width: 100%; }
   .form-row:has(> .switch) { flex-direction: row; align-items: center; justify-content: space-between; }
   .form-row:has(> .switch) > label { flex: 1; width: auto; }
+}
+
+/* ---------------- 子插件配置面板（AstrBot 配置页风格） ---------------- */
+/* 顶部搜索工具条 */
+.pc-toolbar { display: flex; gap: 10px; margin: -4px 0 12px; }
+.pc-toolbar input { flex: 1; }
+/* 分组卡片：卡片套卡片形成层级感 */
+.pc-section {
+  border: 1px solid var(--divider); border-radius: 12px;
+  padding: 4px 16px 6px; margin: 4px 0 14px;
+  background: rgba(120,120,128,.04);
+}
+.pc-section-title {
+  font-weight: 700; font-size: 14px; margin: 12px 0 2px;
+  display: flex; align-items: center; gap: 8px;
+}
+.pc-section-title svg { width: 15px; height: 15px; color: var(--accent); flex: 0 0 auto; }
+.pc-section-desc { font-size: 12px; color: var(--muted); margin-bottom: 4px; line-height: 1.5; }
+/* 行：左信息右控件，悬停轻微反馈 */
+.pc-row {
+  display: flex; align-items: flex-start; gap: 14px;
+  padding: 12px 6px; border-bottom: 1px dashed var(--divider);
+  border-radius: 8px; transition: background .15s;
+}
+.pc-row:hover { background: rgba(120,120,128,.05); }
+.pc-row:last-of-type { border-bottom: none; }
+.pc-info { width: 250px; flex: 0 0 250px; min-width: 0; }
+.pc-name { font-size: 13.5px; font-weight: 620; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; line-height: 1.4; }
+.pc-key { font-size: 10.5px; color: var(--muted); font-family: "SF Mono", "JetBrains Mono", Consolas, monospace; font-weight: 400; }
+.pc-hint { font-size: 11.5px; color: var(--muted); margin-top: 3px; line-height: 1.5; }
+.pc-hint .pc-obvious { font-size: 12px; }
+.pc-ctrl { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; }
+.pc-ctrl-inner { flex: 1; min-width: 0; }
+/* 单项恢复默认按钮：仅当当前值 ≠ 默认值时显示 */
+.pc-restore {
+  border: none; background: transparent; color: var(--muted); cursor: pointer;
+  width: 27px; height: 27px; border-radius: 8px; padding: 0;
+  display: none; align-items: center; justify-content: center; flex: 0 0 27px;
+  transition: all .15s;
+}
+.pc-restore.show { display: inline-flex; }
+.pc-restore:hover { color: var(--accent); background: var(--accent-soft); }
+.pc-restore svg { width: 15px; height: 15px; }
+/* secret 密码框 + 明文切换 */
+.pc-secret { display: flex; gap: 8px; align-items: center; }
+.pc-secret input { flex: 1; min-width: 0; }
+.pc-eye {
+  border: none; background: rgba(120,120,128,.12); color: var(--muted); cursor: pointer;
+  width: 34px; height: 34px; border-radius: 9px; flex: 0 0 34px;
+  display: flex; align-items: center; justify-content: center; transition: all .15s;
+}
+.pc-eye:hover { color: var(--accent); background: var(--accent-soft); }
+.pc-eye svg { width: 16px; height: 16px; }
+/* 数字滑块 + 数字框联动 */
+.pc-slider { display: flex; align-items: center; gap: 12px; }
+.pc-slider input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); cursor: pointer; }
+.pc-slider input[type=number] { width: 92px; flex: 0 0 92px; }
+/* 多选复选框组 */
+.pc-multi { display: flex; flex-wrap: wrap; gap: 8px 16px; padding-top: 4px; }
+.pc-multi-item { display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; user-select: none; }
+.pc-multi-item input { width: auto !important; margin: 0; accent-color: var(--accent); cursor: pointer; }
+/* 数组 chips 编辑器 */
+.pc-array-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.pc-array-chips:empty { margin-bottom: 0; }
+.pc-array-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 6px 4px 12px; border-radius: 20px;
+  background: rgba(120,120,128,.1); border: 1px solid var(--divider);
+  font-size: 12.5px; line-height: 1.6; max-width: 100%;
+}
+.pc-array-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.pc-array-chip button {
+  border: none; background: transparent; color: var(--muted); cursor: pointer;
+  font-size: 13px; padding: 0 5px; border-radius: 50%; line-height: 1; display: flex;
+}
+.pc-array-chip button:hover { color: var(--red); }
+.pc-array-add { display: flex; gap: 8px; flex-wrap: wrap; }
+.pc-array-add input { flex: 1; min-width: 140px; }
+.pc-array-batch-wrap { display: none; margin-top: 8px; }
+.pc-array-batch-wrap.show { display: block; }
+.pc-array-batch { width: 100%; min-height: 110px; }
+/* textarea 全屏编辑入口 */
+.pc-textarea-wrap { position: relative; }
+.pc-textarea-wrap textarea { padding-right: 40px; }
+.pc-fullscreen-btn {
+  position: absolute; top: 7px; right: 7px;
+  border: none; background: rgba(120,120,128,.14); color: var(--muted); cursor: pointer;
+  width: 30px; height: 30px; border-radius: 8px;
+  display: flex; align-items: center; justify-content: center; transition: all .15s;
+}
+.pc-fullscreen-btn:hover { color: var(--accent); background: var(--accent-soft); }
+.pc-fullscreen-btn svg { width: 15px; height: 15px; }
+/* 底部未保存提示徽章 */
+.pc-dirty-badge {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12.5px; color: #b25000; font-weight: 600;
+  padding: 5px 12px; border-radius: 20px;
+  background: rgba(255,159,10,.13); border: 1px solid rgba(255,159,10,.35);
+}
+.pc-dirty-badge::before {
+  content: ""; width: 7px; height: 7px; border-radius: 50%;
+  background: #ff9f0a; animation: pcPulse 1.6s ease-in-out infinite;
+}
+@keyframes pcPulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+@media (prefers-color-scheme: dark) { .pc-dirty-badge { color: #ffb454; } }
+/* 窄屏：两列退化为上下堆叠 */
+@media (max-width: 640px) {
+  .pc-row { flex-direction: column; gap: 8px; }
+  .pc-info { width: 100%; flex: 0 0 auto; }
+  .pc-ctrl { width: 100%; }
+  .pc-row:has(.switch) { flex-direction: row; align-items: center; }
+  .pc-row:has(.switch) .pc-info { flex: 1; width: auto; }
 }
 .switch { position: relative; width: 42px; height: 24px; flex: 0 0 42px; margin-top: 3px; }
 .switch input { position: absolute; opacity: 0; pointer-events: none; }
@@ -552,6 +687,18 @@ textarea.file-editor {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .sp-head .tag { flex: 0 0 auto; }
+/* 窄屏（竖屏手机/平板，移动布局 ≤860px 启用）：标题行改为可换行，名称独占
+   一行完整显示（不再省略号截断成 "e…"），徽章自动折到下方行——徽章不压缩
+   且行不可换行时，长名称被 flex 压缩到只剩一个字符、新版本徽章溢出卡片，
+   两者都由此修复 */
+@media (max-width: 860px) {
+  .sp-head { flex-wrap: wrap; row-gap: 5px; }
+  .sp-head .name {
+    flex: 1 1 100%;
+    white-space: normal; word-break: break-word; overflow-wrap: anywhere;
+    overflow: visible; text-overflow: clip;
+  }
+}
 /* 描述固定两行截断（超出走浮层展开）并固定占位两行：
    短描述也保留两行空间，描述长短不影响卡片高度，所有卡片大小一致 */
 .sp-desc-row { display: flex; align-items: flex-end; gap: 6px; margin-top: 5px; }
@@ -582,6 +729,16 @@ textarea.file-editor {
 .sp-desc-popover.show { opacity: 1; visibility: visible; transform: translateY(0) scale(1); }
 .sp-actions { display: flex; gap: 7px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
 .sp-actions .spacer { flex: 1; }
+/* 有新版本时「更新」按钮右上角的小红点：按钮相对定位，伪元素绝对定位到
+   右上角；描边用玻璃卡背景色防止红点与按钮文字糊在一起 */
+.sp-action-btn { position: relative; }
+.sp-action-btn.has-update::after {
+  content: ""; position: absolute; top: -4px; right: -4px;
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--red); border: 2px solid rgba(255, 255, 255, .92);
+  box-shadow: 0 1px 4px rgba(255, 69, 58, .55);
+  pointer-events: none;
+}
 /* 子插件卡片 ⋯ 更多按钮：与开关并排的次级操作入口 */
 .sp-more-btn {
   width: 34px; height: 34px; flex: 0 0 34px; margin-top: 3px;
@@ -1324,6 +1481,69 @@ textarea.file-editor {
 }
 .config-pane-panel .adapter-cards { margin-top: 0; }
 .config-pane-panel .adapter-actions { margin-top: 16px; }
+
+/* ---------------- 聊天屏蔽（双向敏感词过滤） ---------------- */
+.cf-hero {
+  display: flex; align-items: center; gap: 18px;
+  padding: 22px 24px; margin-top: 14px; border-radius: var(--radius-md);
+  flex-wrap: wrap;
+}
+.cf-hero-icon {
+  width: 54px; height: 54px; flex: 0 0 54px; border-radius: 16px;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, #5e7bff, #2f55d9); color: #fff;
+  box-shadow: 0 8px 20px rgba(63, 92, 224, .32);
+}
+.cf-hero-icon svg { width: 26px; height: 26px; }
+.cf-hero-info { flex: 1; min-width: 220px; }
+.cf-hero-name { font-size: 17px; font-weight: 700; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cf-hero-sub { color: var(--muted); font-size: 12.5px; margin-top: 3px; }
+.cf-hero-stats { display: flex; gap: 28px; margin-top: 12px; flex-wrap: wrap; }
+.cf-stat b { font-size: 20px; font-weight: 750; display: block; line-height: 1.2; }
+.cf-stat span { font-size: 11.5px; color: var(--muted); }
+.cf-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; margin-top: 14px; }
+.cf-card { padding: 18px 20px; border-radius: var(--radius-md); }
+.cf-card-title { font-weight: 700; font-size: 14.5px; display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.cf-card-title svg { width: 16px; height: 16px; color: var(--accent); flex: 0 0 auto; }
+.cf-row { display: flex; align-items: center; gap: 14px; padding: 11px 0; border-bottom: 1px dashed var(--divider); }
+.cf-row:last-child { border-bottom: none; padding-bottom: 2px; }
+.cf-row-label { flex: 1; min-width: 0; }
+.cf-row-label b { font-size: 13.5px; font-weight: 620; display: block; }
+.cf-row-label span { font-size: 11.5px; color: var(--muted); line-height: 1.45; display: block; margin-top: 2px; }
+.cf-mask-input { width: 74px !important; text-align: center; padding: 6px 8px !important; }
+.cf-bank { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--divider); margin-bottom: 8px; transition: all .18s; }
+.cf-bank:last-child { margin-bottom: 0; }
+.cf-bank.imported { border-color: rgba(48, 209, 88, .45); background: rgba(48, 209, 88, .07); }
+.cf-bank-icon {
+  width: 34px; height: 34px; flex: 0 0 34px; border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(120, 120, 128, .12); color: var(--muted);
+}
+.cf-bank-icon svg { width: 17px; height: 17px; }
+.cf-bank.imported .cf-bank-icon { background: rgba(48, 209, 88, .15); color: var(--green); }
+.cf-bank-info { flex: 1; min-width: 0; }
+.cf-bank-name { font-size: 13.5px; font-weight: 620; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cf-bank-count { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+.cf-add-row { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.cf-add-row input[type=text] { flex: 1; min-width: 150px; }
+.cf-words { display: flex; flex-wrap: wrap; gap: 8px; max-height: 264px; overflow-y: auto; }
+.cf-word {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 6px 4px 12px; border-radius: 20px;
+  background: rgba(120, 120, 128, .1); border: 1px solid var(--divider);
+  font-size: 12.5px; line-height: 1.6;
+}
+.cf-word.regex { border-color: rgba(50, 173, 230, .45); background: rgba(50, 173, 230, .08); }
+.cf-word .cf-word-src { font-size: 10.5px; color: var(--muted); max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cf-word button {
+  border: none; background: transparent; color: var(--muted); cursor: pointer;
+  font-size: 13px; padding: 0 5px; border-radius: 50%; line-height: 1; display: flex; align-items: center;
+}
+.cf-word button:hover { color: var(--red); }
+.cf-chip-add input { width: 140px; padding: 5px 10px !important; font-size: 12.5px !important; }
+.cf-exempt-block { padding: 4px 0 10px; }
+.cf-exempt-block .cf-row-label { margin-bottom: 8px; }
+.cf-exempt-chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .adapter-cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(440px, 1fr));
@@ -1744,6 +1964,7 @@ textarea.file-editor {
         <div class="segment config-pane-switch">
           <button id="cpane-basic" class="active" onclick="setConfigPane('basic')" data-i18n="config.pane_basic">基础配置</button>
           <button id="cpane-connections" onclick="setConfigPane('connections')" data-i18n="config.pane_connections">连接配置</button>
+          <button id="cpane-filter" onclick="setConfigPane('filter')" data-i18n="config.pane_filter">聊天屏蔽</button>
         </div>
 
         <div id="config-basic-pane">
@@ -1787,6 +2008,110 @@ textarea.file-editor {
           </div>
           </div>
           <div class="hint" data-i18n="connections.hint">WebSocket 卡片直连 OneBot v11 协议端（NapCat / Lagrange 等）；AstrBot 卡片连接 astrbot_plugin_lumenbridge 插件端，可将群服互通扩展到 AstrBot 支持的全部平台。保存后自动生效，无需重启。</div>
+        </div>
+
+        <div id="config-filter-pane" style="display:none">
+          <div class="card glass cf-hero">
+            <div class="cf-hero-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            </div>
+            <div class="cf-hero-info">
+              <div class="cf-hero-name"><span data-i18n="chatfilter.title">聊天屏蔽</span><span class="tag blue" data-i18n="chatfilter.hero_badge">双向转发过滤</span></div>
+              <div class="cf-hero-sub" data-i18n="chatfilter.hero_sub">游戏与 QQ 群互通消息的敏感词过滤，支持打码或整条拦截</div>
+              <div class="cf-hero-stats">
+                <div class="cf-stat"><b id="cf-st-words">0</b><span data-i18n="chatfilter.stat_words">生效词条</span></div>
+                <div class="cf-stat"><b id="cf-st-regex">0</b><span data-i18n="chatfilter.stat_regex">正则词条</span></div>
+                <div class="cf-stat"><b id="cf-st-mode">—</b><span data-i18n="chatfilter.stat_mode">处理模式</span></div>
+              </div>
+            </div>
+            <label class="switch"><input type="checkbox" id="cf-master" onchange="cfSave()"><span class="track"></span></label>
+          </div>
+
+          <div class="cf-grid">
+            <div class="card glass cf-card">
+              <div class="cf-card-title">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                <span data-i18n="chatfilter.strategy_title">过滤策略</span>
+              </div>
+              <div class="cf-row">
+                <div class="cf-row-label">
+                  <b data-i18n="chatfilter.dir_g2q">游戏 → QQ 群</b>
+                  <span data-i18n="chatfilter.dir_g2q_desc">过滤游戏聊天转发到群的消息</span>
+                </div>
+                <label class="switch"><input type="checkbox" id="cf-dir-g2q" onchange="cfSave()"><span class="track"></span></label>
+              </div>
+              <div class="cf-row">
+                <div class="cf-row-label">
+                  <b data-i18n="chatfilter.dir_q2g">QQ 群 → 游戏</b>
+                  <span data-i18n="chatfilter.dir_q2g_desc">过滤群消息转发到游戏的内容</span>
+                </div>
+                <label class="switch"><input type="checkbox" id="cf-dir-q2g" onchange="cfSave()"><span class="track"></span></label>
+              </div>
+              <div class="cf-row">
+                <div class="cf-row-label">
+                  <b data-i18n="chatfilter.mode_title">处理模式</b>
+                  <span data-i18n="chatfilter.mode_desc">打码：命中部分替换为占位符；拦截：整条消息丢弃</span>
+                </div>
+                <div class="segment">
+                  <button id="cf-mode-mask" onclick="cfSetMode('mask')" data-i18n="chatfilter.mode_mask">打码</button>
+                  <button id="cf-mode-block" onclick="cfSetMode('block')" data-i18n="chatfilter.mode_block">拦截</button>
+                </div>
+              </div>
+              <div class="cf-row" id="cf-mask-row">
+                <div class="cf-row-label">
+                  <b data-i18n="chatfilter.mask_text">打码字符</b>
+                  <span data-i18n="chatfilter.mask_text_desc">命中部分替换为该字符，如 *</span>
+                </div>
+                <input type="text" class="cf-mask-input" id="cf-mask-input" maxlength="3" onchange="cfSave()">
+              </div>
+            </div>
+
+            <div class="card glass cf-card">
+              <div class="cf-card-title">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                <span data-i18n="chatfilter.banks_title">词库一键导入</span>
+              </div>
+              <div id="cf-banks"><div class="empty-state" data-i18n="chatfilter.banks_empty">词库目录为空，可将 .txt 词库文件放入 data/chat_filter/wordbanks/ 后刷新</div></div>
+            </div>
+          </div>
+
+          <div class="card glass cf-card" style="margin-top:14px">
+            <div class="cf-card-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+              <span data-i18n="chatfilter.words_title">词条管理</span>
+              <span class="tag gray" id="cf-words-count">0</span>
+            </div>
+            <div class="cf-add-row">
+              <input type="text" id="cf-word-input" data-i18n-placeholder="chatfilter.word_input_ph" placeholder="输入敏感词，或勾选正则后填写表达式">
+              <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);white-space:nowrap">
+                <input type="checkbox" id="cf-word-regex" style="width:auto"> <span data-i18n="chatfilter.word_regex">正则</span>
+              </label>
+              <button class="btn small" onclick="cfAddWord()" data-i18n="chatfilter.word_add">添加</button>
+            </div>
+            <div class="cf-words" id="cf-words"></div>
+          </div>
+
+          <div class="card glass cf-card" style="margin-top:14px">
+            <div class="cf-card-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 20h5v-2a3 3 0 0 0-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 0 1 5.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 0 1 9.288 0M15 7a3 3 0 1 1-6 0 3 3 0 0 1 6 0zm6 3a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM7 10a2 2 0 1 1-4 0 2 2 0 0 1 4 0z"/></svg>
+              <span data-i18n="chatfilter.exempt_title">豁免名单</span>
+            </div>
+            <div class="cf-exempt-block">
+              <div class="cf-row-label">
+                <b data-i18n="chatfilter.exempt_players">玩家白名单</b>
+                <span data-i18n="chatfilter.exempt_players_desc">列表内玩家的聊天不经过过滤（不区分大小写）</span>
+              </div>
+              <div class="cf-exempt-chips" id="cf-exempt-players"></div>
+            </div>
+            <div class="cf-exempt-block">
+              <div class="cf-row-label">
+                <b data-i18n="chatfilter.exempt_qq">QQ 白名单</b>
+                <span data-i18n="chatfilter.exempt_qq_desc">列表内 QQ 号发送的消息不经过过滤</span>
+              </div>
+              <div class="cf-exempt-chips" id="cf-exempt-qq"></div>
+            </div>
+          </div>
+          <div class="hint" data-i18n="chatfilter.hint">词条支持普通文本（自动识别全角/大小写变形）与正则表达式两种类型；所有改动即时保存并热生效。词库存放于 data/chat_filter/wordbanks/，每行一个词条，# 开头为注释。</div>
         </div>
       </div>
 
@@ -1918,6 +2243,8 @@ textarea.file-editor {
   </div>
 
   <nav class="tabbar glass" id="tabbar">
+    <div class="tabbar-fade left" aria-hidden="true"></div>
+    <div class="tabbar-scroll" id="tabbar-scroll">
     <button class="tab-item active" data-page="dashboard" onclick="nav('dashboard')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="9" rx="2"/><rect x="13.5" y="3" width="7.5" height="5.5" rx="2"/><rect x="13.5" y="12" width="7.5" height="9" rx="2"/><rect x="3" y="15.5" width="7.5" height="5.5" rx="2"/></svg>
       <span data-i18n="tabbar.dashboard">总览</span></button>
@@ -1939,22 +2266,20 @@ textarea.file-editor {
     <button class="tab-item" data-page="marketplace" onclick="nav('marketplace')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9 4 4h16l1 5"/><path d="M5 9v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9"/><path d="M9 20v-6h6v6"/></svg>
       <span data-i18n="tabbar.marketplace">市场</span></button>
+    <button class="tab-item" data-page="logs" onclick="nav('logs')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h4"/></svg>
+      <span data-i18n="nav.logs">实时日志</span></button>
     <button class="tab-item" id="tab-more" style="display:none" onclick="openMoreSheet()">
       <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
       <span data-i18n="nav.more">其它</span></button>
+    </div>
+    <div class="tabbar-fade right" aria-hidden="true"></div>
   </nav>
 </div>
 
 <div class="more-sheet-mask" id="more-sheet-mask" onclick="if(event.target===this)closeMoreSheet()">
   <div class="more-sheet">
     <div class="sheet-handle"></div>
-    <div class="sheet-title" data-i18n="more.common">常用</div>
-    <div class="more-list">
-      <button class="more-item" onclick="closeMoreSheet();nav('logs')">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h4"/></svg>
-        <span data-i18n="nav.logs">实时日志</span></button>
-    </div>
-    <div class="sheet-divider"></div>
     <div id="more-sheet-custom">
       <div class="sheet-title" data-i18n="subplugins.custom_pages_title">子插件页面</div>
       <div class="more-list" id="more-sheet-list"></div>
@@ -2072,10 +2397,9 @@ textarea.file-editor {
   <div class="modal glass" style="max-width:420px">
     <h3><span data-i18n="subplugins.update_choice_title">选择更新方式</span> <button class="close-x" onclick="closeModal('update-choice-modal')">✕</button></h3>
     <div class="modal-body">
-      <div id="update-choice-plugin-name" style="margin-bottom:12px;font-weight:600"></div>
       <button class="update-choice-option" id="update-choice-market-btn" onclick="updateChoiceMarket()">
         <span class="update-choice-icon market">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9 4 4h16l1 5"/><path d="M5 9v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9"/><path d="M9 20v-6h6v6"/></svg>
         </span>
         <span class="update-choice-info">
           <span class="update-choice-name" data-i18n="subplugins.update_choice_market">市场更新</span>
@@ -2142,13 +2466,38 @@ textarea.file-editor {
   </div>
 </div>
 
-<div class="modal-mask" id="plugin-config-modal" data-closable="true" onclick="maskClick(event,'plugin-config-modal')">
-  <div class="modal glass">
-    <h3><span id="plugin-config-title">子插件配置</span> <button class="close-x" onclick="closeModal('plugin-config-modal')">✕</button></h3>
+<div class="modal-mask" id="plugin-config-modal" data-closable="true" onclick="pcMaskClick(event)">
+  <div class="modal glass" style="max-width:780px">
+    <h3>
+      <span style="display:flex;align-items:center;gap:10px;min-width:0">
+        <span id="plugin-config-title">子插件配置</span>
+        <span class="tag gray" id="plugin-config-count"></span>
+      </span>
+      <button class="close-x" onclick="pcRequestClose()">✕</button>
+    </h3>
+    <div class="pc-toolbar">
+      <input type="text" id="pc-search" data-i18n-placeholder="subplugins.config_search_ph" placeholder="搜索配置项…" oninput="pcFilterItems()">
+    </div>
     <div class="modal-body" id="plugin-config-body"></div>
-    <div class="toolbar" style="margin:16px 0 0;justify-content:flex-end">
-      <button class="btn small ghost" onclick="closeModal('plugin-config-modal')" data-i18n="common.cancel">取消</button>
+    <div class="toolbar" style="margin:16px 0 0">
+      <span class="pc-dirty-badge" id="pc-dirty-badge" style="display:none" data-i18n="subplugins.config_dirty">未保存的更改</span>
+      <span style="flex:1"></span>
+      <button class="btn small ghost" onclick="pcResetAll()" data-i18n="subplugins.config_reset_all">恢复默认</button>
+      <button class="btn small ghost" onclick="pcRequestClose()" data-i18n="common.cancel">取消</button>
       <button class="btn small" onclick="savePluginConfig()" data-i18n="subplugins.save_config_button">保存配置</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask" id="pc-editor-modal" data-closable="true" onclick="maskClick(event,'pc-editor-modal')">
+  <div class="modal glass" style="max-width:860px;height:85vh">
+    <h3><span id="pc-editor-title" data-i18n="subplugins.config_editor_title">全屏编辑</span> <button class="close-x" onclick="closeModal('pc-editor-modal')">✕</button></h3>
+    <div class="modal-body">
+      <textarea id="pc-editor-textarea" class="json-editor" style="min-height:100%;resize:none" spellcheck="false"></textarea>
+    </div>
+    <div class="toolbar" style="margin:16px 0 0;justify-content:flex-end">
+      <button class="btn small ghost" onclick="closeModal('pc-editor-modal')" data-i18n="common.cancel">取消</button>
+      <button class="btn small" onclick="pcEditorApply()" data-i18n="subplugins.config_editor_apply">应用</button>
     </div>
   </div>
 </div>

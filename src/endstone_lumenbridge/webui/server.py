@@ -505,6 +505,9 @@ class WebUIServer:
         new_secret = str(conf.get("secret") or "")
         if new_secret and new_secret != self.auth_provider.secret:
             self.auth_provider.set_secret(new_secret)
+            # 同步实例属性：否则后续 /api/config 保存路径用旧 self.secret
+            # 做对比，会把已生效的密钥误判为"又变了"并重复失效 token
+            self.secret = new_secret
             self.logger.info("[WebUI] 签名密钥已按新配置更新，既有登录状态已失效")
 
         try:
@@ -776,8 +779,20 @@ class WebUIServer:
         """Fluent 配置表单构建器入口"""
         return ConfigFormBuilder(name, self.register_config)
 
-    def register_custom_page(self, plugin_name: str, folder: str, title: str, relative_path: str) -> None:
-        """挂载子插件自定义页面（静态资源经 /plugin-views/ 服务）"""
+    def register_custom_page(
+        self,
+        plugin_name: str,
+        folder: str,
+        title: str,
+        relative_path: str,
+        tab: bool = False,
+        icon: str = "",
+    ) -> None:
+        """挂载子插件自定义页面（静态资源经 /plugin-views/ 服务）。
+
+        tab=True 时页面在移动端注册为底栏 tab（icon 为纯文本 emoji/字符），
+        否则进「其它」面板；桌面端侧栏两种都展示。
+        """
         url = f"/plugin-views/{folder}/{relative_path}"
         with self._ext_lock:
             if not any(p["url"] == url for p in self.custom_pages):
@@ -788,6 +803,8 @@ class WebUIServer:
                     "pluginName": plugin_name,
                     "title": title,
                     "url": url,
+                    "tab": bool(tab),
+                    "icon": str(icon or "")[:16],
                 })
                 self.logger.info(_t("plugin.webui_page_registered", plugin=plugin_name, title=title))
 
@@ -1152,7 +1169,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
             if path.startswith("/plugin-views/"):
                 if not self._check_auth(query):
                     return self._unauthorized()
-                rel = path[len("/plugin-views/"):]
+                # 浏览器会把文件名里的空格/非 ASCII 字符百分号编码，
+                # 不解码则磁盘上永远匹配不到对应文件
+                rel = urllib.parse.unquote(path[len("/plugin-views/"):])
                 base = (Path(self.plugin.data_folder) / "plugins").resolve()
                 target = (base / rel).resolve()
                 # 防目录穿越：用 relative_to 做路径组件匹配（startswith 不安全）
@@ -1162,7 +1181,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     return self._send_json({"code": 403, "msg": _t("webui.msg.forbidden_path")}, 403)
                 return self._send_file(target)
 
-            rel = path.lstrip("/") or "index.html"
+            # 静态资源路径同样先做百分号解码（自定义页面文件名可含空格/中文）
+            rel = urllib.parse.unquote(path.lstrip("/")) or "index.html"
             static_base = STATIC_DIR.resolve()
             target = (STATIC_DIR / rel).resolve()
             try:
@@ -2343,30 +2363,44 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     t = item.get("type")
                     if t == "number":
                         # bool 是 int 子类，必须显式排除
-                        return isinstance(v, (int, float)) and not isinstance(v, bool)
+                        ok = isinstance(v, (int, float)) and not isinstance(v, bool)
+                        if ok and isinstance(item.get("min"), (int, float)):
+                            ok = v >= item["min"]
+                        if ok and isinstance(item.get("max"), (int, float)):
+                            ok = v <= item["max"]
+                        return ok
                     if t == "switch":
                         return isinstance(v, bool)
-                    if t == "select":
+                    if t in ("select", "multiselect"):
                         options = item.get("options")
                         if isinstance(options, list):
                             allowed = {
                                 o.get("value") if isinstance(o, dict) else o for o in options
                             }
+                            if t == "multiselect":
+                                # 多选：必须是列表且每个值都在可选项内
+                                return isinstance(v, list) and all(x in allowed for x in v)
                             return v in allowed
                         return True
-                    if t == "array":
+                    if t in ("array",):
                         return isinstance(v, list)
                     # text / textarea 及未知类型按字符串处理
                     return isinstance(v, str)
 
                 # 加锁保护共享 schema，防止并发 POST 修改时迭代异常
+                applied: list[tuple[str, Any]] = []
                 with self.webui._ext_lock:
                     for item in list(schema["items"]):
+                        if item.get("type") == "section":
+                            continue  # 分组标题不参与配置读写
                         if item["key"] in body:
                             value = body[item["key"]]
                             if _type_ok(item, value):
                                 item["val"] = value
-                for key, value in body.items():
+                                applied.append((item["key"], value))
+                # 只广播真正写入的键值：类型校验失败的值没有落盘，
+                # 若照发 config.update 事件，子插件会拿到未保存的非法值
+                for key, value in applied:
                     plugin.bus.emit(f"config.update.{name}", key, value)
                 return self._send_json({"code": 200, "msg": _t("webui.msg.plugin_config_saved")})
 
@@ -2746,6 +2780,39 @@ class _RequestHandler(BaseHTTPRequestHandler):
             with self.webui._ext_lock:
                 pages_snapshot = list(self.webui.custom_pages)
             return self._send_json({"code": 200, "data": pages_snapshot})
+
+        # ── 聊天屏蔽：配置/词条读写 + 词库导入 ──
+        chat_filter = getattr(plugin, "chat_filter", None)
+        if method == "GET" and path == "/api/chat_filter":
+            if chat_filter is None:
+                return self._send_json({"code": 500, "msg": _t("webui.msg.module_unavailable")}, 500)
+            return self._send_json({"code": 200, "data": chat_filter.snapshot()})
+        if method == "PUT" and path == "/api/chat_filter":
+            if chat_filter is None:
+                return self._send_json({"code": 500, "msg": _t("webui.msg.module_unavailable")}, 500)
+            payload = self._read_body()
+            if not isinstance(payload, dict):
+                return self._send_json({"code": 400, "msg": _t("webui.msg.invalid_body")}, 400)
+            chat_filter.update(payload)
+            return self._send_json({"code": 200, "msg": _t("webui.msg.chat_filter_saved")})
+        if method == "POST" and path == "/api/chat_filter/import":
+            if chat_filter is None:
+                return self._send_json({"code": 500, "msg": _t("webui.msg.module_unavailable")}, 500)
+            payload = self._read_body()
+            bank = str((payload or {}).get("file") or "") if isinstance(payload, dict) else ""
+            if not bank:
+                return self._send_json({"code": 400, "msg": _t("webui.msg.chat_filter_no_file")}, 400)
+            try:
+                added = chat_filter.import_wordbank(bank)
+            except FileNotFoundError:
+                return self._send_json({"code": 404, "msg": _t("webui.msg.chat_filter_no_file")}, 404)
+            except OSError as e:
+                return self._send_json({"code": 500, "msg": _t("webui.msg.chat_filter_import_failed", error=e)}, 500)
+            return self._send_json({
+                "code": 200,
+                "msg": _t("webui.msg.chat_filter_imported", count=added),
+                "data": chat_filter.snapshot(),
+            })
 
         if method == "GET" and path == "/api/logs":
             return self._send_json({"code": 200, "data": self.webui.log_buffer.cache})

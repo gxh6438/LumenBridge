@@ -31,6 +31,10 @@ COMMAND_PALETTE_PATH = Path("plugins/lumenbridge/data/command_palette.json")
 # 无锁的 read → merge → write 会互相覆盖丢失对方的条目
 _PALETTE_LOCK = threading.Lock()
 
+# 子插件命令注册表（plugin._lumen_sub_commands）的查重-写入锁：
+# check-then-set 两步无锁时，并发注册同名命令会双双通过查重互相覆盖
+_COMMAND_REGISTRY_LOCK = threading.Lock()
+
 _PALETTE_NAME_RE = re.compile(r"[a-z0-9_\-]+")
 # Endstone usage 语法中的合法参数 token：
 # 可选 (a|b) 枚举组 + <必选参数> / [可选参数]（参数名后可带 ": 类型"，类型可含空格）
@@ -40,14 +44,34 @@ _USAGE_TOKEN_RE = re.compile(
 
 
 def read_command_palette() -> dict[str, dict[str, Any]]:
-    """读取启动命令面板（损坏/缺失返回空 dict，绝不抛异常）。"""
+    """读取启动命令面板（损坏/缺失返回空 dict，绝不抛异常）。
+
+    文件损坏（非法 JSON / 非对象）时先备份为 .corrupt 再返回空：面板
+    汇总了全部子插件的命令声明，add_command_palette_entry 的
+    read→merge→write 会用"空面板 + 新条目"整体覆写原文件，不备份则
+    其他子插件的命令声明全部丢失（重启后命令批量消失），
+    与 whitelist / regex_engine 的同款防护对齐。
+    """
     try:
         data = json.loads(COMMAND_PALETTE_PATH.read_text(encoding="utf-8"))
     except Exception:
+        _backup_corrupt_palette()
         return {}
     if not isinstance(data, dict):
+        _backup_corrupt_palette()
         return {}
     return {str(k): v for k, v in data.items() if isinstance(v, dict)}
+
+
+def _backup_corrupt_palette() -> None:
+    """把损坏的面板文件改名保留为 .corrupt（失败静默，不影响主流程）。"""
+    try:
+        if COMMAND_PALETTE_PATH.is_file():
+            COMMAND_PALETTE_PATH.replace(
+                COMMAND_PALETTE_PATH.with_name(COMMAND_PALETTE_PATH.name + ".corrupt")
+            )
+    except OSError:
+        pass
 
 
 def write_command_palette(palette: dict[str, dict[str, Any]]) -> None:
@@ -523,8 +547,12 @@ class WebBridge:
                     webui.plugins_config_schema[name] = schema
             else:
                 webui.plugins_config_schema[name] = schema
-        for title, rel_path in pages:
-            webui.register_custom_page(self._name, self._folder, title, rel_path)
+        for page_item in pages:
+            # 兼容旧长度（title, rel_path）与新长度（title, rel_path, tab, icon）
+            title, rel_path = page_item[0], page_item[1]
+            tab = page_item[2] if len(page_item) > 2 else False
+            icon = page_item[3] if len(page_item) > 3 else ""
+            webui.register_custom_page(self._name, self._folder, title, rel_path, tab, icon)
         for method, path, handler, need_auth in apis:
             webui.register_api(method, path, handler, need_auth)
 
@@ -566,13 +594,21 @@ class WebBridge:
 
     register_api = registerApi
 
-    def registerPage(self, title: str, relative_path: str) -> None:
+    def registerPage(
+        self, title: str, relative_path: str, tab: bool = False, icon: str = ""
+    ) -> None:
+        """注册 WebUI 自定义页面。
+
+        tab=False（默认）：页面进移动端「其它」面板与桌面侧栏；
+        tab=True：页面额外注册为移动端底栏 tab（滚动条内、「其它」之前），
+        icon 为 tab 上显示的纯文本图标（emoji/字符，缺省用默认图标）。
+        """
         webui = self._webui
         if webui:
-            webui.register_custom_page(self._name, self._folder, title, relative_path)
+            webui.register_custom_page(self._name, self._folder, title, relative_path, tab, icon)
         else:
             with self._pending_lock:
-                self._pending_pages.append((title, relative_path))
+                self._pending_pages.append((title, relative_path, tab, icon))
         # url 构造与 webui.register_custom_page 内部一致，供卸载时按 url 移除
         self._registered_pages.append(f"/plugin-views/{self._folder}/{relative_path}")
 
@@ -666,33 +702,37 @@ def register_subplugin_command(
         logger.warning(f"register_command: handler for /{cmd_name} is not callable")
         return False
 
-    # 跨子插件命令名查重（注册表挂在插件实例上，所有上下文共享）
-    registry = plugin.__dict__.setdefault("_lumen_sub_commands", {})
-    if cmd_name in registry:
-        return False
-
-    owner_name = str(owner or "plugin")
-
-    def _wrapped(sender: Any, args: list[str]) -> bool:  # noqa: ANN401
-        try:
-            return bool(handler(sender, list(args)))
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"register_command: /{cmd_name} handler error: {e}")
-            try:
-                sender.send_message(f"§c/{cmd_name} execution failed: {e}§r")
-            except Exception:
-                pass
+    # 跨子插件命令名查重（注册表挂在插件实例上，所有上下文共享）。
+    # 查重到写入全程持锁：无锁时两个线程并发注册同名命令会双双通过
+    # 查重，后写者静默覆盖先注册者的 handler。命令注册是低频操作，
+    # 锁内的面板文件 I/O 与日志开销可以接受
+    with _COMMAND_REGISTRY_LOCK:
+        registry = plugin.__dict__.setdefault("_lumen_sub_commands", {})
+        if cmd_name in registry:
             return False
 
-    # 已声明（启动时并入类级 commands）？未声明则登记面板，重启后生效
-    declared = cmd_name in read_command_palette() or _command_declared(plugin, cmd_name)
-    if not declared:
-        add_command_palette_entry(cmd_name, description, usages, aliases=aliases)
-        logger.warning(_t("subplugin_runtime.log.command_palette_pending", name=cmd_name))
-        logger.info(_t("subplugin_runtime.log.command_palette_written", name=cmd_name))
+        owner_name = str(owner or "plugin")
 
-    registry[cmd_name] = {"handler": _wrapped, "subplugin": owner_name}
-    return True
+        def _wrapped(sender: Any, args: list[str]) -> bool:  # noqa: ANN401
+            try:
+                return bool(handler(sender, list(args)))
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"register_command: /{cmd_name} handler error: {e}")
+                try:
+                    sender.send_message(f"§c/{cmd_name} execution failed: {e}§r")
+                except Exception:
+                    pass
+                return False
+
+        # 已声明（启动时并入类级 commands）？未声明则登记面板，重启后生效
+        declared = cmd_name in read_command_palette() or _command_declared(plugin, cmd_name)
+        if not declared:
+            add_command_palette_entry(cmd_name, description, usages, aliases=aliases)
+            logger.warning(_t("subplugin_runtime.log.command_palette_pending", name=cmd_name))
+            logger.info(_t("subplugin_runtime.log.command_palette_written", name=cmd_name))
+
+        registry[cmd_name] = {"handler": _wrapped, "subplugin": owner_name}
+        return True
 
 
 def plugin_register_command_compat(

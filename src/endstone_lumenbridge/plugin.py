@@ -2,7 +2,6 @@
 
 import logging
 import threading
-import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -31,7 +30,7 @@ from .i18n import (
     t as _t,
 )
 from .pip_manager import PipManager
-from .modules import ChatSyncModule, RegexEngineModule, WhitelistModule
+from .modules import ChatFilterModule, ChatSyncModule, RegexEngineModule, WhitelistModule
 from .marketplace import MarketplaceClient
 from .onebot import AdapterHub, EventDispatcher, OneBotAdapter
 from .onebot.message import set_local_image_roots
@@ -90,6 +89,7 @@ class LumenBridgePlugin(Plugin):
         self.chat_sync_module: ChatSyncModule | None = None
         self.whitelist_module: WhitelistModule | None = None
         self.regex_module: RegexEngineModule | None = None
+        self.chat_filter: ChatFilterModule | None = None
         self.env_pool: EnvPool | None = None
         self.subplugin_manager: SubPluginManager | None = None
         self.marketplace: MarketplaceClient | None = None
@@ -213,6 +213,7 @@ class LumenBridgePlugin(Plugin):
             self.whitelist_module = WhitelistModule(self)
             self.chat_sync_module = ChatSyncModule(self)
             self.regex_module = RegexEngineModule(self)
+            self.chat_filter = ChatFilterModule(self)
 
             self.bus.on("bot.online", self._on_bot_online)
             self.bus.on("bot.offline", self._on_bot_offline)
@@ -324,6 +325,7 @@ class LumenBridgePlugin(Plugin):
         self.env_pool = None
         self.whitelist_module = None
         self.regex_module = None
+        self.chat_filter = None
         self.marketplace = None
         # 失效 pip manager 缓存：禁用→启用复用同一实例时会持有旧 config_manager.data
         with self._pip_manager_lock:
@@ -1020,7 +1022,7 @@ class LumenBridgePlugin(Plugin):
             def _async_list() -> None:
                 try:
                     pkgs = mgr.list_packages()
-                except Exception as e:  # noqa: BLE001
+                except Exception:  # noqa: BLE001
                     _log.exception("pip list thread error")
                     pkgs = []
 

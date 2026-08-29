@@ -165,6 +165,10 @@ class EventTranslator:
             self.ad.logger.warning(
                 _t("qqofficial.robot_removed", group=group_openid, name=self.ad.display_name)
             )
+            # 移群清理：动态发现记录 + 该群全部回复凭据
+            # （被动池 / event_id / 补发栈），防止死群继续参与
+            # 广播与必败重试
+            self.ad.forget_group(group_openid)
         pack = self._base_pack(
             post_type="notice",
             notice_type="group_decrease",

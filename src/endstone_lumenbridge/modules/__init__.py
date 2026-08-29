@@ -21,7 +21,10 @@ def __getattr__(name: str) -> Any:
     if name == "RegexEngineModule":
         from .regex_engine import RegexEngineModule
         return RegexEngineModule
+    if name == "ChatFilterModule":
+        from .chat_filter import ChatFilterModule
+        return ChatFilterModule
     raise AttributeError(name)
 
 
-__all__ = ["ChatSyncModule", "WhitelistModule", "RegexEngineModule"]
+__all__ = ["ChatSyncModule", "WhitelistModule", "RegexEngineModule", "ChatFilterModule"]

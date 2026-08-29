@@ -145,6 +145,20 @@ class CredentialsStore:
         if target:
             self.event_ids.pop(target, None)
 
+    def purge_target(self, target: str) -> None:
+        """机器人被移出群时清空该目标的全部凭据。
+
+        被移出后被动 msg_id 池 / event_id / 主动补发栈全部失效：
+        不清理则窗口内每次发送都要先经历一轮必败重试才降级，补发
+        栈更会在后续 flush 中反复碰壁堆积。
+        """
+        if not target:
+            return
+        with self._lock:
+            self.passive.pop(target, None)
+            self.active_stack.pop(target, None)
+        self.event_ids.pop(target, None)
+
     # ------------------------------------------------------------ 主动补发栈
     def push_active(self, item: ActiveItem) -> bool:
         """主动消息被拒后入补发栈（每目标上限 ACTIVE_STACK_MAX，队满丢新）。"""

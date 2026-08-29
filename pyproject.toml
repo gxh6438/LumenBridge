@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "endstone-lumenbridge"
-version = "1.0.3"
+version = "1.0.4"
 description = "LumenBridge - Endstone 群服互通框架：OneBot v11 双向消息同步、白名单绑定、正则触发引擎、多适配器连接与 AstrBot 全平台中继"
 readme = "README.md"
 requires-python = ">=3.10"

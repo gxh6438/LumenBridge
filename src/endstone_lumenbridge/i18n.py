@@ -81,6 +81,12 @@ def normalize_locale(locale: str) -> str:
     key = raw.lower()
     if key in _LOCALE_ALIASES:
         return _LOCALE_ALIASES[key]
+    # 下划线变体归一到连字符形式再查一次：别名表的扩展形式（脚本子标签等）
+    # 只登记了连字符键，否则 zh_Hant / zh_hant 这类写法会漏过快速路径，
+    # 走到语言级兜底被误判为 zh_CN（繁体服务器整套文案变简体）
+    hyphen_key = key.replace("_", "-")
+    if hyphen_key != key and hyphen_key in _LOCALE_ALIASES:
+        return _LOCALE_ALIASES[hyphen_key]
     normalized = raw.replace("-", "_")
     parts = [p for p in normalized.split("_") if p]
     # 三段式：语言_脚本_国家（如 zh_Hans_CN / zh_Hant_TW）
@@ -314,7 +320,6 @@ class I18n:
 
 def _deep_merge_translation(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """递归合并翻译字典：override 覆盖 base，base 补全缺失键。"""
-    import copy
     result: dict[str, Any] = copy.deepcopy(override)
     for key, value in base.items():
         if key not in result:

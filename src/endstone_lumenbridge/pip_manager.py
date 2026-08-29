@@ -8,11 +8,9 @@ from __future__ import annotations
 
 import importlib.metadata
 import importlib.machinery
-import importlib.util
 import json
 import logging
 import re
-import shutil
 import subprocess
 import sys
 import threading
@@ -146,24 +144,6 @@ def _version_satisfies(installed: str, constraint: str) -> bool:
 class PipManager:
     """pip 调用封装（线程安全由调用方保证）。"""
 
-    _uv_available: bool | None = None  # 延迟检测
-
-    @staticmethod
-    def _is_uv_available() -> bool:
-        """检测 uv 是否可用。"""
-        if PipManager._uv_available is None:
-            PipManager._uv_available = shutil.which("uv") is not None
-        return PipManager._uv_available
-
-    # uv pip 不支持的 pip 原生参数，使用 uv 时自动剔除
-    # 格式: flag -> 是否携带值（True 表示下一个参数是值也需要跳过）
-    _UV_UNSUPPORTED_FLAGS: dict[str, bool] = {
-        "--no-input": False,
-        "--progress-bar": True,
-        "--no-color": False,
-        "--no-python-version-warning": False,
-    }
-
     @staticmethod
     def _pip_cmd(subcommand: list[str]) -> list[str]:
         """构建 pip 命令。
@@ -191,32 +171,6 @@ class PipManager:
             self.timeout: int = int(cfg.get("timeout") or 300)
         except (TypeError, ValueError):
             self.timeout = 300
-
-    @staticmethod
-    def _get_pip_installed_names() -> set[str]:
-        """通过 ``pip list`` 获取已安装包名集合（PEP 503 规范化），作为 importlib.metadata 的回退。
-
-        Endstone 嵌入式 Python 或特殊 venv 下 importlib.metadata 可能因 sys.path 配置
-        差异无法检测到 pip 刚安装的包；``pip list`` 直接查询同一解释器元数据，不受
-        importlib 缓存影响。
-        """
-        try:
-            cmd = PipManager._pip_cmd(["list", "--format=json"])
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                timeout=15,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                packages = json.loads(result.stdout)
-                names: set[str] = set()
-                for p in packages:
-                    if isinstance(p, dict) and "name" in p:
-                        canonical = re.sub(r"[-_.]+", "-", str(p["name"]).lower())
-                        names.add(canonical)
-                return names
-        except Exception:
-            pass
-        return set()
 
     @staticmethod
     def _site_packages_dirs() -> list[str]:
@@ -323,11 +277,7 @@ class PipManager:
         return None
 
     @staticmethod
-    def check_dependency(
-        package_spec: str,
-        *,
-        pip_installed: set[str] | None = None,
-    ) -> bool:
+    def check_dependency(package_spec: str) -> bool:
         """检测某个依赖是否已安装（package_spec 可含版本号，如 'openai>=1.0.0'）。
 
         H17：manifest 声明了版本约束时，优先用**约束串中的分发（PyPI）名**
@@ -341,8 +291,7 @@ class PipManager:
 
         无版本约束时维持原有判据：``_find_spec_disk`` 是唯一权威判据——实际
         测试当前解释器能否从磁盘找到该包，metadata / ``pip list`` 仅用于发现
-        import 名（处理 pip 名与 import 名不一致的包）。``pip_installed``
-        参数保留以兼容旧调用方。
+        import 名（处理 pip 名与 import 名不一致的包）。
         """
         if not isinstance(package_spec, str):
             return False

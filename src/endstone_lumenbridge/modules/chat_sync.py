@@ -133,6 +133,14 @@ class ChatSyncModule:
             pack.get("message", pack.get("raw_message", "")), conf, pack
         )
 
+        # 聊天屏蔽（QQ → 游戏方向）：block 模式命中时整条丢弃
+        chat_filter = getattr(self.plugin, "chat_filter", None)
+        if chat_filter is not None and content:
+            qq_id = str(pack.get("user_id") or "")
+            content, hit = chat_filter.check(content, direction="qq_to_game", qq=qq_id)
+            if hit and not content:
+                return
+
         if not content:
             return
         try:
@@ -214,6 +222,14 @@ class ChatSyncModule:
             self.logger.warning(f"broadcast via {getattr(adapter, 'display_name', adapter)} failed: {e}")
 
     def on_player_chat(self, player_name: str, message: str) -> None:
+        # 聊天屏蔽（游戏 → QQ 方向）：block 模式命中时整条不广播
+        chat_filter = getattr(self.plugin, "chat_filter", None)
+        if chat_filter is not None:
+            message, hit = chat_filter.check(
+                message, direction="game_to_qq", player=player_name
+            )
+            if hit and not message:
+                return
         self._broadcast(
             "chat_to_group_enable", "chat_to_group_format", "[玩家] %s: %s", player_name, message
         )

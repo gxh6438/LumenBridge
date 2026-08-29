@@ -48,27 +48,31 @@ class ServerMetricsCollector:
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return
-            self._stop_event.clear()
+            # 每代线程绑定独立的停止事件：stop() 的 join 超时后旧线程仍在
+            # 采样，若沿用共享事件，下一次 start() 的 clear() 会让旧线程
+            # 永远等不到停止信号，与新线程并存常驻（线程泄漏）
+            stop_event = threading.Event()
+            self._stop_event = stop_event
             # 立即做一次采样（可能 CPU% 仍为 0，因为需要两帧）
             self._sample()
             self._thread = threading.Thread(
-                target=self._loop, name="LumenBridge-Metrics", daemon=True
+                target=self._loop, args=(stop_event,), name="LumenBridge-Metrics", daemon=True
             )
             self._thread.start()
 
     def stop(self) -> None:
-        self._stop_event.set()
         with self._lock:
+            self._stop_event.set()
             thread = self._thread
         if thread and thread is not threading.current_thread():
             thread.join(timeout=2)
         with self._lock:
             self._thread = None
 
-    def _loop(self) -> None:
-        while not self._stop_event.is_set():
+    def _loop(self, stop_event: threading.Event) -> None:
+        while not stop_event.is_set():
             # 用 wait 代替 sleep，便于快速响应停止信号
-            if self._stop_event.wait(self.interval):
+            if stop_event.wait(self.interval):
                 break
             try:
                 self._sample()

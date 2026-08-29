@@ -42,10 +42,8 @@ from .. import __version__
 from ..i18n import t as _t
 from .context import LumenContext
 from .requires import (
-    RequiresDeclaration,
     check_endstone_requirements,
     parse_requires_from_manifest,
-    version_tuple,
 )
 
 if TYPE_CHECKING:

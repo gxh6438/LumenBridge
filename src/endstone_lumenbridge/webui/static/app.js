@@ -457,6 +457,30 @@ function applyBackground(bg) {
 }
 
 
+/* ─── 移动端可滚动 tab 条：激活 tab 平滑滚动居中（scrollIntoView 居中变体，
+   参考 Android TabLayout scrollable / Chrome 标签条交互）─── */
+function centerActiveTab(page) {
+  const bar = document.getElementById("tabbar");
+  const scroller = document.getElementById("tabbar-scroll");
+  // 桌面端 tabbar 隐藏（display:none）时无需滚动；不能用 offsetParent
+  // 判断——position:fixed 元素的 offsetParent 恒为 null
+  if (!bar || !scroller || getComputedStyle(bar).display === "none") return;
+  const el = scroller.querySelector(`.tab-item[data-page="${cssEscape(page)}"]`);
+  if (!el) return;
+  const target = el.offsetLeft - (scroller.clientWidth - el.offsetWidth) / 2;
+  scroller.scrollTo({ left: Math.max(0, target), behavior: "smooth" });
+}
+
+/* 两侧渐隐提示：仅该侧还有未滚入视野的 tab 时亮起 */
+function syncTabbarEdges() {
+  const bar = document.getElementById("tabbar");
+  const scroller = document.getElementById("tabbar-scroll");
+  if (!bar || !scroller) return;
+  const max = scroller.scrollWidth - scroller.clientWidth;
+  bar.classList.toggle("edge-left", scroller.scrollLeft > 1);
+  bar.classList.toggle("edge-right", scroller.scrollLeft < max - 1);
+}
+
 function nav(page, customUrl, customTitle) {
   const target = customUrl ? "custom" : page;
   if (currentPage === target && !customUrl) return;
@@ -482,6 +506,8 @@ function nav(page, customUrl, customTitle) {
   pageEl.style.display = "block";
   document.querySelectorAll(`.nav-item[data-page="${page}"], .tab-item[data-page="${page}"]`)
     .forEach((el) => el.classList.add("active"));
+  centerActiveTab(page);
+  requestAnimationFrame(syncTabbarEdges);
 
   if (customUrl) {
     document.getElementById("custom-title").textContent = customTitle || t("subplugins.custom_page_default_title");
@@ -943,68 +969,413 @@ function bindCodeEditor(hostId, codeId, textareaId, language, getValue, setValue
 }
 
 
+/* ─── 子插件配置面板（AstrBot 配置页风格复刻） ─── */
+/* 布局：左信息右控件的两列行式 + 分组嵌套卡片；特性：搜索过滤、单项恢复默认、
+   secret 密码遮罩、数字滑块、chips 列表编辑器（批量导入）、多选复选框组、
+   textarea 全屏编辑、未保存拦截、Ctrl/Cmd+S 快捷保存 */
+let pcDirty = false;            // 未保存更改标记
+let pcEditorSourceId = "";      // 全屏编辑器回写目标控件 id
+
+const PC_RESTORE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>';
+const PC_EYE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+const PC_EYE_OFF_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+const PC_EXPAND_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>';
+const PC_SECTION_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+
 function renderPluginConfig(schema) {
   const box = document.getElementById("plugin-config-body");
   const items = Array.isArray(schema && schema.items) ? schema.items : [];
+  const countEl = document.getElementById("plugin-config-count");
+  const fields = items.filter((it) => it.type !== "section");
+  if (countEl) countEl.textContent = String(fields.length);
   if (!items.length) {
     box.innerHTML = '<div class="empty-state">' + esc(t("subplugins.config_empty")) + '</div>';
     return;
   }
-  box.innerHTML = items.map((item, index) => {
-    const id = `plugin-config-${index}`;
-    const label = item.label || item.key;
-    let ctrl;
-    if (item.type === "switch") {
-      ctrl = `<div class="switch"><input type="checkbox" id="${id}" ${item.val ? "checked" : ""}>` +
-        `<label class="track" for="${id}"></label></div>`;
-    } else if (item.type === "number") {
-      ctrl = `<div class="ctrl"><input type="number" id="${id}" value="${esc(item.val)}"></div>`;
-    } else if (item.type === "select") {
-      /* select 字段使用自定义下拉组件 .lumen-select 替代原生 <select>。
-         options 已被后端 configform.py 规范化为 [{value, label}]；
-         兼容旧 schema 里可能残留的纯值列表 [1, 2, 3]。 */
-      const rawOpts = Array.isArray(item.options) ? item.options : [];
-      const opts = rawOpts.map((o) => {
-        if (o !== null && typeof o === "object" && "value" in o) {
-          return { value: String(o.value), label: String(o.label != null ? o.label : o.value) };
-        }
-        return { value: String(o), label: String(o) };
-      });
-      ctrl = `<div class="ctrl">${buildSelect(id, opts, String(item.val), t("common.search"))}</div>`;
-    } else if (item.type === "array") {
-      const value = Array.isArray(item.val) ? item.val.join(", ") : String(item.val || "");
-      ctrl = `<div class="ctrl"><input type="text" id="${id}" value="${esc(value)}"></div>`;
-    } else if (item.type === "textarea") {
-      ctrl = `<div class="ctrl"><textarea id="${id}" rows="4">${esc(item.val)}</textarea></div>`;
-    } else if (item.type === "file") {
-      const accept = esc(item.accept || "image/*");
-      const uploadUrl = esc(item.upload_url || "");
-      const key = esc(item.key);
-      const hasVal = !!(item.val && String(item.val).trim());
-      const hint = hasVal ? esc(String(item.val)) : "点击选择图片上传";
-      ctrl = `<div class="ctrl">` +
-        `<div id="${id}-preview" class="file-upload-preview" ` +
-        `style="min-height:56px;display:flex;align-items:center;justify-content:center;gap:8px;padding:10px 14px;` +
-        `border:1px dashed var(--divider);border-radius:var(--radius-sm);background:var(--input-bg);cursor:pointer;` +
-        `font-size:.85rem;color:var(--muted);transition:border-color .18s,background .18s" ` +
-        `onclick="document.getElementById('${id}').click()" ` +
-        `onmouseover="this.style.borderColor='var(--accent)'" ` +
-        `onmouseout="this.style.borderColor='var(--divider)'">` +
-        `<span class="file-upload-hint">${hint}</span></div>` +
-        `<input type="file" id="${id}" accept="${accept}" data-upload-url="${uploadUrl}" data-key="${key}" ` +
-        `data-preview-id="${id}-preview" style="display:none">` +
+  // 分组渲染：section 标记开启分组卡片，后续字段归属该组
+  let html = "";
+  let open = false;
+  items.forEach((item, index) => {
+    if (item.type === "section") {
+      if (open) html += "</div></div>";
+      html += `<div class="pc-section"><div class="pc-section-title">${PC_SECTION_SVG}<span>${esc(item.title || item.label || "")}</span></div>` +
+        (item.desc ? `<div class="pc-section-desc">${esc(item.desc)}</div>` : "") + `<div class="pc-section-body">`;
+      open = true;
+    } else {
+      html += pcRenderRow(item, index);
+    }
+  });
+  if (open) html += "</div></div>";
+  box.innerHTML = html;
+  // 数组字段渲染 chips
+  items.forEach((item, index) => {
+    if (item.type === "array") pcRenderArrayChips(index);
+  });
+  // 事件委托：任意输入即视为脏 + 刷新恢复默认按钮可见性
+  box.oninput = () => { pcSetDirty(true); pcUpdateRestoreButtons(); };
+  box.onchange = () => { pcSetDirty(true); pcUpdateRestoreButtons(); };
+  pcSetDirty(false);
+  pcUpdateRestoreButtons();
+}
+
+function pcRenderRow(item, index) {
+  const id = `plugin-config-${index}`;
+  const label = item.label || item.key;
+  const searchText = `${label} ${item.key} ${item.desc || ""}`.toLowerCase();
+  const keyTag = item.show_key ? `<span class="pc-key">(${esc(item.key)})</span>` : "";
+  const obvious = item.obvious_hint ? `<span class="pc-obvious" title="${esc(t("subplugins.config_obvious_hint"))}">‼️</span>` : "";
+  let ctrl = "";
+  if (item.type === "switch") {
+    ctrl = `<div class="switch"><input type="checkbox" id="${id}" ${item.val ? "checked" : ""}>` +
+      `<label class="track" for="${id}"></label></div>`;
+  } else if (item.type === "number") {
+    if (item.min != null && item.max != null) {
+      // 滑块 + 数字框联动（AstrBot slider 风格）
+      ctrl = `<div class="pc-slider">` +
+        `<input type="range" id="${id}-range" min="${esc(item.min)}" max="${esc(item.max)}" step="${esc(item.step || 1)}" value="${esc(item.val)}" oninput="pcSliderSync(this)">` +
+        `<input type="number" id="${id}" value="${esc(item.val)}" onchange="pcSliderSync(this)">` +
         `</div>`;
     } else {
-      ctrl = `<div class="ctrl"><input type="text" id="${id}" value="${esc(item.val)}"></div>`;
+      ctrl = `<input type="number" id="${id}" value="${esc(item.val)}">`;
     }
-    return `<div class="form-row"><label>${esc(label)}<span class="desc">${esc(item.desc || "")}</span></label>${ctrl}</div>`;
-  }).join("");
+  } else if (item.type === "select") {
+    /* select 字段使用自定义下拉组件 .lumen-select 替代原生 <select>。
+       options 已被后端 configform.py 规范化为 [{value, label}]；
+       兼容旧 schema 里可能残留的纯值列表 [1, 2, 3]。 */
+    const rawOpts = Array.isArray(item.options) ? item.options : [];
+    const opts = rawOpts.map((o) => {
+      if (o !== null && typeof o === "object" && "value" in o) {
+        return { value: String(o.value), label: String(o.label != null ? o.label : o.value) };
+      }
+      return { value: String(o), label: String(o) };
+    });
+    ctrl = buildSelect(id, opts, String(item.val), t("common.search"));
+  } else if (item.type === "multiselect") {
+    // 多选复选框组：data-value 存 JSON 序列化的原始值（保留类型）
+    const opts = Array.isArray(item.options) ? item.options : [];
+    ctrl = `<div class="pc-multi" id="${id}">` + opts.map((o) => {
+      const v = o !== null && typeof o === "object" && "value" in o ? o.value : o;
+      const lb = o !== null && typeof o === "object" && "label" in o ? o.label : String(o);
+      const checked = Array.isArray(item.val) && item.val.some((x) => String(x) === String(v));
+      return `<label class="pc-multi-item"><input type="checkbox" data-value="${esc(JSON.stringify(v))}" ${checked ? "checked" : ""}>${esc(String(lb))}</label>`;
+    }).join("") + `</div>`;
+  } else if (item.type === "array") {
+    // chips 列表编辑器：逐项增删 + 批量导入（按行解析）
+    const val = Array.isArray(item.val) ? item.val : [];
+    ctrl = `<div class="pc-array">` +
+      `<div class="pc-array-chips" id="${id}-chips"></div>` +
+      `<div class="pc-array-add">` +
+      `<input type="text" id="${id}-add" placeholder="${esc(t("subplugins.config_array_add_ph"))}" onkeydown="if(event.key==='Enter'){event.preventDefault();pcArrayAdd(${index})}">` +
+      `<button class="btn small ghost" onclick="pcArrayAdd(${index})">＋</button>` +
+      `<button class="btn small ghost" onclick="pcArrayBatchToggle(${index})">${esc(t("subplugins.config_batch_import"))}</button>` +
+      `</div>` +
+      `<div class="pc-array-batch-wrap" id="${id}-batch-wrap">` +
+      `<textarea id="${id}-batch" class="pc-array-batch" placeholder="${esc(t("subplugins.config_batch_ph"))}"></textarea>` +
+      `<div style="margin-top:8px;display:flex;gap:8px">` +
+      `<button type="button" class="btn small" onclick="pcArrayBatchApply(${index})">${esc(t("subplugins.config_batch_apply"))}</button>` +
+      `</div></div>` +
+      `<input type="hidden" id="${id}" value="${esc(JSON.stringify(val))}">` +
+      `</div>`;
+  } else if (item.type === "textarea") {
+    ctrl = `<div class="pc-textarea-wrap">` +
+      `<textarea id="${id}" rows="4">${esc(item.val)}</textarea>` +
+      `<button type="button" class="pc-fullscreen-btn" onclick="pcOpenEditor(${index})" title="${esc(t("subplugins.config_editor_title"))}">${PC_EXPAND_SVG}</button>` +
+      `</div>`;
+  } else if (item.type === "file") {
+    const accept = esc(item.accept || "image/*");
+    const uploadUrl = esc(item.upload_url || "");
+    const key = esc(item.key);
+    const hasVal = !!(item.val && String(item.val).trim());
+    const hint = hasVal ? esc(String(item.val)) : "点击选择图片上传";
+    ctrl =
+      `<div id="${id}-preview" class="file-upload-preview" ` +
+      `style="min-height:56px;display:flex;align-items:center;justify-content:center;gap:8px;padding:10px 14px;` +
+      `border:1px dashed var(--divider);border-radius:var(--radius-sm);background:var(--input-bg);cursor:pointer;` +
+      `font-size:.85rem;color:var(--muted);transition:border-color .18s,background .18s" ` +
+      `onclick="document.getElementById('${id}').click()" ` +
+      `onmouseover="this.style.borderColor='var(--accent)'" ` +
+      `onmouseout="this.style.borderColor='var(--divider)'">` +
+      `<span class="file-upload-hint">${hint}</span></div>` +
+      `<input type="file" id="${id}" accept="${accept}" data-upload-url="${uploadUrl}" data-key="${key}" ` +
+      `data-preview-id="${id}-preview" style="display:none">`;
+  } else {
+    // text：secret=True 渲染为密码框 + 明文切换
+    const inputType = item.secret ? "password" : "text";
+    if (item.secret) {
+      ctrl = `<div class="pc-secret">` +
+        `<input type="${inputType}" id="${id}" value="${esc(item.val)}" autocomplete="new-password">` +
+        `<button type="button" class="pc-eye" onclick="pcToggleSecret(this)" title="${esc(t("subplugins.config_secret_toggle"))}">${PC_EYE_SVG}</button>` +
+        `</div>`;
+    } else {
+      ctrl = `<input type="${inputType}" id="${id}" value="${esc(item.val)}">`;
+    }
+  }
+  const restore = `<button type="button" class="pc-restore" id="${id}-restore" onclick="pcRestoreDefault(${index})" title="${esc(t("subplugins.config_restore_default"))}">${PC_RESTORE_SVG}</button>`;
+  return `<div class="pc-row" data-search="${esc(searchText)}" data-pc-index="${index}">` +
+    `<div class="pc-info"><div class="pc-name">${esc(label)}${keyTag}${obvious}</div>` +
+    (item.desc ? `<div class="pc-hint">${esc(item.desc)}</div>` : "") + `</div>` +
+    `<div class="pc-ctrl"><div class="pc-ctrl-inner">${ctrl}</div>${restore}</div>` +
+    `</div>`;
 }
+
+/* 按 schema 类型读取控件当前值（保留原始类型：select/multiselect 映射回 option 原值） */
+function pcControlValue(item, index) {
+  const el = document.getElementById(`plugin-config-${index}`);
+  if (!el) return undefined;
+  if (item.type === "switch") return el.checked;
+  if (item.type === "number") return Number(el.value) || 0;
+  if (item.type === "select") {
+    const raw = el.value;
+    const opts = Array.isArray(item.options) ? item.options : [];
+    const found = opts.find((o) =>
+      o !== null && typeof o === "object" ? String(o.value) === String(raw) : String(o) === String(raw));
+    if (found === undefined) return raw;
+    return typeof found === "object" ? found.value : found;
+  }
+  if (item.type === "multiselect") {
+    return Array.from(el.querySelectorAll("input:checked")).map((c) => {
+      try { return JSON.parse(c.dataset.value); } catch (e) { return c.dataset.value; }
+    });
+  }
+  if (item.type === "array") return pcArrayGet(index);
+  return el.value;
+}
+
+/* 按 schema 类型把控件值设为指定值（用于恢复默认） */
+function pcSetControlValue(item, index, value) {
+  const el = document.getElementById(`plugin-config-${index}`);
+  if (!el) return;
+  if (item.type === "switch") {
+    el.checked = !!value;
+  } else if (item.type === "number") {
+    el.value = value;
+    const range = document.getElementById(`plugin-config-${index}-range`);
+    if (range) range.value = value;
+  } else if (item.type === "select") {
+    const host = el.closest(".lumen-select");
+    if (host) {
+      const opts = Array.isArray(item.options) ? item.options : [];
+      const found = opts.find((o) =>
+        o !== null && typeof o === "object" ? String(o.value) === String(value) : String(o) === String(value));
+      const label = found === undefined ? String(value)
+        : typeof found === "object" ? String(found.label != null ? found.label : found.value) : String(found);
+      selectOption(host, String(value), label);
+    }
+  } else if (item.type === "multiselect") {
+    el.querySelectorAll("input").forEach((c) => {
+      let v;
+      try { v = JSON.parse(c.dataset.value); } catch (e) { v = c.dataset.value; }
+      c.checked = Array.isArray(value) && value.some((x) => String(x) === String(v));
+    });
+  } else if (item.type === "array") {
+    pcArraySet(index, Array.isArray(value) ? value : []);
+  } else {
+    el.value = value == null ? "" : String(value);
+  }
+}
+
+function pcValueEquals(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/* 刷新全部"恢复默认"按钮可见性：当前值 ≠ 默认值时显示 */
+function pcUpdateRestoreButtons() {
+  const schema = editingPluginSchema;
+  if (!schema || !Array.isArray(schema.items)) return;
+  schema.items.forEach((item, index) => {
+    if (item.type === "section" || item.type === "file" || item.default === undefined) return;
+    const btn = document.getElementById(`plugin-config-${index}-restore`);
+    if (!btn) return;
+    const cur = pcControlValue(item, index);
+    btn.classList.toggle("show", cur !== undefined && !pcValueEquals(cur, item.default));
+  });
+}
+
+function pcRestoreDefault(index) {
+  const schema = editingPluginSchema;
+  if (!schema || !schema.items[index]) return;
+  const item = schema.items[index];
+  pcSetControlValue(item, index, item.default);
+  pcSetDirty(true);
+  pcUpdateRestoreButtons();
+}
+
+async function pcResetAll() {
+  const schema = editingPluginSchema;
+  if (!schema || !Array.isArray(schema.items)) return;
+  if (!await customConfirm(t("subplugins.config_reset_all_confirm"))) return;
+  schema.items.forEach((item, index) => {
+    if (item.type === "section" || item.type === "file" || item.default === undefined) return;
+    pcSetControlValue(item, index, item.default);
+  });
+  pcSetDirty(true);
+  pcUpdateRestoreButtons();
+}
+
+function pcSetDirty(dirty) {
+  pcDirty = dirty;
+  const badge = document.getElementById("pc-dirty-badge");
+  if (badge) badge.style.display = dirty ? "" : "none";
+}
+
+/* 搜索过滤：按 key/label/desc 模糊匹配；无命中行的分组整组隐藏 */
+function pcFilterItems() {
+  const box = document.getElementById("plugin-config-body");
+  const input = document.getElementById("pc-search");
+  if (!box || !input) return;
+  const q = (input.value || "").toLowerCase().trim();
+  box.querySelectorAll(".pc-row").forEach((row) => {
+    row.style.display = !q || (row.dataset.search || "").includes(q) ? "" : "none";
+  });
+  box.querySelectorAll(".pc-section").forEach((sec) => {
+    const visible = Array.from(sec.querySelectorAll(".pc-row")).some((r) => r.style.display !== "none");
+    sec.style.display = visible ? "" : "none";
+  });
+  const any = Array.from(box.querySelectorAll(".pc-row")).some((r) => r.style.display !== "none");
+  let emptyEl = box.querySelector(".pc-no-results");
+  if (q && !any) {
+    if (!emptyEl) {
+      emptyEl = document.createElement("div");
+      emptyEl.className = "empty-state pc-no-results";
+      box.appendChild(emptyEl);
+    }
+    emptyEl.textContent = t("subplugins.config_no_results");
+  } else if (emptyEl) {
+    emptyEl.remove();
+  }
+}
+
+/* 带未保存拦截的关闭 */
+async function pcRequestClose() {
+  if (pcDirty && !await customConfirm(t("subplugins.config_close_confirm"))) return;
+  closeModal("plugin-config-modal");
+}
+
+function pcMaskClick(ev) {
+  if (ev.target === ev.currentTarget) pcRequestClose();
+}
+
+/* secret 明文/密文切换 */
+function pcToggleSecret(btn) {
+  const input = btn.parentElement.querySelector("input");
+  if (!input) return;
+  const show = input.type === "password";
+  input.type = show ? "text" : "password";
+  btn.innerHTML = show ? PC_EYE_OFF_SVG : PC_EYE_SVG;
+}
+
+/* 滑块 ↔ 数字框联动 */
+function pcSliderSync(el) {
+  const index = el.id.replace("plugin-config-", "").replace("-range", "");
+  const num = document.getElementById(`plugin-config-${index}`);
+  const range = document.getElementById(`plugin-config-${index}-range`);
+  if (el.type === "range" && num) num.value = el.value;
+  if (el.type === "number" && range) range.value = el.value;
+}
+
+/* 数组字段：chips 读写 */
+function pcArrayGet(index) {
+  const el = document.getElementById(`plugin-config-${index}`);
+  if (!el) return [];
+  try { return JSON.parse(el.value || "[]"); } catch (e) { return []; }
+}
+
+function pcArraySet(index, arr) {
+  const el = document.getElementById(`plugin-config-${index}`);
+  if (el) el.value = JSON.stringify(arr);
+  pcRenderArrayChips(index);
+  pcSetDirty(true);
+  pcUpdateRestoreButtons();
+}
+
+function pcRenderArrayChips(index) {
+  const chipsEl = document.getElementById(`plugin-config-${index}-chips`);
+  if (!chipsEl) return;
+  const arr = pcArrayGet(index);
+  chipsEl.innerHTML = arr.map((v, i) =>
+    `<span class="pc-array-chip"><span title="${esc(String(v))}">${esc(String(v))}</span>` +
+    `<button type="button" onclick="pcArrayRemove(${index},${i})">✕</button></span>`
+  ).join("");
+}
+
+function pcArrayAdd(index) {
+  const input = document.getElementById(`plugin-config-${index}-add`);
+  if (!input) return;
+  const v = (input.value || "").trim();
+  if (!v) return;
+  const arr = pcArrayGet(index);
+  if (!arr.some((x) => String(x) === v)) arr.push(v);
+  input.value = "";
+  pcArraySet(index, arr);
+}
+
+function pcArrayRemove(index, i) {
+  const arr = pcArrayGet(index);
+  arr.splice(i, 1);
+  pcArraySet(index, arr);
+}
+
+function pcArrayBatchToggle(index) {
+  const wrap = document.getElementById(`plugin-config-${index}-batch-wrap`);
+  if (wrap) {
+    wrap.classList.toggle("show");
+    const ta = document.getElementById(`plugin-config-${index}-batch`);
+    if (wrap.classList.contains("show") && ta) ta.focus();
+  }
+}
+
+function pcArrayBatchApply(index) {
+  const ta = document.getElementById(`plugin-config-${index}-batch`);
+  const wrap = document.getElementById(`plugin-config-${index}-batch-wrap`);
+  if (!ta) return;
+  const lines = (ta.value || "").split("\n").map((s) => s.trim()).filter(Boolean);
+  if (wrap) wrap.classList.remove("show");
+  if (!lines.length) return;
+  const arr = pcArrayGet(index);
+  lines.forEach((ln) => { if (!arr.some((x) => String(x) === ln)) arr.push(ln); });
+  ta.value = "";
+  pcArraySet(index, arr);
+}
+
+/* textarea 全屏编辑 */
+function pcOpenEditor(index) {
+  const schema = editingPluginSchema;
+  const item = schema && schema.items ? schema.items[index] : null;
+  const el = document.getElementById(`plugin-config-${index}`);
+  if (!item || !el) return;
+  pcEditorSourceId = `plugin-config-${index}`;
+  document.getElementById("pc-editor-title").textContent =
+    t("subplugins.config_editor_title") + " · " + (item.label || item.key);
+  document.getElementById("pc-editor-textarea").value = el.value;
+  document.getElementById("pc-editor-modal").classList.add("show");
+}
+
+function pcEditorApply() {
+  const el = document.getElementById(pcEditorSourceId);
+  if (el) el.value = document.getElementById("pc-editor-textarea").value;
+  closeModal("pc-editor-modal");
+  pcSetDirty(true);
+  pcUpdateRestoreButtons();
+}
+
+/* Ctrl/Cmd+S 快捷保存（配置弹窗打开时） */
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
+    const modal = document.getElementById("plugin-config-modal");
+    if (modal && modal.classList.contains("show")) {
+      e.preventDefault();
+      savePluginConfig();
+    }
+  }
+});
 
 async function openPluginConfig(name) {
   editingPluginConfig = name;
   editingPluginSchema = null;
   editingPluginPendingFiles = {}; // 清空暂存文件
+  pcSetDirty(false);
+  const searchEl = document.getElementById("pc-search");
+  if (searchEl) searchEl.value = "";
   document.getElementById("plugin-config-title").textContent = name + t("subplugins.config_title_suffix");
   document.getElementById("plugin-config-body").innerHTML = '<div class="empty-state">' + esc(t("subplugins.config_loading")) + '</div>';
   document.getElementById("plugin-config-modal").classList.add("show");
@@ -1024,17 +1395,12 @@ async function savePluginConfig() {
   const schema = editingPluginSchema;
   if (!name || !schema || !Array.isArray(schema.items)) return;
   try {
-    // 1) 先保存普通配置字段（file 类型跳过，由独立端点处理）
+    // 1) 先保存普通配置字段（file/section 类型跳过，file 由独立端点处理）
     const body = {};
     schema.items.forEach((item, index) => {
-      const el = document.getElementById(`plugin-config-${index}`);
-      if (!el) return;
-      if (item.type === "file") return; // file 类型由独立端点处理，跳过 JSON 保存
-      if (item.type === "switch") body[item.key] = el.checked;
-      else if (item.type === "number") body[item.key] = Number(el.value) || 0;
-      else if (item.type === "array")
-        body[item.key] = el.value.split(",").map((s) => s.trim()).filter(Boolean);
-      else body[item.key] = el.value;
+      if (item.type === "file" || item.type === "section") return;
+      const value = pcControlValue(item, index);
+      if (value !== undefined) body[item.key] = value;
     });
     const res = await api("POST", "/api/plugins/config/" + encodeURIComponent(name), body);
 
@@ -1067,6 +1433,7 @@ async function savePluginConfig() {
     }
 
     toast(res.msg || t("subplugins.config_save_success"));
+    pcSetDirty(false);
     closeModal("plugin-config-modal");
   } catch (e) { toast(t("subplugins.config_save_failed", { error: e.message }), true); }
 }
@@ -1351,6 +1718,14 @@ document.addEventListener("click", (e) => {
     nav(customNavBtn.dataset.page || "",
       customNavBtn.dataset.customUrl || "",
       customNavBtn.dataset.customTitle || "");
+    return;
+  }
+  /* 子插件注册到底栏的自定义页面 tab：与侧栏按钮同构（data-* 属性驱动） */
+  const customTabBtn = e.target.closest(".custom-tab-btn");
+  if (customTabBtn) {
+    nav(customTabBtn.dataset.page || "",
+      customTabBtn.dataset.customUrl || "",
+      customTabBtn.dataset.customTitle || "");
     return;
   }
   const customMoreBtn = e.target.closest(".custom-more-btn");
@@ -2027,6 +2402,19 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && spMoreMenuState) closeSpMoreMenu();
 });
 
+/* 移动端 tab 条：滚动 / 缩放时刷新两侧渐隐提示 */
+(function initTabbarScrollHints() {
+  document.addEventListener("DOMContentLoaded", () => {
+    const scroller = document.getElementById("tabbar-scroll");
+    if (!scroller) return;
+    scroller.addEventListener("scroll", syncTabbarEdges, { passive: true });
+    window.addEventListener("resize", syncTabbarEdges);
+    // 初始（tabbar 随移动布局显示后）与字体/语言切换后都刷新一次
+    requestAnimationFrame(syncTabbarEdges);
+    setTimeout(syncTabbarEdges, 300);
+  });
+})();
+
 /* ─── 子插件描述展开浮层：卡片内固定两行截断，全文以滑动浮层展示 ─── */
 let spDescPopoverState = null;
 
@@ -2157,7 +2545,8 @@ async function loadSubplugins(opts) {
       const spAction = (label, action, cls = "white") =>
         `<button class="btn small ${cls} sp-action-btn" data-action="${esc(action)}" data-name="${esc(p.name)}">${esc(label)}</button>`;
       actions.push(spAction(t("subplugins.reload_one_button"), "reload", ""));
-      actions.push(spAction(t("subplugins.update_button"), "update"));
+      // 有新版本时给「更新」按钮右上角加小红点（CSS .has-update::after）
+      actions.push(spAction(t("subplugins.update_button"), "update", marketUpdate.available ? "white has-update" : "white"));
       if (hasConfig) actions.push(spAction(t("subplugins.config_button"), "config"));
       if (hasMissing) actions.push(spAction(t("pip_page.subplugin_install_deps"), "install-deps"));
       if (hasMissingRequirements) actions.push(spAction(t("subplugins.install_requirements_button"), "install-requirements"));
@@ -2489,6 +2878,9 @@ async function saveEditingFile() {
 }
 
 
+/* 子插件注册到底栏 tab 的自定义页面默认图标（registerPage 未传 icon 时使用） */
+const CUSTOM_TAB_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg>';
+
 async function loadCustomPages() {
   let pages = [];
   try {
@@ -2498,6 +2890,7 @@ async function loadCustomPages() {
 
   const nav_ = document.getElementById("custom-nav");
   if (nav_) {
+    // 桌面侧栏空间充足：无论注册到 tab 还是「其它」，全部展示
     nav_.innerHTML = pages.map((p) =>
       `<button class="nav-item custom-nav-btn" data-page="custom-${esc(p.id)}"
         data-custom-url="${esc(p.url)}" data-custom-title="${esc(p.title)}">
@@ -2508,17 +2901,47 @@ async function loadCustomPages() {
   const tabMore = document.getElementById("tab-more");
   if (tabMore) tabMore.style.display = "";
 
+  /* tab=True 的页面注册为底栏 tab（插到「其它」之前）；其余进「其它」面板。
+     重新加载时先移除旧按钮，避免子插件热重载后重复堆积 */
+  const tabBar = document.getElementById("tabbar-scroll");
+  if (tabBar) {
+    tabBar.querySelectorAll(".custom-tab-btn").forEach((b) => b.remove());
+    pages.filter((p) => p.tab).forEach((p) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "tab-item custom-tab-btn";
+      btn.dataset.page = "custom-" + p.id;
+      btn.dataset.customUrl = p.url || "";
+      btn.dataset.customTitle = p.title || "";
+      btn.title = p.title || "";
+      btn.innerHTML = CUSTOM_TAB_ICON_SVG;
+      if (p.icon) {
+        // icon 为子插件提供的纯文本字符/emoji，textContent 注入防 XSS
+        const iconEl = document.createElement("span");
+        iconEl.className = "tab-icon-text";
+        iconEl.textContent = String(p.icon);
+        btn.querySelector("svg")?.replaceWith(iconEl);
+      }
+      const lbl = document.createElement("span");
+      lbl.textContent = p.title || "";
+      btn.appendChild(lbl);
+      tabBar.insertBefore(btn, tabMore);
+    });
+  }
+  requestAnimationFrame(syncTabbarEdges);
+
   const moreList = document.getElementById("more-sheet-list");
+  const sheetPages = pages.filter((p) => !p.tab);
   if (moreList) {
-    moreList.innerHTML = pages.length
-      ? pages.map((p) =>
+    moreList.innerHTML = sheetPages.length
+      ? sheetPages.map((p) =>
           `<button class="more-item custom-more-btn" data-page="custom-${esc(p.id)}"
             data-custom-url="${esc(p.url)}" data-custom-title="${esc(p.title)}">
             ${MORE_ICON_SVG}<span>${esc(p.title)}</span></button>`).join("")
       : "";
   }
   const moreCustom = document.getElementById("more-sheet-custom");
-  if (moreCustom) moreCustom.style.display = pages.length ? "" : "none";
+  if (moreCustom) moreCustom.style.display = sheetPages.length ? "" : "none";
 }
 
 function openMoreSheet() {
@@ -3692,8 +4115,6 @@ function openUpdateFlow(name) {
   const cached = subpluginMarketCache[name] || {};
   // 非市场来源没有市场更新可选：直接进入手动更新弹窗
   if (!cached.market) { openUpdateModal(name); return; }
-  const nameEl = document.getElementById("update-choice-plugin-name");
-  if (nameEl) nameEl.textContent = name;
   const modal = document.getElementById("update-choice-modal");
   if (modal) {
     modal.dataset.pluginName = name;
@@ -3963,7 +4384,7 @@ function watchFrameworkApplyTask(taskId) {
 let connectionsData = [];   // /api/connections 返回的适配器快照
 let connectionsStatus = []; // 各适配器运行状态
 let editingAdapterId = "";  // 编辑弹窗当前适配器 id
-let configPane = "basic";   // basic | connections
+let configPane = "basic";   // basic | connections | filter
 
 const ADAPTER_WIFI_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1" fill="currentColor"/></svg>';
 const ADAPTER_BOT_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 8V4"/><circle cx="12" cy="3" r="1" fill="currentColor"/><circle cx="9" cy="14" r="1" fill="currentColor"/><circle cx="15" cy="14" r="1" fill="currentColor"/></svg>';
@@ -3972,16 +4393,20 @@ const ADAPTER_PEN_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentCol
 
 function setConfigPane(pane) {
   configPane = pane;
-  const basicBtn = document.getElementById("cpane-basic");
-  const connBtn = document.getElementById("cpane-connections");
-  const basicPane = document.getElementById("config-basic-pane");
-  const connPane = document.getElementById("config-connections-pane");
-  if (!basicBtn || !connBtn || !basicPane || !connPane) return;
-  basicBtn.classList.toggle("active", pane === "basic");
-  connBtn.classList.toggle("active", pane === "connections");
-  basicPane.style.display = pane === "basic" ? "" : "none";
-  connPane.style.display = pane === "connections" ? "" : "none";
+  const panes = [
+    ["basic", "cpane-basic", "config-basic-pane"],
+    ["connections", "cpane-connections", "config-connections-pane"],
+    ["filter", "cpane-filter", "config-filter-pane"],
+  ];
+  for (const [name, btnId, paneId] of panes) {
+    const btn = document.getElementById(btnId);
+    const paneEl = document.getElementById(paneId);
+    if (!btn || !paneEl) continue;
+    btn.classList.toggle("active", pane === name);
+    paneEl.style.display = pane === name ? "" : "none";
+  }
   if (pane === "connections") loadConnections();
+  if (pane === "filter") loadChatFilter();
 }
 
 async function loadConnections() {
@@ -4603,4 +5028,204 @@ async function deleteAdapter(id) {
   } catch (e) {
     toast(e.message || t("connections.delete_failed"), true);
   }
+}
+
+/* ─── 聊天屏蔽（双向敏感词过滤） ─── */
+let chatFilterData = null;   // { config, words, wordbanks }
+let chatFilterSaving = false;
+
+async function loadChatFilter() {
+  try {
+    const res = await api("GET", "/api/chat_filter");
+    chatFilterData = res.data || { config: {}, words: [], wordbanks: [] };
+    renderChatFilter();
+  } catch (e) {
+    toast(e.message || t("chatfilter.load_failed"), true);
+  }
+}
+
+function cfConfig() {
+  return chatFilterData.config || {};
+}
+
+function renderChatFilter() {
+  if (!chatFilterData) return;
+  const cfg = cfConfig();
+  const words = chatFilterData.words || [];
+  const set = (id, val) => { const el = document.getElementById(id); if (el) el.value = val; };
+  const check = (id, val) => { const el = document.getElementById(id); if (el) el.checked = !!val; };
+
+  check("cf-master", cfg.enabled);
+  check("cf-dir-g2q", cfg.game_to_qq);
+  check("cf-dir-q2g", cfg.qq_to_game);
+  set("cf-mask-input", cfg.mask_text || "*");
+  renderCfMode(cfg.mode || "mask");
+
+  const plainCount = words.filter((w) => w.type !== "regex").length;
+  const regexCount = words.filter((w) => w.type === "regex").length;
+  set("cf-st-words", String(plainCount));
+  set("cf-st-regex", String(regexCount));
+  set("cf-st-mode", (cfg.mode || "mask") === "mask" ? t("chatfilter.mode_mask") : t("chatfilter.mode_block"));
+
+  renderCfBanks();
+  renderCfWords();
+  renderCfExempt("players", cfg.exempt_players || []);
+  renderCfExempt("qq", cfg.exempt_qq || []);
+}
+
+function renderCfMode(mode) {
+  const maskBtn = document.getElementById("cf-mode-mask");
+  const blockBtn = document.getElementById("cf-mode-block");
+  if (maskBtn) maskBtn.classList.toggle("active", mode === "mask");
+  if (blockBtn) blockBtn.classList.toggle("active", mode === "block");
+  const maskRow = document.getElementById("cf-mask-row");
+  if (maskRow) maskRow.style.display = mode === "mask" ? "" : "none";
+}
+
+function renderCfBanks() {
+  const host = document.getElementById("cf-banks");
+  if (!host) return;
+  const banks = (chatFilterData && chatFilterData.wordbanks) || [];
+  if (!banks.length) {
+    host.innerHTML = `<div class="empty-state">${esc(t("chatfilter.banks_empty"))}</div>`;
+    return;
+  }
+  host.innerHTML = banks.map((b, i) => `
+    <div class="cf-bank${b.imported ? " imported" : ""}">
+      <div class="cf-bank-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+      </div>
+      <div class="cf-bank-info">
+        <div class="cf-bank-name">${esc(b.name || b.file)}${b.imported ? `<span class="tag green">${esc(t("chatfilter.bank_imported"))}</span>` : ""}</div>
+        <div class="cf-bank-count">${esc(t("chatfilter.bank_count", { count: b.count || 0 }))}</div>
+      </div>
+      <button class="btn small ${b.imported ? "ghost" : ""}" onclick="cfImportBank(${i})">${esc(t("chatfilter.bank_import"))}</button>
+    </div>
+  `).join("");
+}
+
+function renderCfWords() {
+  const host = document.getElementById("cf-words");
+  const countEl = document.getElementById("cf-words-count");
+  if (!host) return;
+  const words = (chatFilterData && chatFilterData.words) || [];
+  if (countEl) countEl.textContent = String(words.length);
+  if (!words.length) {
+    host.innerHTML = `<div class="empty-state" style="width:100%">${esc(t("chatfilter.words_empty"))}</div>`;
+    return;
+  }
+  host.innerHTML = words.map((w, i) => `
+    <span class="cf-word${w.type === "regex" ? " regex" : ""}" title="${esc(w.word || "")}">
+      ${esc(w.word || "")}
+      ${w.source && w.source !== "custom" ? `<span class="cf-word-src">${esc(w.source)}</span>` : ""}
+      <button onclick="cfDelWord(${i})" title="${esc(t("chatfilter.word_delete"))}">✕</button>
+    </span>
+  `).join("");
+}
+
+function renderCfExempt(kind, list) {
+  const host = document.getElementById("cf-exempt-" + kind);
+  if (!host) return;
+  const chips = list.map((v, i) => `
+    <span class="cf-word">${esc(v)}<button onclick="cfRemoveExempt('${kind}', ${i})" title="${esc(t("chatfilter.word_delete"))}">✕</button></span>
+  `).join("");
+  host.innerHTML = chips + `
+    <span class="cf-chip-add">
+      <input type="text" id="cf-exempt-input-${kind}" placeholder="${esc(t("chatfilter.exempt_input_ph"))}" onkeydown="if(event.key==='Enter')cfAddExempt('${kind}')">
+      <button class="btn small ghost" onclick="cfAddExempt('${kind}')">${esc(t("chatfilter.exempt_add"))}</button>
+    </span>
+  `;
+}
+
+/* 收集表单当前值 → PUT 保存（改动即时生效） */
+async function cfSave() {
+  if (!chatFilterData) return;
+  const cfg = cfConfig();
+  const read = (id) => { const el = document.getElementById(id); return el ? el.checked : undefined; };
+  if (read("cf-master") !== undefined) cfg.enabled = read("cf-master");
+  if (read("cf-dir-g2q") !== undefined) cfg.game_to_qq = read("cf-dir-g2q");
+  if (read("cf-dir-q2g") !== undefined) cfg.qq_to_game = read("cf-dir-q2g");
+  const maskInput = document.getElementById("cf-mask-input");
+  if (maskInput) cfg.mask_text = (maskInput.value || "*").slice(0, 3);
+  try {
+    await api("PUT", "/api/chat_filter", { config: cfg, words: chatFilterData.words || [] });
+    renderChatFilter();
+  } catch (e) {
+    toast(e.message || t("chatfilter.save_failed"), true);
+  }
+}
+
+function cfSetMode(mode) {
+  if (!chatFilterData) return;
+  cfConfig().mode = mode;
+  renderCfMode(mode);
+  cfSave();
+}
+
+async function cfAddWord() {
+  const input = document.getElementById("cf-word-input");
+  const regexBox = document.getElementById("cf-word-regex");
+  if (!input || !chatFilterData) return;
+  const word = (input.value || "").trim();
+  if (!word) return;
+  chatFilterData.words = chatFilterData.words || [];
+  chatFilterData.words.push({ word, type: regexBox && regexBox.checked ? "regex" : "plain", source: "custom" });
+  input.value = "";
+  if (regexBox) regexBox.checked = false;
+  try {
+    await api("PUT", "/api/chat_filter", { config: cfConfig(), words: chatFilterData.words });
+    renderChatFilter();
+  } catch (e) {
+    toast(e.message || t("chatfilter.save_failed"), true);
+  }
+}
+
+async function cfDelWord(index) {
+  if (!chatFilterData || !chatFilterData.words) return;
+  chatFilterData.words.splice(index, 1);
+  try {
+    await api("PUT", "/api/chat_filter", { config: cfConfig(), words: chatFilterData.words });
+    renderChatFilter();
+  } catch (e) {
+    toast(e.message || t("chatfilter.save_failed"), true);
+  }
+}
+
+async function cfImportBank(index) {
+  const banks = (chatFilterData && chatFilterData.wordbanks) || [];
+  const bank = banks[index];
+  const file = bank && bank.file;
+  if (!file) return;
+  try {
+    const res = await api("POST", "/api/chat_filter/import", { file });
+    if (res.data) chatFilterData = res.data;
+    renderChatFilter();
+    toast(res.msg || t("chatfilter.bank_imported_ok"));
+  } catch (e) {
+    toast(e.message || t("chatfilter.save_failed"), true);
+  }
+}
+
+async function cfAddExempt(kind) {
+  const input = document.getElementById("cf-exempt-input-" + kind);
+  if (!input || !chatFilterData) return;
+  const val = (input.value || "").trim();
+  if (!val) return;
+  const key = kind === "players" ? "exempt_players" : "exempt_qq";
+  const cfg = cfConfig();
+  const list = cfg[key] || [];
+  if (list.map(String).some((x) => x.toLowerCase() === val.toLowerCase())) { input.value = ""; return; }
+  list.push(val);
+  cfg[key] = list;
+  input.value = "";
+  await cfSave();
+}
+
+async function cfRemoveExempt(kind, index) {
+  if (!chatFilterData) return;
+  const key = kind === "players" ? "exempt_players" : "exempt_qq";
+  const cfg = cfConfig();
+  const list = cfg[key] || [];
+  list.splice(index, 1);
+  await cfSave();
 }

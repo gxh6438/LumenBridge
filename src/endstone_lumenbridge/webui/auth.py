@@ -52,7 +52,9 @@ def verify_token(token: str, secret: str) -> bool:
     if not token or "." not in token:
         return False
     payload_b64, sig = token.rsplit(".", 1)
-    if not hmac.compare_digest(sig, _sign(payload_b64, secret)):
+    # compare_digest 对 str 参数要求 ASCII-only：伪造的非 ASCII token
+    # 会抛 TypeError 逃逸成 500；统一编码为 bytes 比较（与 AuthProvider 一致）
+    if not hmac.compare_digest(sig.encode("utf-8"), _sign(payload_b64, secret).encode("utf-8")):
         return False
     try:
         payload: dict[str, Any] = json.loads(_b64decode(payload_b64))

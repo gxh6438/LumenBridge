@@ -39,6 +39,9 @@ def _is_websockets_compatible(module: Any) -> bool:
     except ValueError:
         # 版本号无法解析（如开发版）；所需 API 齐全则视为可用
         return True
+    # 单段版本号（如 "14"）补齐为 (14, 0)：元组比较中 (14,) < (14, 0)，
+    # 不补齐会把恰好 14 的整版本误判为不兼容
+    parts += (0,) * (2 - len(parts))
     return parts >= (14, 0)
 
 

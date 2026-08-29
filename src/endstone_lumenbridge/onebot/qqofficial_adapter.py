@@ -680,13 +680,16 @@ class QQOfficialAdapter:
             return SESSION_INVALID
         if op == OP_DISPATCH:
             seq = msg.get("s")
-            if isinstance(seq, int) and seq > 0:
-                if seq <= self._last_seq:
-                    # Resume 补发重放去重：序号 <= 已处理最大序号的事件
-                    # 说明网关重放了断线前已派发过的消息，直接丢弃防重复下发
-                    return None
-                self._last_seq = seq
+            if isinstance(seq, int) and seq > 0 and seq <= self._last_seq:
+                # Resume 补发重放去重：序号 <= 已处理最大序号的事件
+                # 说明网关重放了断线前已派发过的消息，直接丢弃防重复下发
+                return None
             await self._on_dispatch(msg)
+            # 派发成功后才推进序号：先推进再派发时，若 _on_dispatch 抛异常
+            # （被外层捕获仅记日志），该事件序号已越过，Resume 补投也会被
+            # 上面的去重条件丢弃——事件永久丢失。后推进则 Resume 能补投
+            if isinstance(seq, int) and seq > 0:
+                self._last_seq = seq
             return None
         return None
 
@@ -796,6 +799,20 @@ class QQOfficialAdapter:
             self.logger.info(
                 _t("qqofficial.group_discovered", group=key, name=self.display_name)
             )
+
+    def forget_group(self, group_openid: Any) -> None:
+        """机器人被移出群：清理动态发现记录与该群全部回复凭据。
+
+        移群后被动 msg_id / event_id / 补发栈全部失效，不清理则窗口内
+        每条发往该群的消息都要先经历必败重试；发现记录不清理则
+        broadcast / get_group_list 会继续把死群当互通群。配置的 groups
+        属用户配置不在此清理（重新入群时 GROUP_ADD_ROBOT 会重新学习）。
+        """
+        key = str(group_openid or "").strip()
+        if not key:
+            return
+        self._discovered_groups.pop(key, None)
+        self.credentials.purge_target(key)
 
     def broadcast_groups(self) -> list[str]:
         """广播目标群列表：配置的 groups 优先，未配置时用动态发现的群（皆空返回空列表）。"""

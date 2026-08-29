@@ -839,14 +839,12 @@ class MarketplaceClient:
             return False, f"缺少子插件依赖 {req.display()}：市场中所有版本均不满足该约束"
         version = str(release.get("version") or "")
         if dep is not None and not _is_newer(version, local_version):
-            if not req.satisfied_by(local_version):
-                return False, (
-                    f"依赖 {req.display()} 不满足：本地 v{local_version}，"
-                    f"市场可提供的最高满足版本为 v{version}，无法升级"
-                )
+            # 走到这里时 req.satisfied_by(local_version) 必为 False（满足的
+            # 两种情况——已加载/未加载——在上方都已提前返回），市场能提供的
+            # 最高满足版本又不高于本地：约束是上限型（如 <3.0 而本地 3.0）
             return False, (
-                f"依赖 {req.display()} 已安装（v{local_version}）但未加载，"
-                "可能被禁用或自身加载失败，请到子插件页面查看其错误信息"
+                f"依赖 {req.display()} 不满足：本地 v{local_version}，"
+                f"市场可提供的最高满足版本为 v{version}，无法升级"
             )
         market_id = str(detail.get("id") or "")
         log(f"正在安装子插件依赖 {req.display()}（来自插件市场 {market_id}）")
@@ -1341,13 +1339,29 @@ class MarketplaceClient:
             backup_dir = plugins_dir / ".lumenbridge_update_backups" / time.strftime("%Y%m%d-%H%M%S")
             try:
                 shutil.copyfile(download, stage)
-                # 先原子放置新 wheel 再移出旧 wheel，避免移出后放置失败导致 plugins 目录无可用 wheel
+                # 先原子放置新 wheel 再移出旧 wheel：若先移出旧 wheel、放置
+                # 新 wheel 失败，plugins 目录将没有任何 wheel（重启后插件
+                # 彻底丢失）。代价是存在短暂的新旧共存窗口；若移出旧 wheel
+                # 中途失败，必须删掉新 wheel 并放回已移出的旧 wheel——
+                # 否则重启时两个 wheel 都被安装，安装顺序不确定，
+                # 可能旧版覆盖新版（如 1.0.9 与 1.0.10 的字典序颠倒）
                 os.replace(stage, target)
-                for old in plugins_dir.glob("endstone_lumenbridge-*.whl"):
-                    if old.resolve() == target.resolve():
-                        continue
-                    backup_dir.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(old), str(backup_dir / old.name))
+                moved: list[Path] = []
+                try:
+                    for old in plugins_dir.glob("endstone_lumenbridge-*.whl"):
+                        if old.resolve() == target.resolve():
+                            continue
+                        backup_dir.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(old), str(backup_dir / old.name))
+                        moved.append(old)
+                except OSError:
+                    try:
+                        target.unlink(missing_ok=True)
+                        for old in moved:
+                            shutil.move(str(backup_dir / old.name), str(old))
+                    except OSError:
+                        pass
+                    raise
             except OSError as exc:
                 try:
                     stage.unlink(missing_ok=True)
@@ -1419,13 +1433,20 @@ class MarketplaceClient:
         log(f"已暂存 v{version}，{delay_ticks} tick 后开始热重载")
 
         def _restore_backup(reason: str) -> bool:
-            """移除失败的新 wheel 并放回最近的旧 wheel，返回是否放回成功。"""
+            """移除失败的新 wheel 并放回备份中最高版本的旧 wheel，返回是否放回成功。"""
             logger.error(f"[Update] {reason}")
             try:
                 target.unlink(missing_ok=True)
                 if backup_directory:
                     backup_dir = Path(backup_directory)
-                    for wheel in sorted(backup_dir.glob("endstone_lumenbridge-*.whl"), reverse=True):
+                    # 按语义版本挑最高（不能按文件名字典序：字典序下
+                    # "1.0.9" > "1.0.10"，会放回更旧的版本）
+                    wheels = list(backup_dir.glob("endstone_lumenbridge-*.whl"))
+                    if wheels:
+                        def _wheel_version(p: Path) -> tuple[int, ...]:
+                            parts = p.stem.split("-")
+                            return _version_tuple(parts[1]) if len(parts) > 1 else (0,)
+                        wheel = max(wheels, key=_wheel_version)
                         shutil.copyfile(wheel, plugins_dir / wheel.name)
                         return True
             except OSError:
