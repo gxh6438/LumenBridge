@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from ..i18n import t as _t
+from .regex_engine import _is_risky_pattern
 
 if TYPE_CHECKING:
     from ..plugin import LumenBridgePlugin
@@ -56,11 +57,29 @@ DEFAULTS: dict[str, Any] = {
 
 
 def normalize_text(text: str) -> str:
-    """全角→半角 + ASCII 大写→小写。用于普通词条匹配前的归一化。"""
+    """全角→半角 + 大写→小写。用于等值比较（豁免名单 / 词条去重）。"""
     if not text:
         return ""
     half = text.translate(_FULLWIDTH_MAP)
     return half.lower()
+
+
+def _normalize_map(text: str) -> tuple[str, list[int]]:
+    """逐字符归一化文本，并记录每个归一化字符源自原文的索引。
+
+    str.lower() 对个别字符（如 'İ' U+0130）会展开为多字符，归一化结果
+    与原文不再等长，无法按下标直接回切原文区间；本函数在归一化同时
+    构建索引映射，供把归一化文本上的命中区间映射回原文。
+    """
+    chars: list[str] = []
+    starts: list[int] = []
+    for idx, ch in enumerate(text):
+        code = _FULLWIDTH_MAP.get(ord(ch))
+        half = chr(code) if code is not None else ch
+        for low in half.lower():
+            chars.append(low)
+            starts.append(idx)
+    return "".join(chars), starts
 
 
 class ChatFilterModule:
@@ -145,13 +164,23 @@ class ChatFilterModule:
             if entry.get("type") == "regex":
                 if len(word) > _MAX_REGEX_LEN:
                     continue
+                # ReDoS 防护：复用 regex_engine 的风险 pattern 启发式
+                # （嵌套量词 / 超大重复下界），词条虽由管理员维护，
+                # 失误的灾难性回溯 pattern 仍会阻塞匹配线程
+                if _is_risky_pattern(word):
+                    self.logger.warning(_t("chatfilter.regex_invalid", word=word, error="risky pattern"))
+                    continue
                 try:
                     regexes.append(re.compile(word, re.IGNORECASE))
                 except re.error as e:
                     self.logger.warning(_t("chatfilter.regex_invalid", word=word, error=e))
             else:
-                # 普通词条按归一化形式匹配（全角/大小写变形词一并命中）
-                plains.append(normalize_text(word))
+                # 普通词条按逐字符归一化形式编译/匹配（全角/大小写变形词
+                # 一并命中，且与 _normalize_map 的文本归一化保持一致）
+                plains.append(_normalize_map(word)[0])
+        # 长词优先：交替分支按出现顺序尝试，短词在前会遮蔽长词
+        # （“敏感|敏感词”只能命中前者），降序保证打码覆盖最完整
+        plains.sort(key=len, reverse=True)
         # 合并正则分片：每片 _MERGED_CHUNK 个词条
         merged: list[Any] = []
         for i in range(0, len(plains), _MERGED_CHUNK):
@@ -187,10 +216,10 @@ class ChatFilterModule:
         if identity and identity in exempt:
             return text, False
 
-        normalized = normalize_text(text)
+        norm_text, starts = _normalize_map(text)
         hit = False
         for pat in merged:
-            if pat.search(normalized):
+            if pat.search(norm_text):
                 hit = True
                 break
         if not hit:
@@ -204,24 +233,37 @@ class ChatFilterModule:
         if cfg.get("mode", "mask") == "block":
             return "", True
         mask = str(cfg.get("mask_text", "*") or "*")
-        # 打码：普通词条在归一化文本上替换（等长映射回原文会因长度
-        # 不一致错位，故直接对原文按各词条原文替换；正则词条同样
-        # 对原文替换）。逐词条替换保证变形词（全角）也能替换原文。
-        result = text
-        for entry in self._words:
-            word = str(entry.get("word") or "")
-            if not word:
-                continue
-            if entry.get("type") == "regex":
-                try:
-                    pat = re.compile(word, re.IGNORECASE)
-                    result = pat.sub(mask, result)
-                except re.error:
-                    continue
+        # 打码：收集所有命中区间后合并去重叠，一次性重建文本。
+        # 普通词条的命中区间经 starts 映射回原文（归一化可能变长，
+        # 不能按下标直切）；正则词条直接在原文上匹配，复用预编译
+        # pattern。区间合并避免了“先替换出的掩码又被后续词条命中”
+        # 的顺序依赖，也让万级词条只需常数次全文扫描。
+        intervals: list[tuple[int, int]] = []
+        for pat in merged:
+            for m in pat.finditer(norm_text):
+                if m.end() > m.start():
+                    intervals.append((starts[m.start()], starts[m.end() - 1] + 1))
+        for pat in regexes:
+            for m in pat.finditer(text):
+                if m.end() > m.start():
+                    intervals.append((m.start(), m.end()))
+        if not intervals:
+            return text, True
+        spans: list[list[int]] = []
+        for begin, end in sorted(intervals):
+            if spans and begin <= spans[-1][1]:
+                if end > spans[-1][1]:
+                    spans[-1][1] = end
             else:
-                # 构造忽略全角/大小写差异的替换：按归一化等价类逐段替换
-                result = _replace_normalized(result, word, mask)
-        return result, True
+                spans.append([begin, end])
+        out: list[str] = []
+        pos = 0
+        for begin, end in spans:
+            out.append(text[pos:begin])
+            out.append(mask)
+            pos = end
+        out.append(text[pos:])
+        return "".join(out), True
 
     # ------------------------------------------------------------------ 词库
     def list_wordbanks(self) -> list[dict[str, Any]]:
@@ -335,26 +377,3 @@ class ChatFilterModule:
                 self._words = cleaned
             self._save_locked()
             self._recompile()
-
-
-def _replace_normalized(text: str, word: str, mask: str) -> str:
-    """在原文上替换与 word 归一化等价的片段（处理全角/大小写变形）。"""
-    norm_word = normalize_text(word)
-    if not norm_word:
-        return text
-    norm_text = normalize_text(text)
-    if norm_word not in norm_text:
-        return text
-    # 归一化保持等长（translate 逐字符 1:1），可按索引切片回原文
-    out: list[str] = []
-    i = 0
-    n = len(norm_word)
-    while i <= len(norm_text) - n:
-        if norm_text[i : i + n] == norm_word:
-            out.append(mask)
-            i += n
-        else:
-            out.append(text[i])
-            i += 1
-    out.append(text[i:])
-    return "".join(out)

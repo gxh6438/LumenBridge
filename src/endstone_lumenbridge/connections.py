@@ -121,7 +121,6 @@ class ConnectionValidationError(ValueError):
 
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
-_NAME_RE = re.compile(r"^.+$", re.S)
 
 
 def _norm_id_list(value: Any) -> list[Any]:

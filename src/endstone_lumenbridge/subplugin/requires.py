@@ -23,16 +23,6 @@ _REQ_RE = re.compile(
     r"^\s*([A-Za-z0-9_\-]{1,64})\s*(==|!=|>=|<=|>|<)?\s*([0-9A-Za-z.+-]{1,64})?\s*$"
 )
 
-_OPS: dict[str, Callable[[tuple[int, ...], tuple[int, ...]], bool]] = {
-    ">=": lambda a, b: a >= b,
-    "<=": lambda a, b: a <= b,
-    ">": lambda a, b: a > b,
-    "<": lambda a, b: a < b,
-    "==": lambda a, b: a == b,
-    "!=": lambda a, b: a != b,
-}
-
-
 def version_tuple(value: Any) -> tuple[int, ...]:
     """宽松版本比较元组：仅去 v/V 前缀，每段取前导数字（与 min_v 口径一致）。"""
     parts: list[int] = []
@@ -40,6 +30,30 @@ def version_tuple(value: Any) -> tuple[int, ...]:
         match = re.match(r"(\d+)", segment)
         parts.append(int(match.group(1)) if match else 0)
     return tuple(parts or [0])
+
+
+def version_cmp(a: Any, b: Any) -> int:
+    """比较两个版本字符串，返回 -1/0/1。
+
+    段数不同时右侧补 0 对齐：1.2 与 1.2.0 视为相等（语义化版本惯例）。
+    裸元组比较中 (1, 2) < (1, 2, 0)，会把相等版本误判为不满足
+    （如 ==1.2 对已装 1.2.0、min_v 1.2.0 对宿主 1.2）。
+    """
+    ta, tb = version_tuple(a), version_tuple(b)
+    n = max(len(ta), len(tb))
+    pa = ta + (0,) * (n - len(ta))
+    pb = tb + (0,) * (n - len(tb))
+    return (pa > pb) - (pa < pb)
+
+
+_OPS: dict[str, Callable[[Any, Any], bool]] = {
+    ">=": lambda a, b: version_cmp(a, b) >= 0,
+    "<=": lambda a, b: version_cmp(a, b) <= 0,
+    ">": lambda a, b: version_cmp(a, b) > 0,
+    "<": lambda a, b: version_cmp(a, b) < 0,
+    "==": lambda a, b: version_cmp(a, b) == 0,
+    "!=": lambda a, b: version_cmp(a, b) != 0,
+}
 
 
 @dataclass
@@ -59,7 +73,7 @@ class PluginRequirement:
     def satisfied_by(self, actual_version: Any) -> bool:
         if not self.op:
             return True
-        return _OPS[self.op](version_tuple(actual_version), version_tuple(self.version))
+        return _OPS[self.op](actual_version, self.version)
 
     def describe_unmet(self, actual: str = "") -> str:
         """生成“缺什么/差多少”的一句话描述（不带 i18n，供日志拼接）。"""

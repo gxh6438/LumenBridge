@@ -44,6 +44,8 @@ from .context import LumenContext
 from .requires import (
     check_endstone_requirements,
     parse_requires_from_manifest,
+    version_cmp,
+    version_tuple,
 )
 
 if TYPE_CHECKING:
@@ -778,19 +780,11 @@ class SubPluginManager:
                 lines.append(line)
             return lines or [_t("subplugin_runtime.log.status_empty")]
 
-    @staticmethod
-    def _version_tuple(v: str) -> tuple[int, ...]:
-        # 与 marketplace 的解析规则一致：仅去前缀 v/V，每段只取前导数字
-        parts: list[int] = []
-        for seg in str(v or "0").lstrip("vV").split("."):
-            m = re.match(r"(\d+)", seg)
-            parts.append(int(m.group(1)) if m else 0)
-        return tuple(parts or [0])
-
     def _unmet_min_version(self, manifest: dict[str, Any]) -> str:
         """检查 lumen.json 的 min_v：返回不满足的版本号（满足/未声明返回 ""）。
 
         非字符串/畸形 min_v 一律视为未声明（宽松容错），避免畸形清单阻断加载。
+        段数不同补 0 对齐比较（1.2 与 1.2.0 相等）。
         """
         required = manifest.get("min_v")
         if not isinstance(required, str):
@@ -798,7 +792,7 @@ class SubPluginManager:
         required = required.strip()
         if not required:
             return ""
-        if self._version_tuple(required) > self._version_tuple(__version__):
+        if version_cmp(required, __version__) > 0:
             return required
         return ""
 
@@ -912,8 +906,8 @@ class SubPluginManager:
                     new_version = manifest.get("version", "0")
                     # 低危：旧目录无清单（old=0）且新包 version 缺失/解析为 0 时，
                     # 0 视为"未知版本"放行升级（允许覆盖安装），不再被 0<=0 卡死
-                    new_tuple = self._version_tuple(new_version)
-                    if new_tuple != (0,) and new_tuple <= self._version_tuple(old_version):
+                    new_tuple = version_tuple(new_version)
+                    if new_tuple != (0,) and version_cmp(new_version, old_version) <= 0:
                         return False, _t("subplugin_runtime.log.install_version_too_low", name=name, old=old_version, new=new_version), name
                     # 升级：先卸载；递归备份用户数据（非 .py/.pyc，含嵌套目录，
                     # 子插件常把数据写进 data/ 等子目录，仅顶层白名单会丢数据）

@@ -32,6 +32,7 @@ from .subplugin.requires import (
     RequiresDeclaration,
     check_endstone_requirements,
     parse_requires_from_manifest,
+    version_cmp,
 )
 
 if TYPE_CHECKING:
@@ -64,7 +65,8 @@ def _version_tuple(value: str) -> tuple[int, ...]:
 
 
 def _is_newer(remote: str, local: str) -> bool:
-    return _version_tuple(remote) > _version_tuple(local)
+    # 补 0 对齐比较（1.2 与 1.2.0 相等），段数不同不再误报“有更新”
+    return version_cmp(remote, local) > 0
 
 
 class MarketplaceError(RuntimeError):
@@ -790,7 +792,7 @@ class MarketplaceClient:
                 continue
             if req.op and not req.satisfied_by(version):
                 continue
-            if best is None or _version_tuple(version) > _version_tuple(best_version):
+            if best is None or version_cmp(version, best_version) > 0:
                 best, best_version = item, version
         return best
 

@@ -805,8 +805,12 @@ class _SchedulerWrapper:
                 result = attr(*args, **kwargs)
                 tasks = getattr(self._owner, "_scheduled_tasks", None)
                 if tasks is not None:
-                    for task in args:
-                        tasks.discard(task)
+                    # 官方签名 cancel_task(id: int)：按 task_id 匹配移除，
+                    # 兼容少数端实现的 cancel_task(task) 写法
+                    ids = {id(a) for a in args}
+                    for task in list(tasks):
+                        if id(task) in ids or getattr(task, "task_id", None) in args:
+                            tasks.discard(task)
                 return result
 
             return _cancel_and_forget
@@ -1057,11 +1061,17 @@ class LumenContext:
             except Exception:
                 cancel = None
             for task in list(scheduled):
-                if callable(cancel):
-                    try:
-                        cancel(task)
-                    except Exception:
-                        pass  # 任务已结束/已被取消等情况不阻断其余清理
+                try:
+                    # Endstone 0.11 cancel_task 签名为 cancel_task(id: int)，
+                    # 直接传 Task 对象会抛 TypeError 且被下方 except 吞掉，
+                    # 任务实际从未取消（热重载后周期任务重复执行）
+                    task.cancel()
+                except Exception:
+                    if callable(cancel):
+                        try:
+                            cancel(getattr(task, "task_id", task))
+                        except Exception:
+                            pass  # 任务已结束/已被取消等情况不阻断其余清理
             scheduled.clear()
         # M32：原生 listener 为 per-event 单例且无法注销（Endstone 未暴露
         # unregister_events）；清空分发表使其不再分发，并置 _lumen_active=False
