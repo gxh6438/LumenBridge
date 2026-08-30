@@ -1,0 +1,9 @@
+{
+    "name": "os",
+    "version": "3.0.0",
+    "author": "户山兔兔 (LumenBridge 复刻: Manus AI)",
+    "desc": "服务器状态：群内发送「服务器状态」查询版本、天气、CPU、内存、TPS、在线人数等",
+    "load": true,
+    "priority": "post",
+    "min_v": "1.0.0"
+}

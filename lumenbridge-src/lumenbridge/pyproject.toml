@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "endstone-lumenbridge"
+version = "1.0.4"
+description = "LumenBridge - Endstone 群服互通框架：OneBot v11 双向消息同步、白名单绑定、正则触发引擎、多适配器连接与 AstrBot 全平台中继"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "LumenBridge" }]
+keywords = ["endstone", "minecraft", "bedrock", "qq", "onebot", "bridge"]
+
+[project.urls]
+Homepage = "https://github.com/gxh6438/LumenBridge"
+
+[project.entry-points."endstone"]
+lumenbridge = "endstone_lumenbridge.plugin:LumenBridgePlugin"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/endstone_lumenbridge"]

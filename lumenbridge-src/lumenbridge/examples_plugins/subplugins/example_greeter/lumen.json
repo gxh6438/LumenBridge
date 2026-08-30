@@ -1,0 +1,9 @@
+{
+    "name": "example_greeter",
+    "version": "1.0.0",
+    "author": "Manus AI",
+    "desc": "示例子插件：关键字问候、进服欢迎、在线人数查询、自定义正则动作",
+    "load": true,
+    "priority": "main",
+    "min_v": ""
+}
