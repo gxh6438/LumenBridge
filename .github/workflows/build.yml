@@ -1,0 +1,77 @@
+# 自动构建发布：推送 v* 标签时构建 wheel 并创建 GitHub Release；
+# 也可在 Actions 页面手动触发（workflow_dispatch），指定 tag 更新已有
+# Release 的 .whl（--clobber 同名覆盖），用于替换旧版产物。
+name: Build Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "目标 tag（如 v1.0.4；不存在时会在当前提交上创建）"
+        required: true
+        default: "v1.0.4"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+
+      - name: Show artifact
+        run: ls -la dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel
+          path: dist/*.whl
+          if-no-files-found: error
+
+  release:
+    name: Upload to GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheel
+          path: dist
+
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create or update release
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          # Release 不存在则创建（tag 不存在时会在 --target 指向的提交上建 tag，
+          # tag 已存在则直接复用）；存在则复用
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --target "${{ github.sha }}" --title "$TAG" --generate-notes
+          # 上传 wheel，同名产物覆盖（替换旧版 .whl）
+          gh release upload "$TAG" dist/*.whl --clobber
+          echo "已上传："
+          gh release view "$TAG" --json assets --jq '.assets[].name'
