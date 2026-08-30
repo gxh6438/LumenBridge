@@ -41,6 +41,46 @@
 
 * 子插件开发文档「配置表单」章节重写：字段类型表（含 section/multiselect/secret/滑块参数）、通用可选参数表、WebUI 渲染特性说明、完整示例（分组 + 多选 + 滑块 + secret）
 
+### 新增（深度审计第二轮）
+
+* QQ 官方机器人 OneBot action 扩展：`set_group_ban`（标准禁言，duration 秒，0=解禁，最长 30 天）、`set_group_ban_batch`（官方批量禁言，单次最多 10 人）、`get_group_restrict_chat_setting`（禁言规则与禁言列表查询）、`get_group_bot_state`（机器人群内角色/主动消息开关）、`get_group_join_request_list`（待审批入群申请分页拉取）；`delete_msg` / `set_group_add_request` 支持结果 callback 回传真实成败（`{"ok": true}` / `{"ok": false, "error": ...}`）
+
+* @机器人 留痕（`mention_self`）：`GROUP_AT_MESSAGE_CREATE` 事件类型本身即「@机器人」信号（官方服务端会从 content 中剥离 @bot 前缀，正文扫描恒漏），全量消息模式下兜底扫描正文 mention 段；子插件可据此实现 @ 唤醒判定
+
+* 子插件自定义页面（iframe）体验升级：内容区全宽铺开（不再被固定宽度方框框住）、iframe 高度随内容自适应随主面板滚动、确认弹窗与 toast 经 postMessage 委托主面板顶层呈现（iframe 内 fixed 元素无法超出边界、自适应高度后会漂移）
+
+* GitHub Actions 自动构建工作流：推送 `v*` 标签自动构建 wheel 并创建 GitHub Release 附带产物；支持手动触发（workflow\_dispatch）
+
+### WebUI 性能优化
+
+* 静态资源 gzip 压缩（html/js/css/json/svg/txt/md，压缩结果缓存，仅压缩后更小的资源），页面首次加载体积大幅下降
+
+* ETag / 304 协商缓存：静态文件按 size+mtime 生成 ETag，命中 If-None-Match 直接返回 304；分类型 Cache-Control 策略（png/ico/svg 长缓存 1 天，html/js/css no-cache 保证升级后及时更新）
+
+### 审计修复（高危）
+
+- 聊天屏蔽词打码崩溃：`str.lower()` 对个别 Unicode（如 `İ` U+0130）会展开为多字符，归一化文本与原文不等长导致按索引回切原文时越界崩溃/打码错位；改为逐字符归一化并构建索引映射，命中区间精确映射回原文
+
+- 版本比较段数缺陷：裸元组比较中 `(1,2) < (1,2,0)`，相等版本被误判不满足（`==1.2` 拒装已装的 `1.2.0`、`min_v 1.2.0` 拒载宿主 `1.2`、市场把同版本误报「有更新」）；统一改为补 0 对齐比较（requires / loader min\_v / ZIP 升级拦截 / marketplace 三处同源修复）
+
+- 子插件定时任务泄漏：热重载清理时把 Task 对象传给期望任务 ID 的 `scheduler.cancel_task`，任务从未真正取消导致重复执行；改为直接 `task.cancel()` 并按 task\_id 从注册表移除
+
+- 屏蔽词正则词条 ReDoS 防护：复用正则引擎的风险 pattern 启发式（嵌套量词 / 超大重复下界），灾难性回溯词条拒绝编译并告警
+
+### 性能修复
+
+- 屏蔽词打码路径：逐词条重复归一化整段文本 + 每次重新 `re.compile` 改为合并正则一次 `finditer` 定位全部命中区间 + 复用预编译 pattern + 区间合并一次性重建（消除替换顺序依赖）；万级词条打码从逐词 O(n·m) 降为常数次全文扫描，2 万词条实测单次 0.015ms
+
+- 合并正则长词优先排序：交替分支按出现顺序尝试，短词在前会遮蔽长词（「敏感|敏感词」只能命中前者），按长度降序保证打码覆盖完整
+
+### 代码清理
+
+- 移除 connections.py 无引用的 `_NAME_RE`（匹配任意非空串且零调用）与 loader.py 重复的 `_version_tuple`（统一到 requires 模块单一实现）
+
+### 文档
+
+* 子插件开发文档新增「QQ 官方机器人的 action 支持」章节：官方端点映射表（含限制说明）、官方扩展 action 清单、禁言调用示例
+
 ## [1.0.3] - 2026-08-21
 
 ### 新增

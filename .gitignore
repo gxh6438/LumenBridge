@@ -24,3 +24,7 @@ env/
 .idea/
 .vscode/
 .DS_Store
+
+# IDE share artifacts and local source archives
+.trae-html-share-packages/
+/lumenbridge-*-src.zip
