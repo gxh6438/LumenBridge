@@ -22,7 +22,7 @@ from .constants import (
     PASSIVE_WINDOW_C2C,
     PASSIVE_WINDOW_GROUP,
 )
-from .utils import content_segments, plain_content
+from .utils import content_segments, mention_segments, plain_content
 
 
 class EventTranslator:
@@ -48,8 +48,11 @@ class EventTranslator:
             self.ad.bus.emit("bot.online", self.ad)
             return
         if event in ("GROUP_MESSAGE_CREATE", "GROUP_AT_MESSAGE_CREATE"):
-            # 全量群消息（无需@）与 @ 消息共用同一载荷结构
-            await self._emit_group_message(data)
+            # 全量群消息（需开通权限）与 @ 消息共用同一载荷结构；
+            # GROUP_AT_MESSAGE_CREATE 事件类型本身即「@机器人」信号：
+            # 官方服务端会把 @bot 前缀从 content 中剥离（正文中无任何痕迹），
+            # 内容扫描在 @ 消息场景恒为空，必须靠事件类型判定
+            await self._emit_group_message(data, at_bot=event == "GROUP_AT_MESSAGE_CREATE")
             return
         if event == "C2C_MESSAGE_CREATE":
             await self._emit_c2c_message(data)
@@ -325,7 +328,7 @@ class EventTranslator:
             )
         return segments
 
-    async def _emit_group_message(self, data: dict[str, Any]) -> None:
+    async def _emit_group_message(self, data: dict[str, Any], at_bot: bool = False) -> None:
         group_openid = str(data.get("group_openid") or "")
         msg_id = str(data.get("id") or "")
         if not group_openid or not msg_id:
@@ -339,6 +342,14 @@ class EventTranslator:
         # 按原始顺序解析 content：@其他成员 就地转 at 段（供 /get openid @xxx
         # 等命令解析，且转发到游戏时 @ 保持在原位置），@机器人自身 触发标记剥离
         message, content = content_segments(data.get("content"), self_id=self.ad.app_id)
+        # @机器人 留痕：子插件据此判定 @ 唤醒。两个来源：
+        # 1) at_bot：GROUP_AT_MESSAGE_CREATE 事件类型本身即 @ 信号（官方已
+        #    剥离 content 中 @bot 前缀，扫描正文恒漏）；2) 全量消息模式下
+        #    （GROUP_MESSAGE_CREATE）正文可能残留 @bot 文本链标记，兜底扫描
+        mention_self = at_bot or any(
+            str((seg.get("data") or {}).get("qq") or "") == str(self.ad.app_id)
+            for seg in mention_segments(data.get("content"))
+        )
         # 记录被动回复凭据（入池：同一 msg_id 可配递增 msg_seq 回复 5 次）
         self.ad.credentials.cache_passive(
             group_openid, msg_id, PASSIVE_WINDOW_GROUP, PASSIVE_MAX_SEQ_GROUP
@@ -359,6 +370,7 @@ class EventTranslator:
             message=message,
             raw_message=content,
             font=0,
+            mention_self=mention_self,
             sender={"user_id": member_openid, "nickname": nickname, "card": ""},
         )
         self.ad._emit_pack(pack)

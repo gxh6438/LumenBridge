@@ -179,6 +179,7 @@ input:focus, textarea:focus, select:focus {
   margin: 0 auto;
 }
 .sidebar {
+  z-index: 2;  /* 高于 main(z-index:1)：子插件 iframe 全宽铺开（负 margin）时导航仍可点击 */
   width: 240px; flex-shrink: 0;
   padding: 24px 14px 18px;
   display: flex; flex-direction: column;
@@ -296,8 +297,9 @@ input:focus, textarea:focus, select:focus {
 .tab-item {
   display: flex; flex-direction: column; align-items: center; gap: 2px;
   border: none; background: transparent; color: var(--muted);
-  font-size: 10.5px; padding: 5px 4px; border-radius: 14px;
-  min-width: 58px; flex: 0 0 auto;
+  font-size: 10.5px; padding: 5px 2px; border-radius: 14px;
+  /* 弹性平分：按钮少时摊满整条、间距均匀；按钮多时收缩到 48px 后横向滚动 */
+  flex: 1 1 0; min-width: 48px; max-width: 96px;
   transition: color .15s, transform .15s;
 }
 .tab-item svg { width: 20px; height: 20px; }
@@ -482,6 +484,9 @@ tr:last-child td { border-bottom: none; }
   padding: 5px 12px; border-radius: 20px;
   background: rgba(255,159,10,.13); border: 1px solid rgba(255,159,10,.35);
 }
+/* 配置弹窗底栏：徽章与操作按钮分两行，避免按钮被挤换行错位 */
+.pc-footer { display: flex; flex-direction: column; gap: 10px; margin: 16px 0 0; }
+.pc-footer-actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
 .pc-dirty-badge::before {
   content: ""; width: 7px; height: 7px; border-radius: 50%;
   background: #ff9f0a; animation: pcPulse 1.6s ease-in-out infinite;
@@ -590,6 +595,17 @@ textarea.json-editor {
 .modal-mask.show { display: flex; }
 .modal-mask[data-closable="true"] { cursor: pointer; }
 .modal-mask[data-closable="true"] .modal { cursor: default; }
+/* 子插件弹窗外围遮罩条：与 .modal-mask 同色同模糊、z-index 同层（盖过底部导航 tabbar），
+   点击视为点击弹窗外区域（转发关闭给 iframe 内的弹窗）。
+   关键：容器本身 pointer-events:none——容器铺满全屏，若可点击会盖在 iframe 上方，
+   拦截 iframe 内所有点击（点输入框会被当成点击遮罩关闭弹窗）；仅 4 条遮罩条可点击 */
+#subplugin-dim { display: none; position: fixed; inset: 0; z-index: 80; pointer-events: none; }
+#subplugin-dim.show { display: block; }
+#subplugin-dim .dim-strip {
+  position: absolute; background: rgba(0,0,0,.35);
+  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+  cursor: pointer; pointer-events: auto;
+}
 /* 确认/告警弹窗必须永远置于其它弹窗之上：与详情等业务弹窗同为 z-index:80 时，
    DOM 序靠后的业务弹窗（如插件详情卡片）会盖住确认弹窗 */
 #confirm-modal, #alert-modal { z-index: 120; }
@@ -663,9 +679,21 @@ textarea.file-editor {
 }
 .progress-bar { height: 100%; width: 0%; background: var(--accent); border-radius: 3px; transition: width .2s; }
 
-.iframe-wrap { border-radius: var(--radius-md); overflow: hidden; border: 1px solid var(--divider); }
-.iframe-wrap iframe { width: 100%; height: 640px; border: none; background: #fff; display: block; }
-@media (max-width: 640px) { .iframe-wrap iframe { height: 70vh; } }
+/* 子插件页面容器：iframe 背景透明，透出主面板光斑，页面内容与主面板融为一体。
+   不加边框/圆角（去掉“背景框”）。
+   高度策略：app.js 会在页面加载后注入同源脚本，把内容高度实时上报并写入
+   iframe 内联样式（随主面板整体滚动，无内部滚动条）；此处的固定高度仅作为
+   注入失败/加载中的兜底显示。 */
+#page-custom .page-sub { display: none; }
+.iframe-wrap iframe {
+  width: 100%;
+  height: calc(100dvh - 140px);
+  min-height: 380px;
+  border: none;
+  background: transparent;
+  display: block;
+}
+@media (max-width: 860px) { .iframe-wrap iframe { height: calc(100dvh - 190px); min-height: 360px; } }
 
 .subplugin-card { padding: 13px 15px; border-radius: var(--radius-md); margin-bottom: 10px; }
 /* 子插件列表：窄屏单列独占一行；宽屏（横屏电脑）固定两列并排。
@@ -1210,6 +1238,15 @@ textarea.file-editor {
 }
 
 .marketplace-search-card { z-index: 20; }
+/* 市场列表栅格：覆盖 pip-packages-grid 的 240px 窄列——市场卡片是横向布局
+  （头像+简介+双按钮），窄列下按钮行会溢出卡片；列宽下限 380px 且
+  min(100%,…) 防止超小屏溢出视口 */
+#marketplace-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
 /* 市场卡片 v2：图片保持原尺寸居左、标题/简介在右侧并排（移动端同样保持横排），
    操作按钮并入标题行右侧，整体排版更紧凑 */
 .market-card {
@@ -1219,6 +1256,7 @@ textarea.file-editor {
   border: 1px solid var(--divider);
   transition: border-color .18s, transform .15s, box-shadow .18s;
   position: relative;
+  min-width: 0; max-width: 100%; overflow: hidden;
 }
 .market-card:hover { border-color: var(--accent); transform: translateY(-1px); box-shadow: 0 6px 18px rgba(0,0,0,.12); }
 .market-card .market-avatar {
@@ -1255,8 +1293,10 @@ textarea.file-editor {
   overflow: hidden; line-height: 1.45;
 }
 .market-card .market-tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
-.market-card .market-footer { margin-top: auto; padding-top: 6px; display: flex; align-items: center; gap: 10px; }
+.market-card .market-footer { margin-top: auto; padding-top: 6px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .market-card .market-stats { color: var(--muted); font-size: 11.5px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; flex: 1; min-width: 0; }
+/* 长单词/URL 断行保护：防止不可断内容把卡片撑出屏幕 */
+.market-card .market-desc, .market-card .market-meta { overflow-wrap: anywhere; }
 .market-card .market-stats .stat { display: inline-flex; align-items: center; gap: 3px; }
 /* 市场点赞按钮：爱心放大、可点击，已点赞高亮 */
 .market-like-btn.stat {
@@ -1273,7 +1313,7 @@ textarea.file-editor {
 .market-like-btn.stat:disabled { opacity: .55; cursor: wait; transform: none; }
 .market-card .market-actions {
   display: flex; flex-direction: row; gap: 6px; flex: 0 0 auto;
-  align-items: center;
+  align-items: center; flex-wrap: wrap; justify-content: flex-end;
 }
 
 /* 市场插件详情弹窗 */
@@ -1390,7 +1430,10 @@ textarea.file-editor {
   max-height: 110px; overflow-y: auto;
 }
 .spu-actions-row { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
-.spu-actions-row select { flex: 1; min-width: 0; padding: 8px 10px; font-size: 13px; }
+/* 版本下拉：复用 .lumen-select 自定义组件（紧凑版），加载中禁用交互 */
+.spu-actions-row .spu-version-select { flex: 1; min-width: 0; }
+.spu-version-select .ls-trigger { padding: 7px 10px; font-size: 13px; }
+.spu-version-select.loading .ls-trigger { pointer-events: none; opacity: .55; }
 .spu-updates-summary { font-size: 13px; color: var(--muted); margin: 2px 0 12px; }
 /* 更新中心卡片列表：弹窗内宽屏两列并排，窄屏单列 */
 .spu-list { display: grid; grid-template-columns: 1fr; gap: 10px; }
@@ -1847,6 +1890,16 @@ textarea.file-editor {
 
 <div id="toast" onclick="dismissToast()"><span class="dot"></span><span id="toast-text"></span></div>
 
+<!-- 子插件弹窗打开时的外围遮罩：4 条同色遮罩盖住 iframe 之外的整个视口（含底部导航），
+     iframe 区域本身由子插件页面内部遮罩负责，两者拼成一块视觉无缝的全屏遮罩。
+     遮罩条位置由 app.js 按 #custom-frame 实时位置计算（随滚动/缩放更新）。 -->
+<div id="subplugin-dim" aria-hidden="true">
+  <div class="dim-strip" data-pos="top"></div>
+  <div class="dim-strip" data-pos="bottom"></div>
+  <div class="dim-strip" data-pos="left"></div>
+  <div class="dim-strip" data-pos="right"></div>
+</div>
+
 <!-- 背景层挂在 body 直属：登录页与主界面共用（置于 app-view 内会被
      display:none 连带隐藏，登录页背景图因此不显示） -->
 <div id="bg-layer" aria-hidden="true"></div>
@@ -2070,7 +2123,10 @@ textarea.file-editor {
               <div class="cf-card-title">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                 <span data-i18n="chatfilter.banks_title">词库一键导入</span>
+                <button class="btn small" onclick="document.getElementById('cf-import-file').click()" data-i18n="chatfilter.upload_button">上传 .txt 词库</button>
+                <input type="file" id="cf-import-file" accept=".txt" style="display:none" onchange="cfImportTextFile(this)">
               </div>
+              <div class="hint" style="margin-top:0;margin-bottom:10px" data-i18n="chatfilter.upload_hint">支持第三方词库：每个词用逗号（中英文均可）或换行分隔，# 开头为注释，自动去重</div>
               <div id="cf-banks"><div class="empty-state" data-i18n="chatfilter.banks_empty">词库目录为空，可将 .txt 词库文件放入 data/chat_filter/wordbanks/ 后刷新</div></div>
             </div>
           </div>
@@ -2479,12 +2535,13 @@ textarea.file-editor {
       <input type="text" id="pc-search" data-i18n-placeholder="subplugins.config_search_ph" placeholder="搜索配置项…" oninput="pcFilterItems()">
     </div>
     <div class="modal-body" id="plugin-config-body"></div>
-    <div class="toolbar" style="margin:16px 0 0">
+    <div class="pc-footer">
       <span class="pc-dirty-badge" id="pc-dirty-badge" style="display:none" data-i18n="subplugins.config_dirty">未保存的更改</span>
-      <span style="flex:1"></span>
-      <button class="btn small ghost" onclick="pcResetAll()" data-i18n="subplugins.config_reset_all">恢复默认</button>
-      <button class="btn small ghost" onclick="pcRequestClose()" data-i18n="common.cancel">取消</button>
-      <button class="btn small" onclick="savePluginConfig()" data-i18n="subplugins.save_config_button">保存配置</button>
+      <div class="pc-footer-actions">
+        <button class="btn small ghost" onclick="pcResetAll()" data-i18n="subplugins.config_reset_all">恢复默认</button>
+        <button class="btn small ghost" onclick="pcRequestClose()" data-i18n="common.cancel">取消</button>
+        <button class="btn small" onclick="savePluginConfig()" data-i18n="subplugins.save_config_button">保存配置</button>
+      </div>
     </div>
   </div>
 </div>

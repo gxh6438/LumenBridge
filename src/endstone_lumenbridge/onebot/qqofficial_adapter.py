@@ -13,6 +13,7 @@ OneBot v11 格式后经 ``bus.emit("onebot.pack", ...)`` 派发复用下游。
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import queue
 import random
@@ -20,6 +21,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from ..i18n import t as _t
@@ -841,36 +843,50 @@ class QQOfficialAdapter:
                 self._msg_scopes.pop(old, None)
         self._msg_scopes[key] = (kind, str(target))
 
-    def delete_msg(self, message_id: Any) -> None:
+    def delete_msg(
+        self, message_id: Any, callback: Callable[[Any], None] | None = None
+    ) -> None:
         """撤回消息：OneBot 语义 → 官方 DELETE /v2/groups/{g}/messages/{id}。
 
         - 仅群聊消息可撤回：机器人自己发的限 2 分钟内；
           机器人是群管理员时可撤普通群员的消息（message_id 取自收到的消息事件）；
-        - C2C / 未知 id：官方无接口或无记录，告警并跳过。
+        - C2C / 未知 id：官方无接口或无记录，告警并跳过；
+        - 结果经 callback 回传 {"ok": True} / {"ok": False, "error": ...}，
+          供调用方感知真实成败。
         """
         key = str(message_id or "")
         scope = self._msg_scopes.get(key)
         if scope is None:
             self.logger.warning(_t("qqofficial.recall_unknown_id", id=key[:24]))
+            if callback:
+                callback({"ok": False, "error": "未知消息 ID（消息可能已过期或未被机器人收到）"})
             return
         kind, target = scope
         if kind != "group":
             self.logger.warning(_t("qqofficial.recall_unsupported_scope", id=key[:24]))
+            if callback:
+                callback({"ok": False, "error": "该消息不在群聊中，官方接口不支持撤回"})
             return
         loop = self._loop
         if loop is None or not loop.is_running():
             self.logger.warning(_t("qqofficial.recall_no_loop", id=key[:24]))
+            if callback:
+                callback({"ok": False, "error": "适配器事件循环未运行"})
             return
 
-        async def _recall() -> None:
+        async def _recall() -> Any:
             try:
                 await self._api_request("DELETE", f"/v2/groups/{target}/messages/{key}")
-                self._msg_scopes.pop(key, None)
-                self.logger.info(_t("qqofficial.recall_ok", group=target))
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 self.logger.warning(_t("qqofficial.recall_failed", group=target, error=e))
+                return {"ok": False, "error": f"撤回失败：{e}"}
+            self._msg_scopes.pop(key, None)
+            self.logger.info(_t("qqofficial.recall_ok", group=target))
+            return {"ok": True}
 
-        asyncio.run_coroutine_threadsafe(_recall(), loop)
+        self._run_official_api(
+            _recall, callback, fail_value={"ok": False, "error": "撤回请求执行失败"}
+        )
 
     def set_group_add_request(
         self,
@@ -878,25 +894,31 @@ class QQOfficialAdapter:
         sub_type: str = "add",
         approve: bool = True,
         reason: str = "",
+        callback: Callable[[Any], None] | None = None,
     ) -> None:
         """处理加群请求：OneBot 语义 → 官方审批接口。
 
         POST /v2/groups/{group_openid}/approval_join_request/{member_openid}
         body: {op: approve|decline, join_request_id, reject_reason?}
         （须机器人是群管理员；flag 为事件下发的 join_request_id）
+        结果经 callback 回传 {"ok": True} / {"ok": False, "error": ...}。
         """
         key = str(flag or "")
         target = self._join_requests.get(key)
         if target is None:
             self.logger.warning(_t("qqofficial.join_request_unknown_flag", flag=key[:24]))
+            if callback:
+                callback({"ok": False, "error": "未知申请（flag 无记录或已被处理）"})
             return
         group_openid, member_openid = target
         loop = self._loop
         if loop is None or not loop.is_running():
             self.logger.warning(_t("qqofficial.join_request_no_loop"))
+            if callback:
+                callback({"ok": False, "error": "适配器事件循环未运行"})
             return
 
-        async def _approve() -> None:
+        async def _approve() -> Any:
             body: dict[str, Any] = {
                 "op": "approve" if approve else "decline",
                 "join_request_id": key,
@@ -909,21 +931,25 @@ class QQOfficialAdapter:
                     f"/v2/groups/{group_openid}/approval_join_request/{member_openid}",
                     body,
                 )
-                self._join_requests.pop(key, None)
-                self.logger.info(
-                    _t(
-                        "qqofficial.join_request_handled",
-                        group=group_openid,
-                        member=member_openid,
-                        result="approve" if approve else "decline",
-                    )
-                )
             except Exception as e:  # noqa: BLE001
                 self.logger.warning(
                     _t("qqofficial.join_request_failed", group=group_openid, error=e)
                 )
+                return {"ok": False, "error": f"审批失败：{e}"}
+            self._join_requests.pop(key, None)
+            self.logger.info(
+                _t(
+                    "qqofficial.join_request_handled",
+                    group=group_openid,
+                    member=member_openid,
+                    result="approve" if approve else "decline",
+                )
+            )
+            return {"ok": True}
 
-        asyncio.run_coroutine_threadsafe(_approve(), loop)
+        self._run_official_api(
+            _approve, callback, fail_value={"ok": False, "error": "审批请求执行失败"}
+        )
 
     # ------------------------------------------------------------ 兼容接口
     def get_login_info(self, callback: Callable[[Any], None]) -> None:
@@ -968,6 +994,211 @@ class QQOfficialAdapter:
         if callback:
             callback(None)
 
+    # ------------------------------------------------------------ 官方群管理 API
+    def _run_official_api(
+        self,
+        coro_factory: Callable[[], Any],
+        callback: Callable[[Any], None] | None,
+        *,
+        fail_value: Any = None,
+    ) -> None:
+        """在适配器事件循环上执行官方 REST 请求并回调（失败回调 fail_value）。"""
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            self.logger.warning(_t("qqofficial.api_no_loop"))
+            if callback:
+                callback(fail_value)
+            return
+
+        async def _call() -> Any:
+            try:
+                return await coro_factory()
+            except Exception as e:  # noqa: BLE001
+                self.logger.warning(_t("qqofficial.api_failed", error=e))
+                return fail_value
+
+        future = asyncio.run_coroutine_threadsafe(_call(), loop)
+        if callback is None:
+            return
+
+        def _done(fut: "concurrent.futures.Future[Any]") -> None:
+            try:
+                callback(fut.result())
+            except Exception:  # noqa: BLE001
+                callback(fail_value)
+
+        future.add_done_callback(_done)
+
+    def set_group_ban(
+        self,
+        group_id: Any,
+        user_id: Any,
+        duration: int,
+        callback: Callable[[Any], None] | None = None,
+    ) -> None:
+        """群禁言（OneBot v11 标准动作）→ 官方 POST /v2/groups/{g}/restrict_chat_setting。
+
+        - duration 单位秒：0 = 解除禁言（op=del），>0 = 禁言至 now+duration（op=add）；
+        - 官方限制：须群管理员，最长 30 天，仅能禁言普通成员（群主/管理员/机器人不可）；
+        - duration 超过 30 天时截断为 30 天并提示。
+        """
+        group_openid = str(group_id or "")
+        member_openid = str(user_id or "")
+        if not group_openid or not member_openid:
+            if callback:
+                callback(None)
+            return
+        seconds = int(duration or 0)
+        if seconds < 0:
+            self.logger.warning(_t("qqofficial.ban_invalid_duration", duration=seconds))
+            if callback:
+                callback(None)
+            return
+        if seconds > 2592000:  # 官方上限 30 天
+            self.logger.warning(_t("qqofficial.ban_too_long", duration=seconds))
+            seconds = 2592000
+
+        if seconds == 0:
+            member: dict[str, Any] = {
+                "op": "del",
+                "member_openid": member_openid,
+                "mute_expire_at": "",
+            }
+        else:
+            expire = datetime.fromtimestamp(
+                time.time() + seconds, tz=timezone(timedelta(hours=8))
+            )
+            member = {
+                "op": "add",
+                "member_openid": member_openid,
+                "mute_expire_at": expire.strftime("%Y-%m-%dT%H:%M:%S+08:00"),
+            }
+        body = {"members": [member]}
+
+        async def _ban() -> Any:
+            await self._api_request(
+                "POST", f"/v2/groups/{group_openid}/restrict_chat_setting", body
+            )
+            self.logger.info(
+                _t(
+                    "qqofficial.ban_ok",
+                    group=group_openid,
+                    member=member_openid,
+                    seconds=seconds,
+                )
+            )
+            return {"ok": True}
+
+        self._run_official_api(_ban, callback)
+
+    def set_group_ban_batch(
+        self,
+        group_id: Any,
+        user_ids: list[Any],
+        duration: int,
+        callback: Callable[[Any], None] | None = None,
+    ) -> None:
+        """批量群禁言（官方扩展动作）：单次最多 10 人，其余语义同 set_group_ban。"""
+        group_openid = str(group_id or "")
+        members = [str(u or "") for u in (user_ids or []) if str(u or "")]
+        if not group_openid or not members:
+            if callback:
+                callback(None)
+            return
+        if len(members) > 10:
+            self.logger.warning(_t("qqofficial.ban_batch_limit", count=len(members)))
+            members = members[:10]
+        seconds = int(duration or 0)
+        if seconds <= 0 or seconds > 2592000:
+            self.logger.warning(_t("qqofficial.ban_invalid_duration", duration=seconds))
+            if callback:
+                callback(None)
+            return
+        expire = datetime.fromtimestamp(
+            time.time() + seconds, tz=timezone(timedelta(hours=8))
+        )
+        expire_str = expire.strftime("%Y-%m-%dT%H:%M:%S+08:00")
+        body = {
+            "members": [
+                {
+                    "op": "add",
+                    "member_openid": m,
+                    "mute_expire_at": expire_str,
+                }
+                for m in members
+            ]
+        }
+
+        async def _ban() -> Any:
+            await self._api_request(
+                "POST", f"/v2/groups/{group_openid}/restrict_chat_setting", body
+            )
+            self.logger.info(
+                _t("qqofficial.ban_batch_ok", group=group_openid, count=len(members))
+            )
+            return {"ok": True, "count": len(members)}
+
+        self._run_official_api(_ban, callback)
+
+    def get_group_restrict_chat_setting(
+        self, group_id: Any, callback: Callable[[Any], None] | None = None
+    ) -> None:
+        """查询群禁言状态（官方扩展）：全员禁言规则 + 当前禁言成员列表。"""
+        group_openid = str(group_id or "")
+        if not group_openid:
+            if callback:
+                callback(None)
+            return
+
+        async def _query() -> Any:
+            return await self._api_request(
+                "GET", f"/v2/groups/{group_openid}/restrict_chat_setting"
+            )
+
+        self._run_official_api(_query, callback)
+
+    def get_group_bot_state(
+        self, group_id: Any, callback: Callable[[Any], None] | None = None
+    ) -> None:
+        """查询机器人群内状态（官方扩展）：角色/主动消息开关/收消息设置。"""
+        group_openid = str(group_id or "")
+        if not group_openid:
+            if callback:
+                callback(None)
+            return
+
+        async def _query() -> Any:
+            return await self._api_request(
+                "GET", f"/v2/groups/{group_openid}/bot_state"
+            )
+
+        self._run_official_api(_query, callback)
+
+    def get_group_join_request_list(
+        self,
+        group_id: Any,
+        cursor: str = "",
+        limit: int = 20,
+        callback: Callable[[Any], None] | None = None,
+    ) -> None:
+        """拉取入群申请列表（官方扩展）：需群管理员，支持分页。"""
+        group_openid = str(group_id or "")
+        if not group_openid:
+            if callback:
+                callback(None)
+            return
+
+        async def _query() -> Any:
+            path = f"/v2/groups/{group_openid}/join_request_list"
+            if cursor or limit:
+                # 官方接口请求体承载分页参数（GET + JSON body）
+                return await self._api_request(
+                    "GET", path, {"cursor": str(cursor), "limit": int(limit)}
+                )
+            return await self._api_request("GET", path)
+
+        self._run_official_api(_query, callback)
+
     def call_action(
         self,
         action: str,
@@ -975,8 +1206,97 @@ class QQOfficialAdapter:
         callback: Callable[[Any], None] | None = None,
         timeout: float = 10.0,
     ) -> None:
-        if callback:
-            callback(None)
+        """OneBot action 分发：已映射的动作转发官方端点，其余告警降级回调 None。"""
+        p = params or {}
+        if action == "send_group_msg":
+            self.send_group_msg(p.get("group_id"), p.get("message"))
+            if callback:
+                callback(None)
+        elif action == "send_private_msg":
+            self.send_private_msg(p.get("user_id"), p.get("message"))
+            if callback:
+                callback(None)
+        elif action == "delete_msg":
+            self.delete_msg(p.get("message_id"), callback)
+        elif action == "set_group_add_request":
+            self.set_group_add_request(
+                str(p.get("flag") or ""),
+                str(p.get("sub_type") or "add"),
+                bool(p.get("approve", True)),
+                str(p.get("reason") or ""),
+                callback,
+            )
+        elif action == "set_group_ban":
+            self.set_group_ban(
+                p.get("group_id"), p.get("user_id"), int(p.get("duration") or 0), callback
+            )
+        elif action == "set_group_ban_batch":
+            self.set_group_ban_batch(
+                p.get("group_id"), p.get("user_ids") or [], int(p.get("duration") or 0), callback
+            )
+        elif action == "get_group_restrict_chat_setting":
+            self.get_group_restrict_chat_setting(p.get("group_id"), callback)
+        elif action == "get_group_bot_state":
+            self.get_group_bot_state(p.get("group_id"), callback)
+        elif action == "get_group_join_request_list":
+            self.get_group_join_request_list(
+                p.get("group_id"),
+                str(p.get("cursor") or ""),
+                int(p.get("limit") or 20),
+                callback,
+            )
+        elif action == "get_group_info":
+            self._get_group_info_async(p.get("group_id"), callback)
+        elif action == "get_group_list":
+            self.get_group_list(callback or (lambda _: None))
+        elif action == "get_login_info":
+            self.get_login_info(callback or (lambda _: None))
+        else:
+            self.logger.warning(_t("qqofficial.unsupported_action", action=action))
+            if callback:
+                callback(None)
+
+    def _get_group_info_async(
+        self, group_id: Any, callback: Callable[[Any], None] | None
+    ) -> None:
+        """群信息：优先官方 info 端点（白名单接口），失败回退本地兜底。"""
+        group_openid = str(group_id or "")
+        if not group_openid:
+            if callback:
+                callback(None)
+            return
+
+        async def _query() -> Any:
+            try:
+                data = await self._api_request(
+                    "GET", f"/v2/groups/{group_openid}/info"
+                )
+                if isinstance(data, dict) and data.get("group_openid"):
+                    return {
+                        "group_id": data.get("group_openid"),
+                        "group_name": data.get("group_name", ""),
+                        "member_count": data.get("group_member_num", 0),
+                        "max_member_count": 0,
+                        "group_memo": data.get("group_finger_memo", ""),
+                    }
+            except Exception as e:  # noqa: BLE001
+                # 白名单接口无权限属常态：回退本地兜底
+                self.logger.debug(_t("qqofficial.group_info_official_failed", error=e))
+            return self._local_group_info(group_openid)
+
+        self._run_official_api(_query, callback)
+
+    def _local_group_info(self, group_openid: str) -> dict[str, Any] | None:
+        """本地兜底群信息：配置/动态发现的 openid 视为已互通群。"""
+        known = {str(g) for g in self.groups}
+        if not known or group_openid in known or group_openid in self._discovered_groups:
+            return {
+                "group_id": group_openid,
+                "group_name": group_openid,
+                "member_count": 0,
+                "max_member_count": 0,
+            }
+        return None
 
     def send_pack(self, pack: dict[str, Any]) -> None:
         """OneBot 原始包与官方协议不兼容，忽略并提示。"""

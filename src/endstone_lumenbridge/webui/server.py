@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import gzip
 import hashlib
 import hmac
 import json
@@ -97,6 +98,34 @@ MIME_TYPES = {
     ".svg": "image/svg+xml",
     ".ico": "image/x-icon",
 }
+
+# 允许 gzip 传输压缩的文本资源类型
+_GZIP_SUFFIXES = frozenset({".html", ".js", ".css", ".json", ".svg", ".txt", ".md"})
+# 静态资源 gzip 压缩缓存：path → (mtime_ns, size, compressed)
+_GZIP_CACHE: dict[Path, tuple[int, int, bytes]] = {}
+_GZIP_CACHE_MAX = 64
+_gzip_lock = threading.Lock()
+
+
+def _gzip_static(path: Path, mtime_ns: int, size: int) -> bytes | None:
+    """压缩静态文本资源；结果按文件 (mtime, size) 缓存，文件变更自动失效。"""
+    with _gzip_lock:
+        hit = _GZIP_CACHE.get(path)
+    if hit is not None and hit[0] == mtime_ns and hit[1] == size:
+        return hit[2]
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    compressed = gzip.compress(data, 6)
+    # 压缩无收益（已压缩内容 / 极小文件）时回退原文直发
+    if len(compressed) >= size:
+        return None
+    with _gzip_lock:
+        if len(_GZIP_CACHE) >= _GZIP_CACHE_MAX:
+            _GZIP_CACHE.clear()
+        _GZIP_CACHE[path] = (mtime_ns, size, compressed)
+    return compressed
 
 # 敏感键掩码集合：展示时统一替换为固定 6 个 *（不回显长度），保存时按纯星串自动还原
 SENSITIVE_KEYS = {
@@ -790,8 +819,8 @@ class WebUIServer:
     ) -> None:
         """挂载子插件自定义页面（静态资源经 /plugin-views/ 服务）。
 
-        tab=True 时页面在移动端注册为底栏 tab（icon 为纯文本 emoji/字符），
-        否则进「其它」面板；桌面端侧栏两种都展示。
+        tab=True 时页面在移动端注册为底栏 tab，否则进「其它」面板；
+        桌面端侧栏两种都展示。icon 为内置图标名（渲染 SVG）或短文本字符。
         """
         url = f"/plugin-views/{folder}/{relative_path}"
         with self._ext_lock:
@@ -1049,36 +1078,57 @@ class _RequestHandler(BaseHTTPRequestHandler):
         if not file_path.is_file():
             self._send_json({"code": 404, "msg": _t("webui.msg.not_found")}, 404)
             return
-        # 低危：大文件防护——超过 8MB 直接 413，且分块发送避免全量读入内存
+        # 低危：大文件防护——超过 8MB 直接 413
         try:
-            size = file_path.stat().st_size
+            st = file_path.stat()
         except OSError:
             self._send_json({"code": 404, "msg": _t("webui.msg.not_found")}, 404)
             return
+        size = st.st_size
         if size > 8 * 1024 * 1024:
             self._send_json({"code": 413, "msg": "文件过大"}, 413)
             return
         suffix = file_path.suffix.lower()
         mime = MIME_TYPES.get(suffix, "application/octet-stream")
+        # 强 ETag（大小 + mtime）：js/css 走 no-cache 时重验证命中即回 304，
+        # 升级 UI 后文件 mtime 变化自动失效
+        etag = f'"{size:x}-{st.st_mtime_ns:x}"'
+        cache_hdr = self._static_cache_header(suffix)
+        if self.headers.get("If-None-Match") == etag:
+            self._safe_send_headers(304, [
+                ("ETag", etag),
+                ("Cache-Control", cache_hdr),
+                ("Referrer-Policy", "no-referrer"),
+            ])
+            return
+
         headers = [
             ("Content-Type", mime),
-            ("Content-Length", str(size)),
+            ("ETag", etag),
             ("Referrer-Policy", "no-referrer"),
             ("X-Content-Type-Options", "nosniff"),
         ]
-        if suffix == ".html":
-            # HTML 不缓存，保证插件升级后页面骨架及时更新。
-            # 面板主要部署于内网（127.0.0.1），CSP / X-Frame-Options
-            # 头会静默拦截跨域背景图、内联脚本与 iframe 自定义页。
-            headers.append(("Cache-Control", "no-cache"))
-        # 静态资源缓存策略：图片/图标可长缓存；js/css/html 不缓存，保证插件升级后 UI 及时更新
-        elif suffix in (".png", ".ico"):
-            headers.append(("Cache-Control", "public, max-age=86400"))
-        elif suffix in (".js", ".css"):
-            headers.append(("Cache-Control", "no-cache"))
-        if not self._safe_send_headers(200, headers):
+        headers.append(("Cache-Control", cache_hdr))
+
+        # 文本资源（html/js/css/svg 等）按 Accept-Encoding 协商 gzip：
+        # 压缩结果按 (path, mtime, size) 缓存，热路径零重复压缩开销
+        gz_body: bytes | None = None
+        if (
+            suffix in _GZIP_SUFFIXES
+            and "gzip" in (self.headers.get("Accept-Encoding") or "")
+            and 0 < size <= 2 * 1024 * 1024
+        ):
+            gz_body = _gzip_static(file_path, st.st_mtime_ns, size)
+            if gz_body is not None:
+                headers.append(("Content-Encoding", "gzip"))
+                headers.append(("Vary", "Accept-Encoding"))
+
+        if not self._safe_send_headers(200, headers + [("Content-Length", str(len(gz_body) if gz_body is not None else size))]):
             return
-        # 分块发送（64KB），避免一次性把整个文件读入内存
+        if gz_body is not None:
+            self._safe_write(gz_body)
+            return
+        # 二进制资源分块发送（64KB），避免一次性把整个文件读入内存
         try:
             with file_path.open("rb") as fh:
                 while True:
@@ -1089,6 +1139,19 @@ class _RequestHandler(BaseHTTPRequestHandler):
                         return
         except OSError:
             self.close_connection = True
+
+    @staticmethod
+    def _static_cache_header(suffix: str) -> str:
+        if suffix == ".html":
+            # HTML 不长缓存，保证插件升级后页面骨架及时更新。
+            # 面板主要部署于内网（127.0.0.1），CSP / X-Frame-Options
+            # 头会静默拦截跨域背景图、内联脚本与 iframe 自定义页。
+            return "no-cache"
+        if suffix in (".png", ".ico", ".svg"):
+            return "public, max-age=86400"
+        if suffix in (".js", ".css"):
+            return "no-cache"
+        return "no-cache"
 
     def _check_auth(self, query: dict[str, str]) -> bool:
         header = self.headers.get("Authorization", "")
@@ -2806,6 +2869,25 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 added = chat_filter.import_wordbank(bank)
             except FileNotFoundError:
                 return self._send_json({"code": 404, "msg": _t("webui.msg.chat_filter_no_file")}, 404)
+            except OSError as e:
+                return self._send_json({"code": 500, "msg": _t("webui.msg.chat_filter_import_failed", error=e)}, 500)
+            return self._send_json({
+                "code": 200,
+                "msg": _t("webui.msg.chat_filter_imported", count=added),
+                "data": chat_filter.snapshot(),
+            })
+        if method == "POST" and path == "/api/chat_filter/import_text":
+            # 一键导入第三方词库文本：前端读取 .txt 文件内容直接提交，
+            # 兼容“每行一个”与“中英文逗号分隔”两种格式
+            if chat_filter is None:
+                return self._send_json({"code": 500, "msg": _t("webui.msg.module_unavailable")}, 500)
+            payload = self._read_body()
+            text = str((payload or {}).get("text") or "") if isinstance(payload, dict) else ""
+            name = str((payload or {}).get("name") or "import.txt") if isinstance(payload, dict) else "import.txt"
+            if not text.strip():
+                return self._send_json({"code": 400, "msg": _t("webui.msg.chat_filter_no_file")}, 400)
+            try:
+                added = chat_filter.import_words_text(text, source=Path(name).name)
             except OSError as e:
                 return self._send_json({"code": 500, "msg": _t("webui.msg.chat_filter_import_failed", error=e)}, 500)
             return self._send_json({

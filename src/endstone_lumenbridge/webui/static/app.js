@@ -481,6 +481,172 @@ function syncTabbarEdges() {
   bar.classList.toggle("edge-right", scroller.scrollLeft < max - 1);
 }
 
+/* 子插件 iframe 全宽铺开：负 margin 抵消 layout 的 padding/max-width 限制，
+   内容区横向铺满整个视口（不超屏幕），去掉“方框”束缚感。
+   sidebar 已设 z-index:2，导航仍在 iframe 内容之上可正常点击。 */
+function expandCustomFrame() {
+  const wrap = document.querySelector("#page-custom .iframe-wrap");
+  if (!wrap) return;
+  const r = wrap.getBoundingClientRect();
+  const ml = -Math.round(r.left);
+  const mr = -Math.round(window.innerWidth - r.right);
+  if (ml >= 0 && mr >= 0 && ml < window.innerWidth && mr < window.innerWidth) {
+    wrap.style.marginLeft = ml + "px";
+    wrap.style.marginRight = mr + "px";
+  }
+}
+window.addEventListener("resize", () => {
+  if (document.getElementById("page-custom").style.display !== "none") expandCustomFrame();
+});
+
+/* 子插件（iframe 内）委托主面板顶层显示确认弹窗：
+   iframe 内部的 fixed 弹窗无法超出 iframe 边界，转发到父页面才能真正置顶。 */
+window.addEventListener("message", async (e) => {
+  const d = e.data;
+  if (!d || typeof d !== "object") return;
+  if (e.origin !== window.location.origin) return;
+  if (d.type === "lumen-confirm") {
+    const ok = await customConfirm(String(d.message || ""), d.title ? String(d.title) : undefined);
+    if (e.source) e.source.postMessage({ type: "lumen-confirm-result", id: String(d.id || ""), ok: !!ok }, e.origin);
+  }
+  /* 子插件页面内容高度上报：iframe 高度随内容自适应，
+     页面随主面板一起滚动，不再是被固定高度方框框住的“嵌入式网页” */
+  if (d.type === "lumen-page-height") {
+    const frame = document.getElementById("custom-frame");
+    const h = Math.ceil(Number(d.height) || 0);
+    if (frame && h > 0) frame.style.height = h + "px";
+  }
+  /* 子插件页面（iframe 内）的 toast 委托：iframe 自适应高度后其内部
+     fixed 定位的 toast 会漂到文档底部，统一由主面板顶部 toast 呈现。
+     处理后回执（lumen-toast-ack）：子插件据此判断主面板已显示，
+     否则 350ms 后回退本地顶部显示（兼容未更新的旧主面板） */
+  if (d.type === "lumen-toast") {
+    toast(String(d.message || ""), !!d.err);
+    try {
+      if (e.source) e.source.postMessage({ type: "lumen-toast-ack", id: String(d.id || "") }, e.origin);
+    } catch (err) { /* ignore */ }
+  }
+  /* 子插件弹窗（iframe 内）打开/关闭：
+     - 打开：iframe 外围（含底部导航）盖同色遮罩条，与 iframe 内部遮罩拼成
+       视觉无缝的全屏遮罩（消除“只有 iframe 矩形变暗”的方形边界）；
+       同时把 iframe 顶端滚到视口顶部附近，让弹窗卡片尽量上移。
+     - 关闭：撤遮罩并恢复打开前的滚动位置。 */
+  if (d.type === "lumen-modal-open") subpluginModalOpen();
+  if (d.type === "lumen-modal-close") subpluginModalClose();
+});
+
+/* ---- 子插件弹窗的外围遮罩与滚动配合 ---- */
+let _subModalOpen = false;
+function _subDimLayout() {
+  const wrap = document.getElementById("subplugin-dim");
+  const frame = document.getElementById("custom-frame");
+  if (!wrap || !frame) return;
+  const r = frame.getBoundingClientRect();
+  const W = window.innerWidth;
+  const H = window.innerHeight;
+  const y1 = Math.max(0, r.top);
+  const y2 = Math.min(H, r.bottom);
+  const set = (pos, l, t, w, h) => {
+    const el = wrap.querySelector('[data-pos="' + pos + '"]');
+    if (!el) return;
+    el.style.left = l + "px";
+    el.style.top = t + "px";
+    el.style.width = Math.max(0, w) + "px";
+    el.style.height = Math.max(0, h) + "px";
+  };
+  set("top", 0, 0, W, r.top);
+  set("bottom", 0, r.bottom, W, H - r.bottom);
+  set("left", 0, y1, r.left, y2 - y1);
+  set("right", r.right, y1, W - r.right, y2 - y1);
+}
+function subpluginModalOpen() {
+  const frame = document.getElementById("custom-frame");
+  if (!frame) return;
+  _subModalOpen = true;
+  const dim = document.getElementById("subplugin-dim");
+  if (dim) {
+    dim.classList.add("show");
+    _subDimLayout();
+    window.addEventListener("scroll", _subDimLayout, { passive: true });
+    window.addEventListener("resize", _subDimLayout);
+  }
+  /* 弹窗卡片尽量上移：仅当 iframe 顶端在视口内偏下（页面顶部标题区域）时
+     瞬时滚动把它带到视口顶部附近；用户已滚进页面深处时（iframe 顶端在视口外）
+     不滚动——卡片由子插件 rAF 钉在可视区顶部，避免任何滚动突跳 */
+  const t = frame.getBoundingClientRect().top;
+  if (t > 10 && t < 400) window.scrollBy(0, t - 10);
+  /* 锁定背景滚动（标准模态行为）：
+     1. 弹窗内滚动不再链式带动父页面（此前滚到底会拖着整页滚）；
+     2. 卡片钉在可视区完全静止——此前 rAF 每帧跟随父页面滚动重写位置，
+        按钮在 mousedown→mouseup 之间移位会导致 click 丢失（保存按钮"点了没反应"）。
+     桌面端锁定后滚动条消失会引起 ~15px 横移，用等宽 padding 补偿。 */
+  const doc = document.documentElement;
+  const sbw = window.innerWidth - doc.clientWidth;
+  doc.style.overflow = "hidden";
+  doc.style.paddingRight = sbw > 0 ? sbw + "px" : "";
+}
+function subpluginModalClose() {
+  const dim = document.getElementById("subplugin-dim");
+  if (dim) dim.classList.remove("show");
+  window.removeEventListener("scroll", _subDimLayout);
+  window.removeEventListener("resize", _subDimLayout);
+  const doc = document.documentElement;
+  doc.style.overflow = "";
+  doc.style.paddingRight = "";
+  _subModalOpen = false;
+}
+/* 点击 iframe 外的遮罩条 = 点击弹窗外区域：转发关闭指令给 iframe 内的弹窗 */
+(function initSubpluginDim() {
+  document.addEventListener("DOMContentLoaded", () => {
+    const dim = document.getElementById("subplugin-dim");
+    if (!dim) return;
+    dim.addEventListener("click", () => {
+      if (!_subModalOpen) return;
+      const frame = document.getElementById("custom-frame");
+      try {
+        if (frame && frame.contentWindow) {
+          frame.contentWindow.postMessage({ type: "lumen-modal-dismiss" }, window.location.origin);
+        }
+      } catch (e) { /* 跨域等异常：忽略 */ }
+    });
+  });
+})();
+
+/* 注入到子插件页面（同源 iframe）的自适应高度上报脚本：
+   内容尺寸变化（ResizeObserver）+ 结构变化兜底轮询，实时把文档高度
+   postMessage 给主面板；脚本自身幂等，重复注入无副作用。 */
+const CUSTOM_AUTOHEIGHT_SCRIPT =
+  "(function(){if(window.__lumenAutoHeight)return;window.__lumenAutoHeight=1;" +
+  "var last=0;function report(){try{var b=document.body,d=document.documentElement;if(!b)return;" +
+  "var h=Math.max(b.scrollHeight,b.offsetHeight||0,d.scrollHeight,d.offsetHeight||0);" +
+  "if(Math.abs(h-last)<1)return;last=h;" +
+  "parent.postMessage({type:'lumen-page-height',height:h},location.origin);}catch(e){}}" +
+  "window.addEventListener('load',report);window.addEventListener('resize',report);" +
+  "if(window.ResizeObserver){try{var ro=new ResizeObserver(report);" +
+  "ro.observe(document.body);ro.observe(document.documentElement);}catch(e){}}" +
+  "setInterval(report,800);})();";
+
+/* 子插件页面加载完成后注入自适应高度脚本（同源可写 contentDocument；
+   万一注入失败则保持 CSS 兜底高度，行为回退为原固定高度内滚动）。 */
+(function initCustomFrameAutoHeight() {
+  document.addEventListener("DOMContentLoaded", () => {
+    const frame = document.getElementById("custom-frame");
+    if (!frame) return;
+    frame.addEventListener("load", function () {
+      expandCustomFrame();
+      /* 兜底：子插件页面重载（如保存后刷新）时弹窗已不复存在，撤掉外围遮罩 */
+      if (_subModalOpen) subpluginModalClose();
+      try {
+        const doc = this.contentDocument;
+        if (!doc || !doc.body) return;
+        const s = doc.createElement("script");
+        s.textContent = CUSTOM_AUTOHEIGHT_SCRIPT;
+        (doc.head || doc.documentElement).appendChild(s);
+      } catch (e) { /* 跨域等异常：维持 CSS 兜底固定高度 */ }
+    });
+  });
+})();
+
 function nav(page, customUrl, customTitle) {
   const target = customUrl ? "custom" : page;
   if (currentPage === target && !customUrl) return;
@@ -511,7 +677,10 @@ function nav(page, customUrl, customTitle) {
 
   if (customUrl) {
     document.getElementById("custom-title").textContent = customTitle || t("subplugins.custom_page_default_title");
-    document.getElementById("custom-frame").src = customUrl + (customUrl.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOKEN);
+    const frame = document.getElementById("custom-frame");
+    frame.style.height = "";  // 清除旧页面的自适应高度，加载前先用 CSS 兜底高度
+    frame.src = customUrl + (customUrl.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOKEN);
+    expandCustomFrame();
     return;
   }
   if (page === "dashboard") { loadDashboard(); startMetricsPolling(); }
@@ -974,6 +1143,7 @@ function bindCodeEditor(hostId, codeId, textareaId, language, getValue, setValue
    secret 密码遮罩、数字滑块、chips 列表编辑器（批量导入）、多选复选框组、
    textarea 全屏编辑、未保存拦截、Ctrl/Cmd+S 快捷保存 */
 let pcDirty = false;            // 未保存更改标记
+let pcInitialValues = null;     // 打开配置时的初始值快照（key → value），用于还原检测
 let pcEditorSourceId = "";      // 全屏编辑器回写目标控件 id
 
 const PC_RESTORE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>';
@@ -1011,11 +1181,37 @@ function renderPluginConfig(schema) {
   items.forEach((item, index) => {
     if (item.type === "array") pcRenderArrayChips(index);
   });
-  // 事件委托：任意输入即视为脏 + 刷新恢复默认按钮可见性
-  box.oninput = () => { pcSetDirty(true); pcUpdateRestoreButtons(); };
-  box.onchange = () => { pcSetDirty(true); pcUpdateRestoreButtons(); };
+  // 初始值快照：脏检测改为「当前值 vs 快照」对比，改回去（4→8→4）能正确清除标记
+  pcInitialValues = pcSnapshotValues();
+  // 事件委托：任意输入后按值对比刷新脏标记 + 恢复默认按钮可见性
+  box.oninput = () => { pcRefreshDirty(); pcUpdateRestoreButtons(); };
+  box.onchange = () => { pcRefreshDirty(); pcUpdateRestoreButtons(); };
   pcSetDirty(false);
   pcUpdateRestoreButtons();
+}
+
+/* 收集全部控件当前值（section/file 跳过）作为快照 */
+function pcSnapshotValues() {
+  const schema = editingPluginSchema;
+  const out = {};
+  if (!schema || !Array.isArray(schema.items)) return out;
+  schema.items.forEach((item, index) => {
+    if (item.type === "file" || item.type === "section") return;
+    const v = pcControlValue(item, index);
+    if (v !== undefined) out[item.key] = JSON.stringify(v);
+  });
+  return out;
+}
+
+/* 按值对比刷新脏标记：有任一字段 ≠ 初始快照，或存在待上传文件 → 脏 */
+function pcRefreshDirty() {
+  if (!pcInitialValues) return;
+  const cur = pcSnapshotValues();
+  let dirty = Object.keys(editingPluginPendingFiles || {}).length > 0;
+  for (const k in pcInitialValues) {
+    if (pcInitialValues[k] !== cur[k]) { dirty = true; break; }
+  }
+  pcSetDirty(dirty);
 }
 
 function pcRenderRow(item, index) {
@@ -1196,7 +1392,7 @@ function pcRestoreDefault(index) {
   if (!schema || !schema.items[index]) return;
   const item = schema.items[index];
   pcSetControlValue(item, index, item.default);
-  pcSetDirty(true);
+  pcRefreshDirty();
   pcUpdateRestoreButtons();
 }
 
@@ -1208,7 +1404,7 @@ async function pcResetAll() {
     if (item.type === "section" || item.type === "file" || item.default === undefined) return;
     pcSetControlValue(item, index, item.default);
   });
-  pcSetDirty(true);
+  pcRefreshDirty();
   pcUpdateRestoreButtons();
 }
 
@@ -1284,7 +1480,7 @@ function pcArraySet(index, arr) {
   const el = document.getElementById(`plugin-config-${index}`);
   if (el) el.value = JSON.stringify(arr);
   pcRenderArrayChips(index);
-  pcSetDirty(true);
+  pcRefreshDirty();
   pcUpdateRestoreButtons();
 }
 
@@ -1354,7 +1550,7 @@ function pcEditorApply() {
   const el = document.getElementById(pcEditorSourceId);
   if (el) el.value = document.getElementById("pc-editor-textarea").value;
   closeModal("pc-editor-modal");
-  pcSetDirty(true);
+  pcRefreshDirty();
   pcUpdateRestoreButtons();
 }
 
@@ -1373,6 +1569,7 @@ async function openPluginConfig(name) {
   editingPluginConfig = name;
   editingPluginSchema = null;
   editingPluginPendingFiles = {}; // 清空暂存文件
+  pcInitialValues = null;         // 清空旧快照（加载失败时不误用上一个插件的快照）
   pcSetDirty(false);
   const searchEl = document.getElementById("pc-search");
   if (searchEl) searchEl.value = "";
@@ -1446,6 +1643,7 @@ function handlePluginConfigFileChange(inputEl) {
   const key = inputEl.dataset.key;
   // 暂存 File 对象：点保存才上传，点取消则丢弃
   editingPluginPendingFiles[key] = file;
+  pcRefreshDirty(); // 选择文件即视为有未保存更改
   // 本地预览（不上传）
   if (previewEl) {
     if (file.type.startsWith("image/")) {
@@ -1626,6 +1824,11 @@ function onSelectOption(optEl) {
   const value = optEl.dataset.value;
   const label = optEl.dataset.label;
   selectOption(host, value, label);
+  // 子插件配置弹窗内的下拉：隐藏 input 改值不发原生 change 事件，需手动刷新脏标记
+  if (id && id.indexOf("plugin-config-") === 0) {
+    pcRefreshDirty();
+    pcUpdateRestoreButtons();
+  }
   if (id === "rule-preset" && value) {
     const input = document.getElementById("rule-pattern");
     if (input) input.value = value;
@@ -2881,6 +3084,18 @@ async function saveEditingFile() {
 /* 子插件注册到底栏 tab 的自定义页面默认图标（registerPage 未传 icon 时使用） */
 const CUSTOM_TAB_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg>';
 
+/* 子插件 registerPage(icon=) 可用的命名 SVG 图标（与主面板 tab 同一套描边风格）；
+   icon 值命中表内名称则渲染 SVG，否则按纯文本字符/emoji 处理 */
+const CUSTOM_TAB_ICONS = {
+  model: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg>',
+  bot: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 8V4M9 4h6"/><path d="M9 13v2M15 13v2"/></svg>',
+  chat: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
+  shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
+  spark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9L19 15z"/></svg>',
+  gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
+  chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 15v-4M12 15V8M17 15v-6"/></svg>'
+};
+
 async function loadCustomPages() {
   let pages = [];
   try {
@@ -2898,8 +3113,9 @@ async function loadCustomPages() {
         ${esc(p.title)}</button>`).join("");
   }
 
+  /* 「其它」按钮仅在该面板确实有页面时才显示，避免空入口撑稀底栏 */
   const tabMore = document.getElementById("tab-more");
-  if (tabMore) tabMore.style.display = "";
+  if (tabMore) tabMore.style.display = pages.some((p) => !p.tab) ? "" : "none";
 
   /* tab=True 的页面注册为底栏 tab（插到「其它」之前）；其余进「其它」面板。
      重新加载时先移除旧按钮，避免子插件热重载后重复堆积 */
@@ -2914,9 +3130,9 @@ async function loadCustomPages() {
       btn.dataset.customUrl = p.url || "";
       btn.dataset.customTitle = p.title || "";
       btn.title = p.title || "";
-      btn.innerHTML = CUSTOM_TAB_ICON_SVG;
-      if (p.icon) {
-        // icon 为子插件提供的纯文本字符/emoji，textContent 注入防 XSS
+      // 命名图标 → 同风格 SVG；否则默认 SVG；显式传入的其它短文本按字符图标渲染
+      btn.innerHTML = CUSTOM_TAB_ICONS[p.icon] || CUSTOM_TAB_ICON_SVG;
+      if (p.icon && !CUSTOM_TAB_ICONS[p.icon]) {
         const iconEl = document.createElement("span");
         iconEl.className = "tab-icon-text";
         iconEl.textContent = String(p.icon);
@@ -3971,7 +4187,7 @@ function openUpdateCenter(pending) {
         </div>
         <div class="spu-changelog">${esc(t("marketplace.update_loading_versions"))}</div>
         <div class="spu-actions-row">
-          <select data-spu-version disabled><option value="${esc(latest)}">v${esc(latest)}</option></select>
+          <div class="spu-version-select loading" data-spu-version>${buildSelect("spu-ver-" + esc(name), [{ value: latest, label: "v" + esc(latest) }], latest)}</div>
           <button class="btn small" data-spu-update data-name="${esc(name)}">${esc(t("marketplace.update_card_button"))}</button>
         </div>
       </div>`;
@@ -4017,17 +4233,19 @@ async function loadSpuVersions(name, info) {
     changelogEl.textContent = text || t("marketplace.no_changelog");
   }
   if (select) {
+    let opts;
     if (newer.length) {
-      select.innerHTML = newer.map((v, idx) => {
-        const ver = String(v.version || "");
-        return `<option value="${esc(ver)}"${idx === 0 ? " selected" : ""}>v${esc(ver)}</option>`;
-      }).join("");
+      opts = newer.map((v) => ({ value: String(v.version || ""), label: "v" + String(v.version || "") }));
     } else {
       // 版本列表拉取失败：至少保留"更新到检查到的最新版"
       const fallback = String((info && info.latest_version) || "");
-      select.innerHTML = `<option value="${esc(fallback)}">v${esc(fallback || "?")}</option>`;
+      opts = [{ value: fallback, label: "v" + (fallback || "?") }];
     }
-    select.disabled = false;
+    // 重建自定义下拉（.lumen-select），替代原生 <select>
+    const inner = select.querySelector(".lumen-select");
+    const selId = inner ? String(inner.getAttribute("data-select") || "") : "spu-ver";
+    select.innerHTML = buildSelect(selId, opts, opts[0].value);
+    select.classList.remove("loading");
   }
 }
 
@@ -4055,7 +4273,7 @@ async function updateSpuFromCard(btn) {
   const card = btn.closest(".spu-card");
   if (!card) return;
   const name = card.dataset.spuName || "";
-  const select = card.querySelector("[data-spu-version]");
+  const select = card.querySelector("[data-spu-version] input[type=hidden]");
   const version = select ? String(select.value || "") : "";
   if (!name) return;
   if (!await customConfirm(t("marketplace.update_confirm", { name }))) return;
@@ -5198,6 +5416,33 @@ async function cfImportBank(index) {
   if (!file) return;
   try {
     const res = await api("POST", "/api/chat_filter/import", { file });
+    if (res.data) chatFilterData = res.data;
+    renderChatFilter();
+    toast(res.msg || t("chatfilter.bank_imported_ok"));
+  } catch (e) {
+    toast(e.message || t("chatfilter.save_failed"), true);
+  }
+}
+
+/* 一键导入第三方 .txt 词库：前端读文件文本提交后端解析
+   （兼容“每行一个”与“中英文逗号分隔”两种格式，自动去重） */
+async function cfImportTextFile(input) {
+  const file = input.files && input.files[0];
+  input.value = "";  // 允许重复选择同一文件
+  if (!file) return;
+  if (file.size > 8 * 1024 * 1024) {
+    toast(t("chatfilter.upload_too_large"), true);
+    return;
+  }
+  let text = "";
+  try {
+    text = await file.text();
+  } catch (e) {
+    toast(t("chatfilter.upload_read_failed"), true);
+    return;
+  }
+  try {
+    const res = await api("POST", "/api/chat_filter/import_text", { text, name: file.name });
     if (res.data) chatFilterData = res.data;
     renderChatFilter();
     toast(res.msg || t("chatfilter.bank_imported_ok"));

@@ -452,6 +452,37 @@ def on_version(data):
         lumen.logger.info(f"协议端：{data.get('app_name')} {data.get('app_version')}")
 ```
 
+### QQ 官方机器人的 action 支持
+
+个人号适配器（OneBot 协议端）天然支持全量 OneBot action；QQ 官方适配器自 v1.0.4 起实现了 `call_action` 分发，下表动作会映射到 QQ 开放平台官方端点，未列出的动作回调 `None` 并记录警告日志（官方协议无对应能力，如踢人、设群名片）：
+
+| action | 官方端点 | 说明与限制 |
+|--------|----------|-----------|
+| send_group_msg / send_private_msg | /v2/groups 或 /v2/users messages | 等价便捷方法 |
+| delete_msg | DELETE /v2/groups/{g}/messages/{id} | 仅群聊；自己的消息限 2 分钟内，管理员可撤成员消息 |
+| set_group_add_request | POST /v2/groups/{g}/approval_join_request/{m} | 需群管理员 |
+| **set_group_ban** | POST /v2/groups/{g}/restrict_chat_setting | OneBot v11 标准禁言；`duration` 秒（0=解禁），最长 30 天，仅能禁普通成员，需群管理员 |
+| set_group_ban_batch（官方扩展） | 同上 | 批量禁言，`user_ids` 列表单次最多 10 人 |
+| get_group_restrict_chat_setting（官方扩展） | GET /v2/groups/{g}/restrict_chat_setting | 查询全员禁言规则与当前禁言成员列表，需群管理员 |
+| get_group_bot_state（官方扩展） | GET /v2/groups/{g}/bot_state | 查询机器人在群内的角色（member/admin/owner）、主动消息开关；白名单接口 |
+| get_group_join_request_list（官方扩展） | GET /v2/groups/{g}/join_request_list | 拉取待审批入群申请（cursor/limit 分页），需群管理员 |
+| get_group_info | GET /v2/groups/{g}/info | 官方端点优先（白名单），失败自动回退本地兜底 |
+| get_group_list / get_login_info | 本地 | 同便捷方法 |
+
+```python
+# 官方 bot 禁言某成员 10 分钟（group_id 为 group_openid，user_id 为 member_openid）
+lumen.call_action("set_group_ban", {"group_id": gid, "user_id": uid, "duration": 600})
+
+# 解除禁言
+lumen.call_action("set_group_ban", {"group_id": gid, "user_id": uid, "duration": 0})
+
+# 查询群内当前禁言列表
+def on_mute_list(data):
+    for m in (data or {}).get("members", []):
+        lumen.logger.info(f"{m['username']} 禁言至 {m['mute_expire_at']}")
+lumen.call_action("get_group_restrict_chat_setting", {"group_id": gid}, on_mute_list)
+```
+
 ### 消息段构建器
 
 `lumen.msgbuilder` 提供构造 OneBot 消息段的函数。字符串会被 `format_message` 自动转成 text 段，因此发送时可以混用字符串与消息段。

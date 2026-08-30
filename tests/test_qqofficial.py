@@ -18,6 +18,7 @@ import asyncio
 import json
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -1113,6 +1114,10 @@ def main() -> int:
         test_connections_validation,
         test_hub_dual_domain_routing,
         test_whitelist_dual_store,
+        test_set_group_ban_bodies,
+        test_set_group_ban_batch_limit,
+        test_call_action_dispatch,
+        test_get_group_info_official_fallback,
     ]
     for fn in tests:
         print(f"\n== {fn.__name__} ==")
@@ -1130,3 +1135,162 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# ---------------------------------------------------------------- 群管理 API
+def _start_bg_loop() -> tuple[Any, Any]:
+    """后台线程运行事件循环，供 _run_official_api 提交协程。返回 (loop, thread)。"""
+    loop = asyncio.new_event_loop()
+    t = threading.Thread(target=loop.run_forever, daemon=True)
+    t.start()
+    return loop, t
+
+
+def test_set_group_ban_bodies() -> None:
+    """禁言 body 构造：add / del（duration=0 解禁）/ 超 30 天截断 / 负数拒绝。"""
+    ad = make_adapter()
+    calls: list[tuple[str, str, Any]] = []
+
+    async def fake_api(method: str, path: str, body: Any = None) -> Any:
+        calls.append((method, path, body))
+        return {}
+
+    ad._api_request = fake_api  # type: ignore[method-assign]
+    loop, _t = _start_bg_loop()
+    try:
+        ad._loop = loop
+        results: list[Any] = []
+        ad.set_group_ban("GRP1", "MEM1", 600, results.append)
+        for _ in range(50):
+            if results:
+                break
+            time.sleep(0.02)
+        check("ban.add 调用一次", len(calls) == 1)
+        method, path, body = calls[0]
+        check("ban.add 方法+路径", method == "POST" and path == "/v2/groups/GRP1/restrict_chat_setting")
+        m = (body or {}).get("members", [{}])[0]
+        check("ban.add op", m.get("op") == "add" and m.get("member_openid") == "MEM1")
+        check("ban.add 到期格式", bool(m.get("mute_expire_at")) and "+08:00" in m.get("mute_expire_at", ""))
+
+        calls.clear()
+        results.clear()
+        ad.set_group_ban("GRP1", "MEM1", 0, results.append)
+        for _ in range(50):
+            if results:
+                break
+            time.sleep(0.02)
+        m = (calls[0][2] or {}).get("members", [{}])[0]
+        check("ban.del 解禁", m.get("op") == "del" and m.get("mute_expire_at") == "")
+
+        calls.clear()
+        results.clear()
+        ad.set_group_ban("GRP1", "MEM1", 40 * 86400, results.append)
+        for _ in range(50):
+            if results:
+                break
+            time.sleep(0.02)
+        check("ban 超30天仍执行", len(calls) == 1)
+
+        calls.clear()
+        results.clear()
+        ad.set_group_ban("GRP1", "MEM1", -5, results.append)
+        check("ban 负数拒绝且不调 API", len(calls) == 0 and results == [None])
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+
+
+def test_set_group_ban_batch_limit() -> None:
+    """批量禁言：>10 人截断为前 10 人。"""
+    ad = make_adapter()
+    calls: list[Any] = []
+
+    async def fake_api(method: str, path: str, body: Any = None) -> Any:
+        calls.append(body)
+        return {}
+
+    ad._api_request = fake_api  # type: ignore[method-assign]
+    loop, _t = _start_bg_loop()
+    try:
+        ad._loop = loop
+        ad.set_group_ban_batch("GRP1", [f"M{i}" for i in range(13)], 60, lambda _: None)
+        for _ in range(50):
+            if calls:
+                break
+            time.sleep(0.02)
+        members = (calls[0] or {}).get("members", [])
+        check("批量截断为10人", len(members) == 10 and members[0]["member_openid"] == "M0")
+    finally:
+        loop.call_soon_threadsafe(loop.stop())
+
+
+def test_call_action_dispatch() -> None:
+    """call_action 分发：标准/扩展 action 转发官方端点，未知 action 降级回调 None。"""
+    import threading as _threading_local  # noqa: F401  # 确保已导入
+
+    ad = make_adapter()
+    calls: list[tuple[str, str, Any]] = []
+
+    async def fake_api(method: str, path: str, body: Any = None) -> Any:
+        calls.append((method, path, body))
+        if path.endswith("/info"):
+            return {"group_openid": "GRP1", "group_name": "测试群", "group_member_num": 42}
+        return {}
+
+    ad._api_request = fake_api  # type: ignore[method-assign]
+    loop, _t = _start_bg_loop()
+    try:
+        ad._loop = loop
+        # 未知 action → 回调 None
+        got: list[Any] = []
+        ad.call_action("set_group_kick", {"group_id": 1, "user_id": 2}, got.append)
+        check("未知 action 回调 None", got == [None])
+        # get_group_info → 官方端点优先
+        info: list[Any] = []
+        ad.call_action("get_group_info", {"group_id": "GRP1"}, info.append)
+        for _ in range(50):
+            if info:
+                break
+            time.sleep(0.02)
+        check("get_group_info 走官方端点", any(p.endswith("/GRP1/info") for _, p, _ in calls))
+        check(
+            "get_group_info 官方字段",
+            info and info[0].get("group_name") == "测试群" and info[0].get("member_count") == 42,
+        )
+        # get_group_restrict_chat_setting 扩展查询
+        calls.clear()
+        ad.call_action("get_group_restrict_chat_setting", {"group_id": "GRP1"}, lambda _: None)
+        for _ in range(50):
+            if calls:
+                break
+            time.sleep(0.02)
+        check(
+            "restrict_chat_setting 查询",
+            calls and calls[0][1] == "/v2/groups/GRP1/restrict_chat_setting" and calls[0][0] == "GET",
+        )
+    finally:
+        loop.call_soon_threadsafe(loop.stop())
+
+
+def test_get_group_info_official_fallback() -> None:
+    """get_group_info 官方端点失败（白名单限制）时回退本地兜底。"""
+    ad = make_adapter(groups=["GRP1"])
+
+    async def fake_api(method: str, path: str, body: Any = None) -> Any:
+        raise RuntimeError("whitelist denied")
+
+    ad._api_request = fake_api  # type: ignore[method-assign]
+    loop, _t = _start_bg_loop()
+    try:
+        ad._loop = loop
+        info: list[Any] = []
+        ad.call_action("get_group_info", {"group_id": "GRP1"}, info.append)
+        for _ in range(50):
+            if info:
+                break
+            time.sleep(0.02)
+        check(
+            "官方失败回退本地",
+            info and info[0].get("group_id") == "GRP1" and info[0].get("member_count") == 0,
+        )
+    finally:
+        loop.call_soon_threadsafe(loop.stop())

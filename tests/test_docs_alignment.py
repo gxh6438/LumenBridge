@@ -34,6 +34,7 @@ from endstone_lumenbridge.onebot.qqofficial.constants import (
     INTENT_PUBLIC_GUILD_MESSAGES,
     INTENT_PUBLIC_MESSAGES,
 )
+from endstone_lumenbridge.onebot.qqofficial_adapter import QQOfficialAdapter
 from endstone_lumenbridge.onebot.qqofficial.translate import EventTranslator
 
 
@@ -77,6 +78,9 @@ class FakeAdapter:
     def _emit_pack(self, pack):
         # 与真实适配器的 stop() 后 fallback 路径一致：直接同步 emit
         self.bus.emit("onebot.pack", pack)
+
+    # 与真实适配器一致：撤回等官方 API 经 _run_official_api 在事件循环上执行
+    _run_official_api = QQOfficialAdapter._run_official_api
 
 
 class IntentTests(unittest.TestCase):

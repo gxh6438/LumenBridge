@@ -30,6 +30,7 @@ except ImportError:
     for _name in ("endstone", "endstone.color", "endstone.command", "endstone.event", "endstone.plugin"):
         sys.modules.setdefault(_name, types.ModuleType(_name))
 
+from endstone_lumenbridge.onebot.qqofficial_adapter import QQOfficialAdapter
 from endstone_lumenbridge.onebot.qqofficial.translate import EventTranslator
 
 
@@ -73,6 +74,9 @@ class FakeAdapter:
     async def _api_request(self, method, path, body):
         self.api_calls.append((method, path, body))
         return {}
+
+    # 与真实适配器一致：审批回传经 _run_official_api 在事件循环上执行
+    _run_official_api = QQOfficialAdapter._run_official_api
 
 
 class JoinRequestTests(unittest.TestCase):

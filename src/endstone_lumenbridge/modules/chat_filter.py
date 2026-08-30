@@ -232,11 +232,7 @@ class ChatFilterModule:
         imported_sources = {str(w.get("source") or "") for w in self._words}
         for f in sorted(self._wordbanks_dir.glob("*.txt")):
             try:
-                count = sum(
-                    1
-                    for line in f.read_text(encoding="utf-8", errors="replace").splitlines()
-                    if line.strip() and not line.strip().startswith("#")
-                )
+                count = len(self._parse_words(f.read_text(encoding="utf-8", errors="replace")))
             except OSError:
                 continue
             banks.append({
@@ -254,21 +250,38 @@ class ChatFilterModule:
         if not path.is_file():
             raise FileNotFoundError(safe)
         try:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            text = path.read_text(encoding="utf-8", errors="replace")
         except OSError as e:
             raise OSError(str(e)) from e
-        new_words = [
-            ln.strip() for ln in lines
-            if ln.strip() and not ln.strip().startswith("#")
-        ]
+        return self.import_words_text(text, source=safe)
+
+    @staticmethod
+    def _parse_words(text: str) -> list[str]:
+        """解析词库文本：兼容“每行一个”与“逗号分隔（中英文）及换行混排”两种格式，
+        # 开头的行为注释。第三方 txt 词库（如逗号分隔的敏感词表）可直接导入。"""
+        words: list[str] = []
+        for line in str(text or "").splitlines():
+            ln = line.strip()
+            if not ln or ln.startswith("#"):
+                continue
+            for part in re.split(r"[,，、;；]", ln):
+                w = part.strip()
+                if w:
+                    words.append(w)
+        return words
+
+    def import_words_text(self, text: str, source: str = "import") -> int:
+        """导入一段词库文本（去重合并），返回新增词条数。"""
+        new_words = self._parse_words(text)
         if not new_words:
             return 0
+        src = str(source or "import")[:80]
         with self._lock:
             existing = {normalize_text(str(w.get("word") or "")) for w in self._words}
             added = 0
             for w in new_words:
                 if normalize_text(w) not in existing:
-                    self._words.append({"word": w, "type": "plain", "source": safe})
+                    self._words.append({"word": w, "type": "plain", "source": src})
                     existing.add(normalize_text(w))
                     added += 1
             if added:

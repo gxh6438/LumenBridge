@@ -600,8 +600,12 @@ class WebBridge:
         """注册 WebUI 自定义页面。
 
         tab=False（默认）：页面进移动端「其它」面板与桌面侧栏；
-        tab=True：页面额外注册为移动端底栏 tab（滚动条内、「其它」之前），
-        icon 为 tab 上显示的纯文本图标（emoji/字符，缺省用默认图标）。
+        tab=True：页面额外注册为移动端底栏 tab（滚动条内、「其它」之前）。
+        icon 为 tab 图标：传内置图标名（"model"/"bot"/"chat"/"shield"/
+        "spark"/"gear"/"chart"）渲染与主面板同风格的 SVG；
+        传其它短文本则按字符图标显示；缺省用默认图标。
+        注意：页面在 iframe 中经带 token 的 URL 加载，页内引用的相对
+        资源（css/js）不会携带 token，自定义页面须自包含（内联样式与脚本）。
         """
         webui = self._webui
         if webui:
