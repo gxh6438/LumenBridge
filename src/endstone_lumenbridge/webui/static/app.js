@@ -105,6 +105,11 @@ function applyI18n() {
     const text = t(key);
     if (text && text !== key) el.value = text;
   });
+  document.querySelectorAll("[data-i18n-title]").forEach((el) => {
+    const key = el.getAttribute("data-i18n-title");
+    const text = t(key);
+    if (text && text !== key) el.title = text;
+  });
 }
 
 function updateLangButtons() {
@@ -310,6 +315,8 @@ function closeModal(id) {
   if (id === "plugin-config-modal") {
     editingPluginPendingFiles = {};
   }
+  // 关闭文件弹窗时解除编辑器 live 标记，恢复外层玻璃模糊
+  if (id === "files-modal") setEditorLive("file-editor-host", false);
   const el = document.getElementById(id);
   if (el) el.classList.remove("show");
 }
@@ -481,16 +488,33 @@ function syncTabbarEdges() {
   bar.classList.toggle("edge-right", scroller.scrollLeft < max - 1);
 }
 
-/* 子插件 iframe 全宽铺开：负 margin 抵消 layout 的 padding/max-width 限制，
-   内容区横向铺满整个视口（不超屏幕），去掉“方框”束缚感。
-   sidebar 已设 z-index:2，导航仍在 iframe 内容之上可正常点击。 */
+/* 子插件 iframe 全宽铺开：
+   - 移动端（≤860px，侧栏隐藏）：负 margin 抵消 layout 的左右 padding，
+     内容区横向铺满整个视口，与底部导航栏同宽，去掉“方框”束缚感；
+   - 桌面端：保持与普通页面一致的 .main 内容宽度，不铺到侧栏底下。
+   幂等性：本函数会被反复调用（nav 切换 + iframe load + resize），
+   必须先清掉旧负 margin 再测量——若上次已把 wrap 推到视口边缘，
+   直接测量会得到 left=0，把 margin 错误重置为 0。清除后读取
+   getBoundingClientRect 会强制同步重排，拿到的是无负 margin 的
+   原始位置，重复调用结果稳定。
+   守卫条件：wrap 正常位于视口内（r.left ≥ 0 且 r.right ≤ 视口宽），
+   即 ml/mr 均为非正数（负 margin 把它推到视口边缘），且偏移量在
+   一个视口宽以内（防御 display:none 时的全零矩形等异常值）。 */
 function expandCustomFrame() {
   const wrap = document.querySelector("#page-custom .iframe-wrap");
   if (!wrap) return;
+  if (!window.matchMedia("(max-width: 860px)").matches) {
+    // 桌面端不铺开：清掉可能在移动端留下的负 margin，恢复 .main 宽度
+    wrap.style.marginLeft = "";
+    wrap.style.marginRight = "";
+    return;
+  }
+  wrap.style.marginLeft = "";
+  wrap.style.marginRight = "";
   const r = wrap.getBoundingClientRect();
   const ml = -Math.round(r.left);
   const mr = -Math.round(window.innerWidth - r.right);
-  if (ml >= 0 && mr >= 0 && ml < window.innerWidth && mr < window.innerWidth) {
+  if (ml <= 0 && mr <= 0 && -ml < window.innerWidth && -mr < window.innerWidth) {
     wrap.style.marginLeft = ml + "px";
     wrap.style.marginRight = mr + "px";
   }
@@ -510,11 +534,24 @@ window.addEventListener("message", async (e) => {
     if (e.source) e.source.postMessage({ type: "lumen-confirm-result", id: String(d.id || ""), ok: !!ok }, e.origin);
   }
   /* 子插件页面内容高度上报：iframe 高度随内容自适应，
-     页面随主面板一起滚动，不再是被固定高度方框框住的“嵌入式网页” */
+     页面随主面板一起滚动，不再是被固定高度方框框住的“嵌入式网页”。
+     seq 校验：仅采纳当前加载序号的上报——切换页面时旧文档的 800ms
+     轮询在卸载前仍可能发来上一个页面（更高）的高度，丢弃以免新页面
+     继承旧高度而出现大片空白滚动区。
+     满屏下限：短内容/满屏型（height:100%）页面的上报偏小甚至只有
+     标题高度（内容不在文档流里），若照单全收 iframe 会“截断”在底栏
+     上方一段距离处。下限 = 视口高 - iframe 顶部位置，保证页面至少
+     铺满到视口底部；配合 .layout 的 padding-bottom，滚动时内容从
+     底部导航栏下面穿过（导航栏悬浮其上）。 */
   if (d.type === "lumen-page-height") {
     const frame = document.getElementById("custom-frame");
     const h = Math.ceil(Number(d.height) || 0);
-    if (frame && h > 0) frame.style.height = h + "px";
+    if (!frame || h <= 0) return;
+    if (e.source !== frame.contentWindow) return;
+    if (String(d.seq || "") !== String(frame.dataset.seq || "")) return;
+    const absTop = frame.getBoundingClientRect().top + (window.pageYOffset || 0);
+    const minFull = Math.max(0, Math.ceil(window.innerHeight - absTop));
+    frame.style.height = Math.max(h, minFull) + "px";
   }
   /* 子插件页面（iframe 内）的 toast 委托：iframe 自适应高度后其内部
      fixed 定位的 toast 会漂到文档底部，统一由主面板顶部 toast 呈现。
@@ -537,6 +574,7 @@ window.addEventListener("message", async (e) => {
 
 /* ---- 子插件弹窗的外围遮罩与滚动配合 ---- */
 let _subModalOpen = false;
+let customPageSeq = 0;  // 自定义页面加载序号：标识 #custom-frame 当前文档，过期高度上报据此作废
 function _subDimLayout() {
   const wrap = document.getElementById("subplugin-dim");
   const frame = document.getElementById("custom-frame");
@@ -614,20 +652,59 @@ function subpluginModalClose() {
 
 /* 注入到子插件页面（同源 iframe）的自适应高度上报脚本：
    内容尺寸变化（ResizeObserver）+ 结构变化兜底轮询，实时把文档高度
-   postMessage 给主面板；脚本自身幂等，重复注入无副作用。 */
+   postMessage 给主面板；脚本自身幂等，重复注入无副作用。
+   高度测量：以 body 末尾哨兵元素的位置为准——documentElement 的
+   scrollHeight/offsetHeight 永远不小于 iframe 视口（即 iframe 元素当前
+   高度），会导致“只增不减”：页面切到更矮的内容后高度收不回来；
+   body{min-height:100vh} 的页面同理被视口撑住。哨兵位于正文流末尾，
+   其文档坐标即真实内容高度，与 iframe 当前多高无关。__LUMEN_SEQ__ 由
+   主面板注入时替换为本次加载序号，过期文档的上报会被主面板丢弃。
+   幂等标志用 __lumenAutoHeightSentinel 而非 __lumenAutoHeight：
+   旧版子插件页面自带一份旧上报脚本（scrollHeight 测量、无 seq），
+   会先抢占 __lumenAutoHeight 导致本脚本被“幂等”挡住、从未安装——
+   高度上报整体失效，iframe 卡在 CSS 兜底高度上。使用独立标志后，
+   新旧脚本互不干扰：旧脚本的上报无 seq，会被主面板的 seq 校验丢弃，
+   无副作用。 */
 const CUSTOM_AUTOHEIGHT_SCRIPT =
-  "(function(){if(window.__lumenAutoHeight)return;window.__lumenAutoHeight=1;" +
-  "var last=0;function report(){try{var b=document.body,d=document.documentElement;if(!b)return;" +
-  "var h=Math.max(b.scrollHeight,b.offsetHeight||0,d.scrollHeight,d.offsetHeight||0);" +
+  "(function(){if(window.__lumenAutoHeightSentinel)return;window.__lumenAutoHeightSentinel=1;" +
+  "var SEQ='__LUMEN_SEQ__',last=0,sentinel=null;" +
+  "function measure(){var b=document.body;if(!b)return 0;" +
+  "if(!sentinel||sentinel.parentNode!==b){" +
+  "sentinel=document.createElement('div');sentinel.setAttribute('aria-hidden','true');" +
+  "sentinel.style.cssText='display:block;height:0;padding:0;margin:0;border:0;clear:both;visibility:hidden;pointer-events:none;';" +
+  "b.appendChild(sentinel);}" +
+  /* 哨兵位于 body 最后一个子元素之后，但 body 自身的 padding-bottom /
+     border-bottom 在哨兵之后，不计入哨兵位置——差值会让 iframe 比内容
+     矮（如 body{padding-bottom:28px}），body 形成微型内部滚动区：
+     移动端 iframe 手势在内部滚动耗尽后不会链式传播到主文档（需松手
+     再滑），呈现“两段式滚动”的嵌入感。故必须补上 body 的下边距。 */
+  "var h=sentinel.getBoundingClientRect().top+(window.pageYOffset||0);" +
+  "try{var cs=window.getComputedStyle(b);" +
+  "h+=(parseFloat(cs.paddingBottom)||0)+(parseFloat(cs.borderBottomWidth)||0);}catch(e){}" +
+  "h=Math.ceil(h);" +
+  "if(!(h>0))h=Math.max(b.scrollHeight,b.offsetHeight||0);" +
+  "return h;}" +
+  "function report(){try{var h=measure();if(!h)return;" +
   "if(Math.abs(h-last)<1)return;last=h;" +
-  "parent.postMessage({type:'lumen-page-height',height:h},location.origin);}catch(e){}}" +
+  "parent.postMessage({type:'lumen-page-height',height:h,seq:SEQ},location.origin);}catch(e){}}" +
   "window.addEventListener('load',report);window.addEventListener('resize',report);" +
   "if(window.ResizeObserver){try{var ro=new ResizeObserver(report);" +
   "ro.observe(document.body);ro.observe(document.documentElement);}catch(e){}}" +
-  "setInterval(report,800);})();";
+  "setInterval(report,800);report();})();";
 
-/* 子插件页面加载完成后注入自适应高度脚本（同源可写 contentDocument；
-   万一注入失败则保持 CSS 兜底高度，行为回退为原固定高度内滚动）。 */
+/* 子插件页面加载完成后注入两样东西（同源可写 contentDocument；
+   万一注入失败则保持 CSS 兜底高度，行为回退为原固定高度内滚动）：
+   1. 融合基础样式：画布透明（与主面板背景无缝衔接，不再是一块自带底色的
+      “嵌入网页方框”）。注意不能注入 height:auto——满屏型页面
+      （html,body{height:100%} + absolute 内容）会因 body 塌缩导致
+      absolute 内容区高度归零、内容全被裁掉；这类页面应保持
+      height:100%，由主面板的满屏下限把 iframe 撑到视口底部。
+      需要自定义页面背景的子插件可用内联样式覆盖（内联 !important
+      优先级最高）：<body style="background:#fff !important">。
+   2. 自适应高度上报脚本。注入在子插件自己的 <style> 之后，等优先级下后者胜出。
+   每次加载把 frame.dataset.seq 烘入脚本：主面板据此区分新旧文档的上报。 */
+const CUSTOM_BASE_STYLE =
+  "html,body{background:transparent!important}";
 (function initCustomFrameAutoHeight() {
   document.addEventListener("DOMContentLoaded", () => {
     const frame = document.getElementById("custom-frame");
@@ -639,8 +716,11 @@ const CUSTOM_AUTOHEIGHT_SCRIPT =
       try {
         const doc = this.contentDocument;
         if (!doc || !doc.body) return;
+        const base = doc.createElement("style");
+        base.textContent = CUSTOM_BASE_STYLE;
+        (doc.head || doc.documentElement).appendChild(base);
         const s = doc.createElement("script");
-        s.textContent = CUSTOM_AUTOHEIGHT_SCRIPT;
+        s.textContent = CUSTOM_AUTOHEIGHT_SCRIPT.replace(/__LUMEN_SEQ__/g, this.dataset.seq || "");
         (doc.head || doc.documentElement).appendChild(s);
       } catch (e) { /* 跨域等异常：维持 CSS 兜底固定高度 */ }
     });
@@ -678,6 +758,7 @@ function nav(page, customUrl, customTitle) {
   if (customUrl) {
     document.getElementById("custom-title").textContent = customTitle || t("subplugins.custom_page_default_title");
     const frame = document.getElementById("custom-frame");
+    frame.dataset.seq = String(++customPageSeq);  // 新加载序号：旧页面的高度上报一律作废
     frame.style.height = "";  // 清除旧页面的自适应高度，加载前先用 CSS 兜底高度
     frame.src = customUrl + (customUrl.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOKEN);
     expandCustomFrame();
@@ -1035,6 +1116,7 @@ function setConfigMode(mode) {
   document.getElementById("seg-json").classList.toggle("active", mode === "json");
   document.getElementById("config-form").style.display = mode === "form" ? "block" : "none";
   document.getElementById("config-json-wrap").style.display = mode === "json" ? "block" : "none";
+  setEditorLive("config-code-host", mode === "json");
   const configNav = document.getElementById("config-nav");
   if (configNav) configNav.style.display = mode === "form" ? "flex" : "none";
   if (mode === "json") {
@@ -1099,31 +1181,65 @@ function bindCodeEditor(hostId, codeId, textareaId, language, getValue, setValue
   ta.style.display = "block";
   code.className = "language-" + language;
 
+  // 行号槽：行数或位数变化时才重建，滚动时仅同步 scrollTop
+  const gutter = host.querySelector(".code-gutter");
+  let gutterLines = 0;
+  const syncGutter = (text) => {
+    if (!gutter) return;
+    const n = text ? text.split("\n").length : 1;
+    if (n !== gutterLines) {
+      gutterLines = n;
+      const nums = new Array(n);
+      for (let i = 1; i <= n; i++) nums[i - 1] = i;
+      gutter.textContent = nums.join("\n");
+    }
+    // 宽度按行号位数随等宽字体 ch 计算，位数变化才写 style
+    const digits = Math.max(2, String(n).length);
+    const w = `calc(${digits}ch + 20px)`;
+    if (host.style.getPropertyValue("--gutter-w") !== w) host.style.setProperty("--gutter-w", w);
+    host.classList.add("has-gutter");
+  };
+
   const sync = () => {
-    code.innerHTML = highlightCode(getValue(), language);
+    const text = getValue();
+    code.innerHTML = highlightCode(text, language);
+    syncGutter(text);
   };
   ta.value = getValue();
   sync();
 
-  // 防抖高亮：输入时立即同步 value，但高亮重绘延迟 200ms 合并，
-  // 避免每次按键都全量跑 Prism 正则 + innerHTML 替换导致输入卡顿。
+  // 高亮调度：小文档跟帧重绘（<60k 字符，Prism 耗时 <1 帧），输入/删除即时可见，
+  // 光标与可见文字不再脱节；大文档退化为 300ms 防抖，避免全量高亮阻塞输入。
   // timer 挂在宿主元素上，重绑定时 openFileEditor 可清理旧任务避免竞态
   host._lumenHlTimer = null;
   let rafScheduled = false;
   const scheduleHighlight = () => {
-    if (host._lumenHlTimer) clearTimeout(host._lumenHlTimer);
-    if (rafScheduled) return;
-    rafScheduled = true;
-    requestAnimationFrame(() => {
-      rafScheduled = false;
+    if (ta.value.length < 60000) {
+      if (rafScheduled) return;
+      rafScheduled = true;
+      requestAnimationFrame(() => {
+        rafScheduled = false;
+        if (host._lumenHlTimer) { clearTimeout(host._lumenHlTimer); host._lumenHlTimer = null; }
+        sync();
+      });
+    } else {
+      if (host._lumenHlTimer) clearTimeout(host._lumenHlTimer);
       host._lumenHlTimer = setTimeout(() => {
         host._lumenHlTimer = null;
         sync();
-      }, 200);
-    });
+      }, 300);
+    }
   };
 
   ta.addEventListener("input", () => {
+    setValue(ta.value);
+    scheduleHighlight();
+  });
+  // Tab 键在编辑器内插入两个空格（YAML 不允许 tab 字符），不再跳出焦点
+  ta.addEventListener("keydown", (e) => {
+    if (e.key !== "Tab") return;
+    e.preventDefault();
+    ta.setRangeText("  ", ta.selectionStart, ta.selectionEnd, "end");
     setValue(ta.value);
     scheduleHighlight();
   });
@@ -1133,8 +1249,16 @@ function bindCodeEditor(hostId, codeId, textareaId, language, getValue, setValue
       pre.scrollTop = ta.scrollTop;
       pre.scrollLeft = ta.scrollLeft;
     }
-  });
+    if (gutter) gutter.scrollTop = ta.scrollTop;
+  }, { passive: true });
   return { refresh: sync };
+}
+
+/* 标记代码编辑器是否正在显示：可见时外层玻璃容器禁用 backdrop-filter（性能），
+   隐藏时恢复毛玻璃质感。 */
+function setEditorLive(hostId, live) {
+  const host = document.getElementById(hostId);
+  if (host) host.classList.toggle("editor-live", !!live);
 }
 
 
@@ -1150,7 +1274,8 @@ const PC_RESTORE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColo
 const PC_EYE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
 const PC_EYE_OFF_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
 const PC_EXPAND_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>';
-const PC_SECTION_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+const PC_SECTION_SVG = '<svg class="pc-section-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+const PC_CHEVRON_SVG = '<svg class="pc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
 
 function renderPluginConfig(schema) {
   const box = document.getElementById("plugin-config-body");
@@ -1162,20 +1287,34 @@ function renderPluginConfig(schema) {
     box.innerHTML = '<div class="empty-state">' + esc(t("subplugins.config_empty")) + '</div>';
     return;
   }
-  // 分组渲染：section 标记开启分组卡片，后续字段归属该组
+  // 分组渲染：section 标记开启可折叠分组卡片，后续字段归属该组
   let html = "";
   let open = false;
+  let secFields = 0;
+  const closeSection = () => {
+    if (!open) return;
+    html += `</div></div></div>`;
+    // 回填分组字段计数（占位符替换，避免二次遍历）
+    html = html.replace("@@SEC_COUNT@@", String(secFields));
+    secFields = 0;
+  };
   items.forEach((item, index) => {
     if (item.type === "section") {
-      if (open) html += "</div></div>";
-      html += `<div class="pc-section"><div class="pc-section-title">${PC_SECTION_SVG}<span>${esc(item.title || item.label || "")}</span></div>` +
-        (item.desc ? `<div class="pc-section-desc">${esc(item.desc)}</div>` : "") + `<div class="pc-section-body">`;
+      closeSection();
+      html += `<div class="pc-section">` +
+        `<div class="pc-section-head" onclick="pcToggleSection(this)" role="button" tabindex="0"` +
+        ` onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();pcToggleSection(this)}">` +
+        `${PC_SECTION_SVG}<span class="pc-section-name">${esc(item.title || item.label || "")}</span>` +
+        `<span class="pc-section-count">@@SEC_COUNT@@</span>${PC_CHEVRON_SVG}</div>` +
+        `<div class="pc-section-collapse"><div class="pc-section-body">` +
+        (item.desc ? `<div class="pc-section-desc">${esc(item.desc)}</div>` : "");
       open = true;
     } else {
+      if (open) secFields++;
       html += pcRenderRow(item, index);
     }
   });
-  if (open) html += "</div></div>";
+  closeSection();
   box.innerHTML = html;
   // 数组字段渲染 chips
   items.forEach((item, index) => {
@@ -1414,19 +1553,28 @@ function pcSetDirty(dirty) {
   if (badge) badge.style.display = dirty ? "" : "none";
 }
 
-/* 搜索过滤：按 key/label/desc 模糊匹配；无命中行的分组整组隐藏 */
+/* 搜索过滤：按 key/label/desc 模糊匹配；无命中行的分组整组隐藏；
+   搜索时强制展开全部分组并显示命中计数 */
 function pcFilterItems() {
   const box = document.getElementById("plugin-config-body");
   const input = document.getElementById("pc-search");
   if (!box || !input) return;
   const q = (input.value || "").toLowerCase().trim();
+  const clearBtn = document.getElementById("pc-search-clear");
+  if (clearBtn) clearBtn.style.display = q ? "" : "none";
+  box.classList.toggle("pc-filtering", !!q);
+  let hits = 0;
   box.querySelectorAll(".pc-row").forEach((row) => {
-    row.style.display = !q || (row.dataset.search || "").includes(q) ? "" : "none";
+    const show = !q || (row.dataset.search || "").includes(q);
+    row.style.display = show ? "" : "none";
+    if (show && q) hits++;
   });
   box.querySelectorAll(".pc-section").forEach((sec) => {
     const visible = Array.from(sec.querySelectorAll(".pc-row")).some((r) => r.style.display !== "none");
     sec.style.display = visible ? "" : "none";
   });
+  const countEl = document.getElementById("pc-match-count");
+  if (countEl) countEl.textContent = q ? t("subplugins.config_matches", { n: hits }) : "";
   const any = Array.from(box.querySelectorAll(".pc-row")).some((r) => r.style.display !== "none");
   let emptyEl = box.querySelector(".pc-no-results");
   if (q && !any) {
@@ -1439,6 +1587,21 @@ function pcFilterItems() {
   } else if (emptyEl) {
     emptyEl.remove();
   }
+}
+
+/* 清空搜索框并恢复列表 */
+function pcClearSearch() {
+  const input = document.getElementById("pc-search");
+  if (!input) return;
+  input.value = "";
+  pcFilterItems();
+  input.focus();
+}
+
+/* 分组折叠/展开 */
+function pcToggleSection(head) {
+  const sec = head && head.closest(".pc-section");
+  if (sec) sec.classList.toggle("collapsed");
 }
 
 /* 带未保存拦截的关闭 */
@@ -1573,6 +1736,10 @@ async function openPluginConfig(name) {
   pcSetDirty(false);
   const searchEl = document.getElementById("pc-search");
   if (searchEl) searchEl.value = "";
+  const searchClear = document.getElementById("pc-search-clear");
+  if (searchClear) searchClear.style.display = "none";
+  const matchCount = document.getElementById("pc-match-count");
+  if (matchCount) matchCount.textContent = "";
   document.getElementById("plugin-config-title").textContent = name + t("subplugins.config_title_suffix");
   document.getElementById("plugin-config-body").innerHTML = '<div class="empty-state">' + esc(t("subplugins.config_loading")) + '</div>';
   document.getElementById("plugin-config-modal").classList.add("show");
@@ -2011,6 +2178,7 @@ function setRulesMode(mode) {
   document.getElementById("seg-rules-json").classList.toggle("active", mode === "json");
   document.getElementById("rules-gui-wrap").style.display = mode === "gui" ? "block" : "none";
   document.getElementById("rules-json-wrap").style.display = mode === "json" ? "block" : "none";
+  setEditorLive("rules-code-host", mode === "json");
   if (mode === "json") {
     syncRulesJson();
     if (!rulesEditorBound) {
@@ -2754,8 +2922,14 @@ async function loadSubplugins(opts) {
       if (hasMissing) actions.push(spAction(t("pip_page.subplugin_install_deps"), "install-deps"));
       if (hasMissingRequirements) actions.push(spAction(t("subplugins.install_requirements_button"), "install-requirements"));
 
+      // 图标槽位：所有卡片统一渲染（保证卡片布局/大小一致），首字母作为占位；
+      // 市场来源的卡片渲染后由 hydrateSubpluginIcons 按 market id 异步换成封面图
+      const spMarketId = marketOrigin ? String(marketOrigin.id || "") : "";
+      const spIcon = `<span class="sp-icon"${spMarketId ? ` data-market-icon="${esc(spMarketId)}"` : ""}>${esc((p.name || "?").trim().charAt(0).toUpperCase() || "?")}</span>`;
+
       return `<div class="subplugin-card glass" data-sp-name="${esc(p.name)}">
         <div class="sp-head">
+          ${spIcon}
           <span class="name" title="${esc(p.name)}">${esc(p.name)}</span>
           <span class="tag blue">v${esc(p.version)}</span>
           <span class="tag gray">${esc(t("subplugins.priority"))}: ${esc(p.priority)}</span>
@@ -2784,9 +2958,45 @@ async function loadSubplugins(opts) {
         </div>
       </div>`;
     }).join("");
+    hydrateSubpluginIcons(box);
     requestAnimationFrame(markOverflowSpDescs);
     if (feedback) toast(t("subplugins.refresh_success"));
   } catch (e) { toast(t("subplugins.load_failed", { error: e.message }), true); }
+}
+
+// 子插件卡片图标补水：市场来源的卡片先渲染首字母占位，这里按 market id
+// 异步拉取市场详情拿到封面图后替换。每个 market id 只请求一次；拉取失败、
+// 无封面或元素已因列表刷新脱离文档时保留首字母占位，不影响卡片布局。
+function hydrateSubpluginIcons(box) {
+  if (!box) return;
+  const slots = box.querySelectorAll("[data-market-icon]");
+  if (!slots.length) return;
+  const byIds = {};
+  slots.forEach((el) => {
+    const id = el.getAttribute("data-market-icon") || "";
+    if (!id) return;
+    (byIds[id] = byIds[id] || []).push(el);
+  });
+  Object.keys(byIds).forEach((id) => {
+    api("GET", `/api/market/plugin/${encodeURIComponent(id)}`)
+      .then((res) => {
+        const cover = res && res.data && res.data.cover_url;
+        if (!cover) return;
+        const src = `/api/market/cover?url=${encodeURIComponent(cover)}&token=${encodeURIComponent(TOKEN)}`;
+        byIds[id].forEach((el) => {
+          if (!el.isConnected) return;
+          el.textContent = "";
+          const img = document.createElement("img");
+          img.src = src;
+          img.alt = "";
+          img.loading = "lazy";
+          img.referrerPolicy = "no-referrer";
+          img.onerror = () => img.remove();
+          el.appendChild(img);
+        });
+      })
+      .catch(() => {});
+  });
 }
 
 async function reloadSingleSubplugin(name) {
@@ -3042,6 +3252,7 @@ async function refreshFileList() {
 function backToFileList() {
   document.getElementById("file-editor-wrap").style.display = "none";
   document.getElementById("file-browser").style.display = "flex";
+  setEditorLive("file-editor-host", false);
 }
 
 async function openFileEditor(path) {
@@ -3050,6 +3261,7 @@ async function openFileEditor(path) {
       `/api/subplugins/${encodeURIComponent(editingPlugin)}/file?path=${encodeURIComponent(path)}`);
     document.getElementById("file-browser").style.display = "none";
     document.getElementById("file-editor-wrap").style.display = "block";
+    setEditorLive("file-editor-host", true);
     document.getElementById("editing-path").textContent = data.path;
     const lang = detectLanguage(data.path);
     let cur = data.content;
@@ -4527,12 +4739,118 @@ async function checkFrameworkUpdate() {
       content.textContent = t("marketplace.framework_latest", { version: data.current_version || "?" });
       return;
     }
+    const staged = data.staged || {};
+    if (staged.to_version) {
+      // 已有下载校验完毕的暂存更新：不再显示下载按钮，
+      // 提供 WebUI 一键安全热重载（等同 /reload，面板短暂下线后自动恢复）
+      frameworkStagedVersion = staged.to_version;
+      content.innerHTML = `${esc(t("marketplace.framework_available", { version: staged.to_version }))} <button class="btn small" style="margin-left:8px" onclick="reloadFrameworkUpdate()">${esc(t("marketplace.framework_reload_button"))}</button><div style="margin-top:7px;color:var(--muted)">${esc(t("marketplace.framework_staged_ready"))}</div>`;
+      return;
+    }
+    frameworkStagedVersion = "";
     const latest = data.latest || {};
     const version = latest.version || "?";
     content.innerHTML = `${esc(t("marketplace.framework_available", { version }))} <button class="btn small" style="margin-left:8px" onclick="applyFrameworkUpdate()">${esc(t("marketplace.framework_apply_button"))}</button><div style="margin-top:7px;color:var(--muted)">${esc(t("marketplace.framework_reload_note"))}</div>`;
   } catch (e) {
     content.textContent = e.message || t("marketplace.framework_check_failed");
   }
+}
+
+let frameworkStagedVersion = ""; // 已暂存待热重载的目标版本（用于恢复判定与确认文案）
+
+async function reloadFrameworkUpdate() {
+  const version = frameworkStagedVersion || "?";
+  if (!await customConfirm(t("marketplace.framework_reload_confirm", { version }))) return;
+  try {
+    const res = await api("POST", "/api/updates/reload", {});
+    waitForWebuiRecovery(res.data && res.data.task_id);
+  } catch (e) {
+    toast(e.message || t("marketplace.framework_reload_failed"), true);
+  }
+}
+
+// 等待面板恢复：热重载期间旧 WebUI 实例停用、新实例随插件重载启动。
+// 轮询无需鉴权的 /api/health：先观察到旧实例下线（sawDown），再等到
+// 恢复在线即视为重载完成，自动刷新页面（无缝刷新）。若轮询一直没等到
+// 下线（前置阶段失败），借助任务状态接口取回错误提示。
+function waitForWebuiRecovery(taskId) {
+  const overlay = document.createElement("div");
+  overlay.id = "framework-reload-overlay";
+  overlay.style.cssText = "position:fixed;inset:0;z-index:9999;background:rgba(15,18,25,.94);display:flex;align-items:center;justify-content:center;";
+  overlay.innerHTML = `<div style="text-align:center;color:#e8eaf0;max-width:460px;padding:24px;line-height:1.8">
+    <div style="font-size:17px;font-weight:600;margin-bottom:10px">${esc(t("marketplace.reload_overlay_title"))}</div>
+    <div id="framework-reload-overlay-body" style="color:#9aa3b2;white-space:pre-line">${esc(t("marketplace.reload_overlay_body"))}</div></div>`;
+  document.body.appendChild(overlay);
+
+  let sawDown = false;
+  let upStreak = 0;
+  let busy = false;
+  const timer = setInterval(async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      // 1) 存活探测（无需鉴权，面板下线期间必然失败）。
+      //    必须带超时：热重载瞬间旧服务器的 listen socket 关闭，已进入
+      //    backlog 的连接可能永远无人处理，无超时的 fetch 会永久挂起，
+      //    busy 永远为 true，轮询与超时兜底全部失效（页面卡死）。
+      let up = false;
+      let version = "";
+      try {
+        const ctrl = new AbortController();
+        const abortTimer = setTimeout(() => ctrl.abort(), 3000);
+        try {
+          const res = await fetch("/api/health", { cache: "no-store", signal: ctrl.signal });
+          if (res.ok) {
+            const data = (await res.json()).data || {};
+            up = true;
+            version = data.version || "";
+          }
+        } finally { clearTimeout(abortTimer); }
+      } catch (e) { up = false; }
+      if (!up) { sawDown = true; upStreak = 0; return; }
+      // 2) 恢复判定：曾观察到下线后重新在线；或在线版本已变成目标版本
+      //    （下线窗口极短被轮询错过时兜底）
+      if (sawDown || (frameworkStagedVersion && version === frameworkStagedVersion)) {
+        upStreak += 1;
+        if (upStreak >= 2) { clearInterval(timer); location.reload(); return; }
+        return;
+      }
+      // 3) 一直在线且从未下线：可能任务尚未进入停用阶段，也可能前置失败
+      //    （同样加超时，防止在 up 探测后面板恰好下线时挂起）
+      if (taskId) {
+        try {
+          const res = await Promise.race([
+            api("GET", "/api/market/task/" + encodeURIComponent(taskId)),
+            new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
+          ]);
+          const task = res.data || {};
+          if (task.done && !task.success) {
+            clearInterval(timer);
+            overlay.remove();
+            toast(task.msg || t("marketplace.framework_reload_failed"), true);
+            checkFrameworkUpdate();
+            return;
+          }
+        } catch (e) { /* 面板下线/任务被清理/超时时忽略 */ }
+      }
+    } finally { busy = false; }
+  }, 1500);
+  // 4) 总超时兜底（5 分钟）：独立于轮询 tick，即使轮询因挂起失效也会触发，
+  //    提示手动检查并提供刷新按钮
+  setTimeout(() => {
+    clearInterval(timer);
+    const body = document.getElementById("framework-reload-overlay-body");
+    if (body && document.getElementById("framework-reload-overlay")) {
+      body.textContent = t("marketplace.reload_overlay_timeout");
+      const btn = document.createElement("button");
+      btn.className = "btn small";
+      btn.style.cssText = "margin-top:14px";
+      btn.textContent = t("marketplace.reload_overlay_refresh");
+      btn.onclick = () => location.reload();
+      body.appendChild(document.createElement("br"));
+      body.appendChild(btn);
+    }
+  }, 300000);
 }
 
 async function applyFrameworkUpdate() {
@@ -4548,50 +4866,37 @@ async function applyFrameworkUpdate() {
   }
 }
 
-// 轮询热重载任务：任务完成 = 新 wheel 已就绪且热重载已调度。
-// 阶段 1 通过 task-log-modal 展示下载/校验/热重载日志与进度条；
-// 随后插件禁用自身、WebUI 短暂下线，新实例启动后自动恢复——
-// 阶段 2 反复探测 /api/overview，恢复后刷新页面加载新版本面板。
+// 轮询暂存任务：任务完成 = 新 wheel 已下载校验并暂存就绪（不触发热重载）。
+// 热重载不能在后台任务内直接执行（Server.reload() 会取消调度器任务导致
+// 悬垂引用 → SIGSEGV 崩服），需经"幽灵所有者"两阶段安全通道触发：
+// 完成后刷新框架更新状态，由「立即热重载」按钮或服务器控制台命令
+// /lumen update framework -y 生效。
 function watchFrameworkApplyTask(taskId) {
   if (frameworkUpdateTimer) clearInterval(frameworkUpdateTimer);
   openTaskLogModal(taskId, t("task_log_modal.framework_update"));
-  let phase = "task";
   let running = false;
   frameworkUpdateTimer = setInterval(async () => {
     if (running) return;
     running = true;
     try {
-      if (phase === "task") {
-        const res = await api("GET", "/api/market/task/" + encodeURIComponent(taskId));
-        const task = res.data || {};
-        updateTaskLogModal(task);
-        if (!task.done) return;
-        if (!task.success) {
-          clearInterval(frameworkUpdateTimer); frameworkUpdateTimer = null;
-          toast(task.msg || t("marketplace.framework_apply_failed"), true);
-          checkFrameworkUpdate();
-          return;
-        }
-        phase = "revive";
-        const status = document.getElementById("task-log-status");
-        if (status) { status.textContent = t("task_log_modal.reloading"); status.className = "tag blue"; }
-        toast(t("marketplace.framework_reload_started"));
+      const res = await api("GET", "/api/market/task/" + encodeURIComponent(taskId));
+      const task = res.data || {};
+      updateTaskLogModal(task);
+      if (!task.done) return;
+      clearInterval(frameworkUpdateTimer); frameworkUpdateTimer = null;
+      if (!task.success) {
+        toast(task.msg || t("marketplace.framework_apply_failed"), true);
+        checkFrameworkUpdate();
         return;
       }
-      // 阶段 2：等待新实例的 WebUI 恢复（轮询会在下线期间持续报网络错误）
-      await api("GET", "/api/overview");
-      clearInterval(frameworkUpdateTimer); frameworkUpdateTimer = null;
-      toast(t("marketplace.framework_reload_done"));
-      setTimeout(() => location.reload(), 800);
+      toast(t("marketplace.framework_staged_ready"));
+      checkFrameworkUpdate();
     } catch (e) {
-      if (phase === "task") {
-        clearInterval(frameworkUpdateTimer); frameworkUpdateTimer = null;
-        toast(e.message || t("marketplace.framework_apply_failed"), true);
-      }
-      // revive 阶段：面板尚未恢复属预期，继续等待
+      clearInterval(frameworkUpdateTimer); frameworkUpdateTimer = null;
+      toast(e.message || t("marketplace.framework_apply_failed"), true);
     } finally { running = false; }
   }, 1500);
-  // 兜底：热重载异常卡死时 120 秒后停止轮询，避免定时器泄漏
+  // 兜底：任务轮询异常卡死时 120 秒后停止，避免定时器泄漏
   setTimeout(() => {
     if (frameworkUpdateTimer) { clearInterval(frameworkUpdateTimer); frameworkUpdateTimer = null; }
   }, 120000);
@@ -5281,9 +5586,10 @@ function renderChatFilter() {
 
   const plainCount = words.filter((w) => w.type !== "regex").length;
   const regexCount = words.filter((w) => w.type === "regex").length;
-  set("cf-st-words", String(plainCount));
-  set("cf-st-regex", String(regexCount));
-  set("cf-st-mode", (cfg.mode || "mask") === "mask" ? t("chatfilter.mode_mask") : t("chatfilter.mode_block"));
+  const setText = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+  setText("cf-st-words", String(plainCount));
+  setText("cf-st-regex", String(regexCount));
+  setText("cf-st-mode", (cfg.mode || "mask") === "mask" ? t("chatfilter.mode_mask") : t("chatfilter.mode_block"));
 
   renderCfBanks();
   renderCfWords();
@@ -5334,6 +5640,7 @@ function renderCfWords() {
   }
   host.innerHTML = words.map((w, i) => `
     <span class="cf-word${w.type === "regex" ? " regex" : ""}" title="${esc(w.word || "")}">
+      ${w.type === "regex" ? `<i class="cf-word-re">RE</i>` : ""}
       ${esc(w.word || "")}
       ${w.source && w.source !== "custom" ? `<span class="cf-word-src">${esc(w.source)}</span>` : ""}
       <button onclick="cfDelWord(${i})" title="${esc(t("chatfilter.word_delete"))}">✕</button>
@@ -5386,10 +5693,32 @@ async function cfAddWord() {
   if (!input || !chatFilterData) return;
   const word = (input.value || "").trim();
   if (!word) return;
+  const isRegex = !!(regexBox && regexBox.checked);
+  /* 正则词条前端预校验：非法 pattern 后端会静默跳过（仅记日志），
+     在添加前即时反馈，避免“保存成功却不生效”的困惑 */
+  if (isRegex) {
+    try { new RegExp(word); } catch (e) {
+      toast(t("chatfilter.word_regex_invalid"), true);
+      return;
+    }
+  }
   chatFilterData.words = chatFilterData.words || [];
-  chatFilterData.words.push({ word, type: regexBox && regexBox.checked ? "regex" : "plain", source: "custom" });
+  /* 与后端去重口径一致（全角→半角 + 小写归一化），重复添加直接拦截，
+     避免 UI 显示两条而后端只存一条的前后不一致 */
+  const normCf = (s) => String(s || "")
+    .replace(/[！-～]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+    .replace(/　/g, " ").toLowerCase();
+  if (chatFilterData.words.some((w) => normCf(w.word) === normCf(word))) {
+    toast(t("chatfilter.word_exists"), true);
+    return;
+  }
+  chatFilterData.words.push({ word, type: isRegex ? "regex" : "plain", source: "custom" });
   input.value = "";
-  if (regexBox) regexBox.checked = false;
+  if (regexBox) {
+    regexBox.checked = false;
+    const pill = document.getElementById("cf-regex-check");
+    if (pill) pill.classList.remove("active");
+  }
   try {
     await api("PUT", "/api/chat_filter", { config: cfConfig(), words: chatFilterData.words });
     renderChatFilter();

@@ -111,6 +111,8 @@ class LumenBridgePlugin(Plugin):
         # 服务器主线程 ident：插件加载/启用均在主线程执行，用于
         # run_on_main + 等待结果的模式在主线程上直接调用，避免自死锁
         self._main_thread_id: int = threading.get_ident()
+        # 周期性市场更新检查线程的停止信号（on_disable 置位，热重载/停服时退出循环）
+        self._market_check_stop = threading.Event()
 
     @property
     def i18n(self):
@@ -233,6 +235,8 @@ class LumenBridgePlugin(Plugin):
             market_check = isinstance(market_cfg, dict) and bool(market_cfg.get("enable")) and bool(market_cfg.get("check_on_start", True))
             auto_update = isinstance(updates_cfg, dict) and bool(updates_cfg.get("enable", True)) and bool(updates_cfg.get("auto_update", True))
             if market_check or auto_update:
+                # 复用实例（禁用→启用）时清除上轮 on_disable 置位的停止信号
+                self._market_check_stop.clear()
                 threading.Thread(
                     target=self._check_market_updates_background,
                     name="LumenBridge-MarketCheck",
@@ -296,6 +300,8 @@ class LumenBridgePlugin(Plugin):
         )
 
     def on_disable(self) -> None:
+        # 先停周期性更新检查线程，避免清理期间仍在触网/写暂存文件
+        self._market_check_stop.set()
         # 每个清理步骤独立 try/except，避免单步异常阻断后续清理导致资源泄漏
         log = self._tee_logger or self.logger
         for cleanup in (
@@ -335,13 +341,32 @@ class LumenBridgePlugin(Plugin):
         self.logger.info(_t("plugin.disabled"))
 
     def _check_market_updates_background(self) -> None:
-        """低频市场更新检查：子插件只记录可用更新（安装需 WebUI 管理员确认）；
-        框架本体只通知新版本，绝不自动更新——热重载会重载服务器内全部插件，
-        必须由管理员经 /lumen update framework -y 或 WebUI 确认弹窗手动确认。
+        """周期性市场更新检查（间隔由 marketplace.check_interval_seconds 控制）。
+
+        子插件只记录可用更新（安装需 WebUI 管理员确认）；框架本体在
+        updates.auto_update 开启时自动下载暂存新版本（含校验与旧版备份），
+        之后提示管理员确认——热重载会重载服务器内全部插件，且只能在命令
+        上下文安全触发（后台线程/调度器任务内 reload 会崩服），因此必须
+        由管理员执行 /lumen update framework -y 确认生效。
         """
-        client = self.marketplace
-        if client is None:
-            return
+        market_cfg = self.config_manager.data.get("marketplace", {}) if self.config_manager else {}
+        interval = 21600
+        if isinstance(market_cfg, dict):
+            try:
+                interval = int(market_cfg.get("check_interval_seconds", 21600) or 21600)
+            except (TypeError, ValueError):
+                interval = 21600
+        interval = max(60, min(interval, 7 * 86400))
+        while not self._market_check_stop.is_set():
+            client = self.marketplace
+            if client is None:
+                return
+            self._run_market_check_once(client)
+            if self._market_check_stop.wait(interval):
+                return
+
+    def _run_market_check_once(self, client: Any) -> None:
+        """执行一轮市场更新检查：子插件记录更新；框架本体自动暂存并提示。"""
         log = self._tee_logger or self.logger
         if client.enabled:
             try:
@@ -359,12 +384,16 @@ class LumenBridgePlugin(Plugin):
             if not info.get("available"):
                 return
             version = str((info.get("latest") or {}).get("version") or "?")
-            log.info(
-                f"[Update] 发现 LumenBridge 新版本 v{version}（不会自动更新）。"
-                f"确认更新请执行 /lumen update framework，准备就绪后再执行 "
-                f"/lumen update framework -y；或在 WebUI 面板点击更新并确认。"
-                f"注意：更新会重载服务器内所有插件。"
-            )
+            # 自动下载暂存（下载/校验/原子替换/旧版备份），不触发重载
+            try:
+                client.stage_framework_update(log=lambda msg: log.info(f"[Update] {msg}"))
+                log.info(
+                    f"[Update] LumenBridge v{version} 已下载校验并暂存就绪（不会自动生效）。"
+                    f"确认更新请执行 /lumen update framework -y。"
+                    f"注意：热重载等同 /reload，会重载服务器内所有插件。"
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(f"[Update] 自动暂存新版本 v{version} 失败: {exc}")
         except Exception as exc:  # noqa: BLE001
             log.warning(f"[Update] 框架更新检查失败: {exc}")
 
@@ -1148,9 +1177,16 @@ class LumenBridgePlugin(Plugin):
         """处理 /lumen update framework [-y]：框架本体更新（手动确认模式）。
 
         两步确认流程：
-        - 无 -y：检查新版本并下载校验暂存（不更新），就绪后提示管理员
+        - 无 -y：检查新版本并下载校验暂存（不生效），就绪后提示管理员
           用 -y 确认——因为热重载走 Server.reload()，会重载服务器内全部插件；
-        - 带 -y：执行暂存（幂等，已暂存则跳过下载）并调度热重载。
+        - 带 -y：已有就绪暂存时在命令上下文内联执行热重载（与内建 /reload
+          同款安全路径）；尚无暂存则先走检查+暂存流程。
+
+        ⚠ 热重载绝不能经 run_on_main 调度任务执行：reload 会取消并清理
+        调度器任务，任务内调用会悬垂 EndstoneScheduler 心跳正在迭代的队列
+        → SIGSEGV 崩服（endstone 0.11.10 scheduler.cpp:255）；也不能在
+        后台线程执行（错误线程触碰 Level/PluginManager）。命令执行阶段
+        （主线程、调度器心跳之外）是唯一安全的进程内触发点。
         """
         client = self.marketplace
         if client is None or not client.enabled:
@@ -1167,29 +1203,40 @@ class LumenBridgePlugin(Plugin):
                 _thread_log.exception("framework update command result dispatch failed")
 
         if confirm:
-            sender.send_message(f"{ColorFormat.GOLD}{_t('plugin.command.framework_confirm_start')}{ColorFormat.RESET}")
-
-            def _run_apply() -> None:
+            receipt = client.staged_framework_update()
+            if receipt is not None:
+                # 已有就绪暂存：命令上下文内联热重载（主线程、调度器心跳之外）
+                version = str(receipt.get("to_version") or "?")
+                sender.send_message(
+                    f"{ColorFormat.GOLD}{_t('plugin.command.framework_reload_start', version=version)}{ColorFormat.RESET}"
+                )
                 try:
-                    result = client.apply_framework_update(
+                    result = client.execute_framework_reload(
                         log=lambda msg: _thread_log.info(f"[Update] {msg}")
                     )
-                    version = str(result.get("to_version") or "?")
-                    self.run_on_main(
-                        lambda: _dispatch(
-                            ColorFormat.GREEN,
-                            _t("plugin.command.framework_reload_scheduled", version=version),
-                        )
-                    )
                 except Exception as e:  # noqa: BLE001
-                    _thread_log.exception("framework apply thread error")
-                    error = str(e)
-                    self.run_on_main(
-                        lambda: _dispatch(ColorFormat.RED, _t("plugin.command.framework_apply_failed", error=error))
+                    result = {"ok": False, "error": str(e)}
+                if result.get("ok"):
+                    _dispatch(
+                        ColorFormat.GREEN,
+                        _t("plugin.command.framework_reload_done", version=str(result.get("to_version") or version)),
                     )
-
-            threading.Thread(target=_run_apply, name="LumenBridge-framework-update", daemon=True).start()
-            return True
+                elif result.get("recovered_version"):
+                    _dispatch(
+                        ColorFormat.YELLOW,
+                        _t(
+                            "plugin.command.framework_recovered",
+                            version=str(result.get("recovered_version")),
+                            error=str(result.get("error") or "?"),
+                        ),
+                    )
+                else:
+                    _dispatch(
+                        ColorFormat.RED,
+                        _t("plugin.command.framework_apply_failed", error=str(result.get("error") or "?")),
+                    )
+                return True
+            # 无就绪暂存：落入下方检查+暂存流程（完成后提示再次 -y 触发热重载）
 
         sender.send_message(f"{ColorFormat.GOLD}{_t('plugin.command.framework_checking')}{ColorFormat.RESET}")
 

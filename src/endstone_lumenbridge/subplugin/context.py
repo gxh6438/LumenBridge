@@ -606,6 +606,11 @@ class WebBridge:
         传其它短文本则按字符图标显示；缺省用默认图标。
         注意：页面在 iframe 中经带 token 的 URL 加载，页内引用的相对
         资源（css/js）不会携带 token，自定义页面须自包含（内联样式与脚本）。
+        主面板会在页面加载后注入融合基础样式（画布透明），并按内容高度
+        自适应 iframe（自然流页面随内容延伸到底部导航栏之下随整页滚动；
+        满屏型页面 height:100% 会被主面板撑到至少一屏，短内容也铺满
+        视口）。如需保留自己的背景色，请用内联样式覆盖（内联 !important
+        优先级最高）：<body style="background:#fff !important">。
         """
         webui = self._webui
         if webui:

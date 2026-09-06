@@ -33,17 +33,17 @@ def version_tuple(value: Any) -> tuple[int, ...]:
 
 
 def version_cmp(a: Any, b: Any) -> int:
-    """比较两个版本字符串，返回 -1/0/1。
+    """比较两个版本字符串，返回 -1/0/1（宽松元组口径）。
 
-    段数不同时右侧补 0 对齐：1.2 与 1.2.0 视为相等（语义化版本惯例）。
-    裸元组比较中 (1, 2) < (1, 2, 0)，会把相等版本误判为不满足
-    （如 ==1.2 对已装 1.2.0、min_v 1.2.0 对宿主 1.2）。
+    直接按 :func:`version_tuple` 的元组比较：段数多者视为更大，
+    即 (1, 0, 0) > (1, 0)、(1, 2, 0) != (1, 2)。这是依赖约束
+    （requires）语义——"要求 1.2 而实际装 1.2.0" 视为更具体/更新。
+
+    ⚠ 与 marketplace._is_newer 的"补 0 对齐"口径（1.2 与 1.2.0
+    视为相等，避免框架更新误报）是两套不同语义，不要混用。
     """
     ta, tb = version_tuple(a), version_tuple(b)
-    n = max(len(ta), len(tb))
-    pa = ta + (0,) * (n - len(ta))
-    pb = tb + (0,) * (n - len(tb))
-    return (pa > pb) - (pa < pb)
+    return (ta > tb) - (ta < tb)
 
 
 _OPS: dict[str, Callable[[Any, Any], bool]] = {
