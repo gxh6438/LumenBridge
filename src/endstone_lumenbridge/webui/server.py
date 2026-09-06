@@ -788,6 +788,19 @@ class WebUIServer:
         display_host = "127.0.0.1" if self.host == "0.0.0.0" else self.host
         return f"http://{display_host}:{self.port}"
 
+    def _debug_log(self, key: str, **kwargs: Any) -> None:
+        """调试日志：仅在 config 开启 debug 时经 debug 级别输出。
+
+        用于注册类提示（已注册插件 API/配置表单/自定义页面）——数量多且
+        属于排障信息，默认静默，避免刷屏；WebUI 日志页按 DEBUG 级别可回看。
+        """
+        try:
+            enabled = bool(self.plugin.config_manager.debug)
+        except Exception:
+            enabled = False
+        if enabled:
+            self.logger.debug(_t(key, **kwargs))
+
     def register_api(
         self, method: str, path: str, handler: Callable[[dict[str, Any]], Any],
         need_auth: bool = True,
@@ -796,13 +809,13 @@ class WebUIServer:
         full = "/api/plugin" + (path if path.startswith("/") else "/" + path)
         with self._ext_lock:
             self.custom_apis[(method.upper(), full)] = (handler, need_auth)
-        self.logger.info(_t("plugin.webui_api_registered", method=method.upper(), path=full))
+        self._debug_log("plugin.webui_api_registered", method=method.upper(), path=full)
 
     def register_config(self, builder: ConfigFormBuilder) -> None:
         """注册配置表单 Schema（由 ConfigFormBuilder.register() 调用）"""
         with self._ext_lock:
             self.plugins_config_schema[builder.name] = builder.to_schema()
-        self.logger.info(_t("plugin.webui_config_registered", name=builder.name))
+        self._debug_log("plugin.webui_config_registered", name=builder.name)
 
     def create_config(self, name: str) -> ConfigFormBuilder:
         """Fluent 配置表单构建器入口"""
@@ -835,7 +848,7 @@ class WebUIServer:
                     "tab": bool(tab),
                     "icon": str(icon or "")[:16],
                 })
-                self.logger.info(_t("plugin.webui_page_registered", plugin=plugin_name, title=title))
+                self._debug_log("plugin.webui_page_registered", plugin=plugin_name, title=title)
 
 
 class _RequestHandler(BaseHTTPRequestHandler):
@@ -1199,7 +1212,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         try:
             # 公共 API：固定白名单 + 全部 /api/i18n/ 语言包路由
             if method == "GET" and (
-                path in ("/api/i18n/languages", "/api/i18n/current", "/api/public/background")
+                path in ("/api/health", "/api/i18n/languages", "/api/i18n/current", "/api/public/background")
                 or path.startswith("/api/i18n/")
             ):
                 return self._route_public_api(method, path, query)
@@ -1324,6 +1337,14 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     def _route_public_api(self, method: str, path: str, query: dict[str, str]) -> None:
         """公共 API（无需鉴权）：i18n 语言包与背景图配置，供登录页加载。"""
+        if method == "GET" and path == "/api/health":
+            # 无需鉴权的存活探测：框架热重载期间旧实例停用、新实例
+            # 重新监听，前端用它轮询"面板已恢复"后自动刷新页面
+            return self._send_json({"code": 200, "data": {
+                "ok": True,
+                "version": str(getattr(self.plugin, "VERSION", "")),
+            }})
+
         if method == "GET" and path == "/api/i18n/languages":
             i18n = get_i18n()
             return self._send_json({"code": 200, "data": {
@@ -2071,10 +2092,47 @@ class _RequestHandler(BaseHTTPRequestHandler):
             def _run_apply(log, progress):
                 log(_t("task_log.applying_framework"))
                 progress(20, _t("task_log.downloading"))
+                # apply_framework_update 只下载校验并暂存新 wheel，
+                # 绝不触发重载：调度器任务/后台线程内 Server.reload()
+                # 会崩服（悬垂心跳队列 → SIGSEGV）。热重载由管理员在
+                # 命令上下文执行 /lumen update framework -y 触发。
                 result = client.apply_framework_update(log=log, progress=progress)
-                progress(100, _t("task_log.reloading"))
+                log(_t("task_log.framework_staged_hint"))
+                progress(100, _t("task_log.done"))
                 return result
             task_id = self.webui._start_market_task("framework_apply", _run_apply)
+            if task_id is None:
+                return self._send_json({"code": 429, "msg": "任务数过多，请稍后再试"}, 429)
+            return self._send_json({"code": 200, "data": {"task_id": task_id}})
+
+        if method == "POST" and path == "/api/updates/reload":
+            client = getattr(plugin, "marketplace", None)
+            update_cfg = plugin.config_manager.data.get("updates", {}) if plugin.config_manager else {}
+            if not bool(update_cfg.get("enable", True)):
+                return self._send_json({"code": 403, "msg": "框架更新功能已关闭"}, 403)
+            if client is None:
+                return self._send_json({"code": 500, "msg": "更新客户端不可用"}, 500)
+            # 同步校验暂存回执：失败立即返回（此时 WebUI 仍在线，
+            # 前端能正常收到错误提示）；热重载本身放后台任务执行
+            try:
+                staged = client.staged_framework_update()
+            except Exception:  # noqa: BLE001
+                staged = None
+            if staged is None:
+                return self._send_json({"code": 400, "msg": _t("task_log.framework_reload_no_staged")}, 400)
+
+            def _run_reload(log, progress):
+                log(_t("task_log.framework_reloading", version=str(staged.get("to_version") or "?")))
+                progress(10, _t("task_log.waiting_tasks"))
+                # safe_framework_reload 基于"幽灵所有者"两阶段任务安全触发
+                # server.reload()（BDS 实测验证不崩服）；期间本 WebUI 实例会
+                # 被停用再由新实例重新启动，本任务的结果多半无人消费——
+                # 前端在等待面板恢复（轮询 /api/health）后自动刷新页面
+                result = client.safe_framework_reload(log=log)
+                progress(100, _t("task_log.done"))
+                return result
+
+            task_id = self.webui._start_market_task("framework_reload", _run_reload)
             if task_id is None:
                 return self._send_json({"code": 429, "msg": "任务数过多，请稍后再试"}, 429)
             return self._send_json({"code": 200, "data": {"task_id": task_id}})
@@ -2087,7 +2145,15 @@ class _RequestHandler(BaseHTTPRequestHandler):
             if client is None:
                 return self._send_json({"code": 500, "msg": "更新客户端不可用"}, 500)
             try:
-                return self._send_json({"code": 200, "data": client.framework_update_info()})
+                data = client.framework_update_info()
+                # 附带已暂存待应用的更新回执：前端据此显示
+                # "已暂存，请执行 /lumen update framework -y" 而非下载按钮
+                try:
+                    staged = client.staged_framework_update()
+                except Exception:  # noqa: BLE001
+                    staged = None
+                data["staged"] = staged or None
+                return self._send_json({"code": 200, "data": data})
             except Exception as exc:  # noqa: BLE001
                 return self._send_json({"code": 400, "msg": str(exc)}, 400)
 

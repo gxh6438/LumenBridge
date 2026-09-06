@@ -107,7 +107,8 @@ class FrameworkUpdateTests(unittest.TestCase):
         self.assertEqual(old.read_bytes(), b"old-wheel")
         self.assertFalse((self.plugins_dir / "endstone_lumenbridge-1.1.0-py3-none-any.whl").exists())
 
-    def test_apply_framework_update_schedules_hot_swap(self) -> None:
+    def test_apply_framework_update_stages_without_reload(self) -> None:
+        """v1.0.5：apply 只下载校验并原子暂存，绝不触发热重载（调度器任务内 reload 会崩服）。"""
         release = self.wheel("1.1.0")
         info = {"configured": True, "available": True, "current_version": "1.0.6", "latest": {"version": "1.1.0", "download_url": "http://market.test/download", "sha256": "c" * 64}}
         calls: list[str] = []
@@ -129,13 +130,42 @@ class FrameworkUpdateTests(unittest.TestCase):
              patch.object(self.client, "_download_verified", return_value=str(release)), \
              patch.dict(sys.modules):
             result = self.client.apply_framework_update()
-        self.assertTrue(result["scheduled"])
+        self.assertTrue(result["staged"])
+        # 暂存后不自动生效：热重载须由管理员在命令上下文触发
+        self.assertTrue(result["reload_required"])
+        self.assertFalse(result["restart_required"])
+        # 绝不调度热重载：不 run_on_main、不触碰 Server.reload
+        self.assertEqual(scheduled, [])
+        self.assertEqual(calls, [])
+        # 新 wheel 原子就位 + 回执落盘
+        self.assertTrue((self.plugins_dir / "endstone_lumenbridge-1.1.0-py3-none-any.whl").is_file())
+        self.assertTrue((self.data_dir / "data" / "framework_update.json").is_file())
+
+    def test_execute_framework_reload_runs_official_reload(self) -> None:
+        """暂存回执有效时，命令上下文内联执行热重载并校验新实例。"""
+        release = self.wheel("1.1.0")
+        info = {"configured": True, "available": True, "current_version": "1.0.6", "latest": {"version": "1.1.0", "download_url": "http://market.test/download", "sha256": "c" * 64}}
+        calls: list[str] = []
+        new_plugin = SimpleNamespace(logger=SimpleNamespace(info=lambda _m: None), version="1.1.0")
+        manager = SimpleNamespace(
+            get_plugin=lambda name: new_plugin,
+            is_plugin_enabled=lambda p: True,
+        )
+        server = SimpleNamespace(plugin_manager=manager, reload=lambda: calls.append("reload"))
+        self.plugin.server = server
+        with patch.object(self.client, "framework_update_info", return_value=info), \
+             patch.object(self.client, "_download_verified", return_value=str(release)), \
+             patch.dict(sys.modules):
+            self.client.apply_framework_update()
+        # _download_verified 被 mock，暂存 wheel 的真实哈希与发布记录对齐
+        self.client._file_sha256 = lambda _p: "c" * 64  # type: ignore[method-assign]
+        result = self.client.execute_framework_reload()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["to_version"], "1.1.0")
         # 热重载走官方 Server.reload（disable+load+enable 手工替换已被弃用）
         self.assertEqual(calls, ["reload"])
-        self.assertEqual(scheduled, [20])
-        self.assertFalse(result["restart_required"])
 
-    def test_apply_hot_swap_restores_backup_when_new_wheel_fails(self) -> None:
+    def test_execute_reload_restores_backup_when_new_wheel_fails(self) -> None:
         release = self.wheel("1.1.0")
         info = {"configured": True, "available": True, "current_version": "1.0.6", "latest": {"version": "1.1.0", "download_url": "http://market.test/download", "sha256": "d" * 64}}
         old_wheel = self.plugins_dir / "endstone_lumenbridge-1.0.6-py3-none-any.whl"
@@ -155,13 +185,15 @@ class FrameworkUpdateTests(unittest.TestCase):
             is_plugin_enabled=lambda p: True,
         )
         server = SimpleNamespace(plugin_manager=manager, reload=do_reload)
-        self.plugin.run_on_main = lambda fn, delay=1: fn()
         self.plugin.server = server
         with patch.object(self.client, "framework_update_info", return_value=info), \
              patch.object(self.client, "_download_verified", return_value=str(release)), \
              patch.dict(sys.modules):
-            result = self.client.apply_framework_update()
-        self.assertTrue(result["scheduled"])
+            self.client.apply_framework_update()
+        self.client._file_sha256 = lambda _p: "d" * 64  # type: ignore[method-assign]
+        result = self.client.execute_framework_reload()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result.get("recovered_version"), "1.0.6")
         # 失败回滚：备份目录中的旧 wheel 复制回 plugins/，并再次热重载恢复
         restored = self.plugins_dir / "endstone_lumenbridge-1.0.6-py3-none-any.whl"
         self.assertTrue(restored.is_file())

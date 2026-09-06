@@ -71,7 +71,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enable": True,
         "api_url": "https://market.mxcraft.vip",  # 只填站点根地址，自动补全 /api/v1/updates/lumenbridge
         "timeout": 30,
-        # 发现新版本时自动下载并热重载生效（禁用自身→安装新 wheel→启用新实例）
+        # 发现新版本时自动下载校验并暂存（不自动生效——热重载会重载服务器内
+        # 全部插件，须由管理员执行 /lumen update framework -y 在命令上下文确认触发）
         "auto_update": True,
     },
 

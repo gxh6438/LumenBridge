@@ -65,8 +65,14 @@ def _version_tuple(value: str) -> tuple[int, ...]:
 
 
 def _is_newer(remote: str, local: str) -> bool:
-    # 补 0 对齐比较（1.2 与 1.2.0 相等），段数不同不再误报“有更新”
-    return version_cmp(remote, local) > 0
+    # 框架更新检查用补 0 对齐比较（1.2 与 1.2.0 视为相等），段数差异
+    # 不应误报“有更新”导致反复提示下载。注意与 requires 约束比较的
+    # version_cmp（宽松元组口径，见 requires.py）是两套不同语义。
+    ta, tb = _version_tuple(remote), _version_tuple(local)
+    n = max(len(ta), len(tb))
+    pa = ta + (0,) * (n - len(ta))
+    pb = tb + (0,) * (n - len(tb))
+    return pa > pb
 
 
 class MarketplaceError(RuntimeError):
@@ -543,18 +549,23 @@ class MarketplaceClient:
         if not isinstance(versions, list):
             raise MarketplaceError("市场版本信息格式无效")
         release = None
+        release_version = ""
         for item in versions:
             if not isinstance(item, dict):
                 continue
             if requested_version and str(item.get("version")) != requested_version:
                 continue
-            if isinstance(item.get("download_url"), str) and isinstance(item.get("sha256"), str):
-                release = item
-                break
+            version = str(item.get("version") or "")
+            if not _VERSION_RE.fullmatch(version):
+                continue
+            if not isinstance(item.get("download_url"), str) or not isinstance(item.get("sha256"), str):
+                continue
+            # 显式挑最高版本：不依赖服务端返回顺序（旧实现取首个可用项，
+            # 服务端按时间倒序/乱序返回时会装到旧版本）
+            if release is None or version_cmp(version, release_version) > 0:
+                release, release_version = item, version
         if release is None:
             raise MarketplaceError("未找到可安装的插件版本")
-        if not _VERSION_RE.fullmatch(str(release.get("version") or "")):
-            raise MarketplaceError("市场返回的版本号非法")
         digest = str(release.get("sha256") or "").lower()
         if not re.fullmatch(r"[a-f0-9]{64}", digest):
             raise MarketplaceError("市场未提供有效 SHA-256")
@@ -1265,10 +1276,11 @@ class MarketplaceClient:
         raise MarketplaceError("框架更新服务返回 HTTP 404")
 
     def stage_framework_update(self, *, log=None, progress=None) -> dict[str, Any]:
-        """验证并原子暂存新 wheel，供 Endstone 下次完整启动加载。
+        """验证并原子暂存新 wheel（下载校验 + 新旧 wheel 原子替换 + 旧版备份）。
 
         Endstone 未暴露将运行中同名 wheel 卸载并替换的安全 API，禁用自身会留下半初始化
-        管理面板，因此只做可逆的文件级原子更新并要求完整重启；子插件仍可热重载。
+        管理面板，因此只做可逆的文件级原子暂存。暂存后需在命令上下文执行
+        /lumen update framework -y（等同 /reload）或重启服务器生效；子插件仍可热重载。
         """
         log = log or (lambda _msg: None)
         progress = progress or (lambda _pct, _label="": None)
@@ -1377,7 +1389,7 @@ class MarketplaceClient:
                 "wheel": target.name,
                 "backup_directory": str(backup_dir) if backup_dir.exists() else "",
                 "staged_at": int(time.time()),
-                # 支持进程内热重载（apply_framework_update），无需强制重启
+                # 暂存后可经命令上下文热重载（execute_framework_reload）生效，无需强制重启
                 "restart_required": False,
             }
             receipt_dir = Path(self.plugin.data_folder) / "data"
@@ -1385,7 +1397,7 @@ class MarketplaceClient:
             (receipt_dir / "framework_update.json").write_text(
                 json.dumps(receipt, ensure_ascii=False, indent=2), encoding="utf-8"
             )
-            log(f"新版本 v{version} 已暂存，准备热重载")
+            log(f"新版本 v{version} 已暂存就绪，执行 /lumen update framework -y 热重载生效")
             return receipt
         finally:
             try:
@@ -1401,59 +1413,94 @@ class MarketplaceClient:
                 digest.update(chunk)
         return digest.hexdigest()
 
-    def apply_framework_update(self, *, delay_ticks: int = 20, log=None, progress=None) -> dict[str, Any]:
-        """暂存新 wheel 并调度进程内热重载，实现"自动更新、立即生效"。
+    def staged_framework_update(self) -> dict[str, Any] | None:
+        """返回当前有效且待应用的暂存回执；无则返回 None（仅本地校验，不触网）。
 
-        热重载走 Endstone 官方 ``Server.reload()``（即 ``/reload`` 命令的同
-        一实现，endstone 0.11.x ``server.cpp``）：``disablePlugins`` →
-        ``clearPlugins``（清空插件注册表）→ ``reloadData`` → ``loadPlugins``
-        （重建 PythonPluginLoader：自动清理 sys.modules 中 endstone_* 模块
-        与 plugins/.local 旧发行版，再 pip install plugins/ 下全部 wheel）→
-        ``enablePlugins``。
+        供 /lumen update framework -y 命令快速判断是否可以直接热重载。
+        回执指向的版本不高于当前运行版本（如已成功热重载后残留的旧回执）
+        或 wheel 哈希不一致时视为无效。
+        """
+        receipt_path = Path(self.plugin.data_folder) / "data" / "framework_update.json"
+        if not receipt_path.is_file():
+            return None
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if not isinstance(receipt, dict):
+            return None
+        version = str(receipt.get("to_version") or "")
+        wheel = str(receipt.get("wheel") or "")
+        sha256 = str(receipt.get("sha256") or "").lower()
+        if not _VERSION_RE.fullmatch(version) or not wheel or not re.fullmatch(r"[a-f0-9]{64}", sha256):
+            return None
+        if not _is_newer(version, str(getattr(self.plugin, "VERSION", "0"))):
+            return None
+        target = Path(self.plugin.data_folder).parent / wheel
+        if not target.is_file() or self._file_sha256(target) != sha256:
+            return None
+        return receipt
 
-        不能用 ``disable_plugin`` + ``load_plugin`` 手工替换：disable 只停用
-        不注销，旧插件名仍留在 PluginManager 的 lookup_names_ 里，
-        ``load_plugin`` 会被 "Another plugin with the same name has been
-        loaded" 拒绝。只有 clearPlugins 才清注册表，而这正是 reload 的一部分。
+    def apply_framework_update(self, *, log=None, progress=None) -> dict[str, Any]:
+        """暂存新 wheel 并返回热重载指引（本方法绝不触发重载）。
 
-        注意 reload 语义与 ``/reload`` 一致：服务器上所有 Endstone 插件都会
-        重载（非仅 LumenBridge 自身）。
+        ⚠ 历史实现在调度器任务内（run_on_main → Server.reload()）执行热
+        重载导致崩服：reload 过程 ``disablePlugins`` → ``cancelTasks`` 会
+        取消"当前正在执行的任务"，随后 ``removeCancelledTasks()`` 直接改动
+        ``mainThreadHeartbeat`` 正在迭代的任务队列（endstone 0.11.10
+        scheduler.cpp:255），心跳循环悬垂引用 → SIGSEGV。因此本方法只负责
+        下载校验与暂存；热重载必须由管理员在命令上下文同步触发
+        （/lumen update framework -y，与内建 /reload 同款安全路径），
+        见 :meth:`execute_framework_reload`。
         """
         log = log or (lambda _msg: None)
         progress = progress or (lambda _pct, _label="": None)
         with self._framework_update_lock:
             receipt = self._do_stage_framework_update(log=log, progress=progress)
+        return {
+            "staged": True,
+            "from_version": str(receipt.get("from_version") or ""),
+            "to_version": str(receipt.get("to_version") or ""),
+            "wheel": str(receipt.get("wheel") or ""),
+            "restart_required": False,
+            # 热重载须由管理员在命令上下文触发，不能在后台线程/调度器任务内执行
+            "reload_required": True,
+        }
+
+    def execute_framework_reload(self, *, log=None) -> dict[str, Any]:
+        """同步执行框架热重载（等同 /reload）并校验新实例，失败自动回滚。
+
+        ⚠ 只允许在服务器主线程的命令/事件上下文调用（如
+        /lumen update framework -y 处理器）。``Server.reload()`` 会取消并
+        清理调度器中本插件的任务：若本方法运行在调度器任务内，心跳正在
+        迭代的队列会被 ``removeCancelledTasks`` 改动 → 悬垂引用 SIGSEGV；
+        若运行在后台线程，则在错误线程触碰 Level 与 PluginManager。命令
+        执行阶段不在调度器心跳内（内建 /reload 命令即走此路径），是唯一
+        安全的进程内触发点。
+
+        热重载走 Endstone 官方 ``Server.reload()``（``disablePlugins`` →
+        ``clearPlugins`` → ``reloadData`` → ``loadPlugins`` →
+        ``enablePlugins``），会重载服务器内全部 Endstone 插件（非仅
+        LumenBridge 自身）。不能用 ``disable_plugin`` + ``load_plugin``
+        手工替换：disable 只停用不注销，旧插件名仍留在 PluginManager 的
+        lookup_names_ 里，``load_plugin`` 会被同名拒绝。
+        """
+        receipt = self.staged_framework_update()
+        if receipt is None:
+            raise MarketplaceError("没有已就绪的框架更新，请先执行 /lumen update framework 暂存新版本")
+        version = str(receipt.get("to_version") or "")
         plugins_dir = Path(self.plugin.data_folder).parent
         target = plugins_dir / str(receipt.get("wheel") or "")
-        if not target.is_file():
-            raise MarketplaceError(f"暂存的更新 wheel 不存在：{target}")
-        version = str(receipt.get("to_version") or "")
         backup_directory = str(receipt.get("backup_directory") or "")
+        log = log or (lambda _msg: None)
         old_plugin = self.plugin
         logger = self.logger
-        old_plugin.logger.info(f"[Update] 已暂存 v{version}，{delay_ticks} tick 后开始热重载")
-        log(f"已暂存 v{version}，{delay_ticks} tick 后开始热重载")
+        old_plugin.logger.info(f"[Update] 开始热重载至 v{version}（等同 /reload，服务器插件将全部重载）")
+        log(f"正在热重载至 v{version}（等同 /reload，服务器插件将全部重载）...")
 
         def _restore_backup(reason: str) -> bool:
-            """移除失败的新 wheel 并放回备份中最高版本的旧 wheel，返回是否放回成功。"""
             logger.error(f"[Update] {reason}")
-            try:
-                target.unlink(missing_ok=True)
-                if backup_directory:
-                    backup_dir = Path(backup_directory)
-                    # 按语义版本挑最高（不能按文件名字典序：字典序下
-                    # "1.0.9" > "1.0.10"，会放回更旧的版本）
-                    wheels = list(backup_dir.glob("endstone_lumenbridge-*.whl"))
-                    if wheels:
-                        def _wheel_version(p: Path) -> tuple[int, ...]:
-                            parts = p.stem.split("-")
-                            return _version_tuple(parts[1]) if len(parts) > 1 else (0,)
-                        wheel = max(wheels, key=_wheel_version)
-                        shutil.copyfile(wheel, plugins_dir / wheel.name)
-                        return True
-            except OSError:
-                pass
-            return False
+            return self._restore_backup_wheel(target, backup_directory, plugins_dir)
 
         def _trigger_reload(server: Any) -> None:
             reload_api = getattr(server, "reload", None)
@@ -1462,33 +1509,224 @@ class MarketplaceClient:
             else:  # 旧版 Endstone 无 Server.reload 绑定，回退命令派发
                 server.dispatch_command(server.command_sender, "reload")
 
-        def _hot_swap() -> None:
-            # 运行在服务器主线程；只使用局部引用，禁用后不再触碰旧插件对象
-            server = old_plugin.server
-            manager = server.plugin_manager
-            try:
-                log("正在热重载（等同 /reload，服务器插件将全部重载）...")
-                _trigger_reload(server)
-                new_plugin = manager.get_plugin("lumenbridge")
-                if new_plugin is None or not manager.is_plugin_enabled(new_plugin):
-                    raise RuntimeError("热重载后未检测到已启用的 LumenBridge 插件")
-                log(f"热重载完成，当前版本 v{new_plugin.version}")
-                new_plugin.logger.info(f"[Update] 热重载完成，当前版本 v{new_plugin.version}")
-            except Exception as exc:  # noqa: BLE001
-                logger.error(f"[Update] 热重载失败：{exc}")
-                if _restore_backup("已回滚旧 wheel，正在再次热重载以恢复旧版本"):
-                    try:
-                        _trigger_reload(server)
-                        recovered = manager.get_plugin("lumenbridge")
-                        if recovered is not None and manager.is_plugin_enabled(recovered):
-                            logger.error(
-                                f"[Update] 已恢复旧版本 v{recovered.version} 运行；"
-                                "新版本更新失败，请检查服务器日志或联系开发者"
-                            )
-                            return
-                    except Exception as exc2:  # noqa: BLE001
-                        logger.error(f"[Update] 恢复旧版本时出错：{exc2}")
-                logger.error("[Update] 自动恢复未完成，请重启服务器以恢复 LumenBridge 运行")
+        # 运行在命令上下文（主线程）；reload 后只触碰局部引用与新插件实例，
+        # 不再访问已停用的旧插件服务
+        server = old_plugin.server
+        manager = server.plugin_manager
+        try:
+            _trigger_reload(server)
+            new_plugin = manager.get_plugin("lumenbridge")
+            if new_plugin is None or not manager.is_plugin_enabled(new_plugin):
+                raise RuntimeError("热重载后未检测到已启用的 LumenBridge 插件")
+            log(f"热重载完成，当前版本 v{new_plugin.version}")
+            new_plugin.logger.info(f"[Update] 热重载完成，当前版本 v{new_plugin.version}")
+            return {"ok": True, "to_version": str(new_plugin.version)}
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[Update] 热重载失败：{exc}")
+            if _restore_backup("已回滚旧 wheel，正在再次热重载以恢复旧版本"):
+                try:
+                    _trigger_reload(server)
+                    recovered = manager.get_plugin("lumenbridge")
+                    if recovered is not None and manager.is_plugin_enabled(recovered):
+                        logger.error(
+                            f"[Update] 已恢复旧版本 v{recovered.version} 运行；"
+                            "新版本更新失败，请检查服务器日志或联系开发者"
+                        )
+                        return {"ok": False, "error": str(exc), "recovered_version": str(recovered.version)}
+                except Exception as exc2:  # noqa: BLE001
+                    logger.error(f"[Update] 恢复旧版本时出错：{exc2}")
+            logger.error("[Update] 自动恢复未完成，请重启服务器以恢复 LumenBridge 运行")
+            return {"ok": False, "error": str(exc)}
 
-        old_plugin.run_on_main(_hot_swap, delay=delay_ticks)
-        return {"scheduled": True, "to_version": version, "wheel": target.name, "restart_required": False}
+    @staticmethod
+    def _restore_backup_wheel(target: Path, backup_directory: str, plugins_dir: Path) -> bool:
+        """移除失败的新 wheel 并放回备份中最高版本的旧 wheel，返回是否放回成功。"""
+        try:
+            target.unlink(missing_ok=True)
+            if backup_directory:
+                backup_dir = Path(backup_directory)
+                # 按语义版本挑最高（不能按文件名字典序：字典序下
+                # "1.0.9" > "1.0.10"，会放回更旧的版本）
+                wheels = list(backup_dir.glob("endstone_lumenbridge-*.whl"))
+                if wheels:
+                    def _wheel_version(p: Path) -> tuple[int, ...]:
+                        parts = p.stem.split("-")
+                        return _version_tuple(parts[1]) if len(parts) > 1 else (0,)
+                    wheel = max(wheels, key=_wheel_version)
+                    shutil.copyfile(wheel, plugins_dir / wheel.name)
+                    return True
+        except OSError:
+            pass
+        return False
+
+    def _make_reload_ghost(self):
+        """构造"幽灵所有者"插件：已初始化、已启用、但未注册到 PluginManager。
+
+        直接 new 出的 Plugin 实例无法通过 pybind 类型检查（run_task 抛
+        TypeError），且 C++ 内部指针（loader_ 等）未初始化，读写即崩。
+        唯一可行路径（BDS 实测验证）：临时替换 PythonPluginLoader.load_plugin
+        返回幽灵实例，让 PluginManager.load_plugin 走 C++ initPlugin 完成内部
+        指针初始化，再借与运行中插件同名被重名拒绝，使其"已初始化但未注册"
+        ——disable_plugins() 永远触不到它，它的调度任务不会在热重载中被取消。
+
+        副作用：服务器日志会出现一条 ERROR "Could not load plugin
+        'lumenbridge': Another plugin with the same name has been loaded"
+        和一行 "Enabling lumenbridge v0.0.0"，均为预期行为。
+        """
+        import endstone.plugin.plugin_loader as plm
+        from endstone.plugin import Plugin, PluginDescription
+
+        class _ReloadGhost(Plugin):
+            """生命周期全 no-op 的幽灵：只作为热重载任务的 owner 存在。"""
+
+            version = "0.0.0"
+            api_version = "0.11"
+
+            def on_load(self) -> None:
+                pass
+
+            def on_enable(self) -> None:
+                pass
+
+            def on_disable(self) -> None:
+                pass
+
+        plugins_dir = Path(self.plugin.data_folder).parent
+        wheel = next(plugins_dir.glob("endstone_lumenbridge-*.whl"), None)
+        if wheel is None:
+            raise MarketplaceError("plugins 目录中未找到 LumenBridge wheel，无法构造热重载通道")
+
+        captured: list = []
+        orig_load = plm.PythonPluginLoader.load_plugin
+
+        def _ghost_loader(_loader, _file):
+            ghost = _ReloadGhost()
+            # 与运行中的 LumenBridge 同名：initPlugin 初始化后被重名拒绝 → 不注册
+            ghost._description = PluginDescription(name="lumenbridge", version="0.0.0")
+            captured.append(ghost)
+            return ghost
+
+        plm.PythonPluginLoader.load_plugin = _ghost_loader
+        try:
+            # 返回 None 属预期（重名被拒），但幽灵已被 C++ initPlugin 初始化
+            self.plugin.server.plugin_manager.load_plugin(str(wheel))
+        finally:
+            plm.PythonPluginLoader.load_plugin = orig_load
+
+        if not captured:
+            raise MarketplaceError("构造热重载幽灵所有者失败")
+        ghost = captured[0]
+        if not ghost.is_enabled:
+            # 调度器 validate() 只认 is_enabled；经 loader 正规启用（on_enable 为 no-op）
+            ghost.plugin_loader.enable_plugin(ghost)
+        return ghost
+
+    def safe_framework_reload(self, *, log=None, timeout: float = 180.0) -> dict[str, Any]:
+        """在任意线程（如 WebUI 后台任务线程）安全触发框架热重载。
+
+        原理（BDS 1.26.45 + Endstone 0.11.10 实测验证）：以"幽灵所有者"
+        （未注册插件，见 :meth:`_make_reload_ghost`）调度两阶段任务——
+
+        - phase1（tick T）：``disable_plugins()`` 禁用全部已注册插件，
+          ``cancelTasks`` 只置取消标志，不动队列；
+        - tick T+1 心跳开头 ``removeCancelledTasks()`` 在任务迭代之外
+          安全清理已取消任务；
+        - phase2（tick T+1）：``server.reload()``——此时 disablePlugins
+          无事可做、无已取消任务，``erase_if`` 不会改写心跳正在迭代的
+          队列 → 无悬垂引用（这正是旧实现任务内直接 reload 崩服的根源）。
+
+        失败回滚同样必须两阶段（先 disable 再 restore+reload），原因同上：
+        第一次 reload 已重新启用全部插件，若在 phase2 任务内直接二次
+        reload，cancelTasks+removeCancelledTasks 会改写正在迭代的队列。
+
+        本方法会阻塞到重载完成（或超时）；期间 WebUI 面板会短暂无法
+        访问（旧实例停用 → 新实例启动），前端应轮询健康检查等待恢复。
+        """
+        receipt = self.staged_framework_update()
+        if receipt is None:
+            raise MarketplaceError("没有已就绪的框架更新，请先下载暂存新版本")
+        version = str(receipt.get("to_version") or "")
+        log = log or (lambda _msg: None)
+        server = self.plugin.server
+        pm = server.plugin_manager
+        scheduler = server.scheduler
+        plugins_dir = Path(self.plugin.data_folder).parent
+        target = plugins_dir / str(receipt.get("wheel") or "")
+        backup_directory = str(receipt.get("backup_directory") or "")
+
+        ghost = self._make_reload_ghost()
+        glog = ghost.logger
+        glog.info(f"[Update] WebUI 热重载通道就绪，目标版本 v{version}")
+        log(f"正在通过安全通道热重载至 v{version}...")
+
+        done = threading.Event()
+        outcome: dict[str, Any] = {}
+
+        def _finish(**kv) -> None:
+            outcome.update(kv)
+            done.set()
+
+        def phase1() -> None:
+            glog.info("[Update] phase1: 禁用全部插件（任务取消仅置标志）")
+            try:
+                pm.disable_plugins()
+                glog.info("[Update] phase1: 插件已全部禁用")
+            except Exception as exc:  # noqa: BLE001
+                glog.error(f"[Update] phase1 失败：{exc!r}")
+                _finish(ok=False, error=f"禁用插件阶段失败：{exc}")
+
+        def phase2() -> None:
+            glog.info("[Update] phase2: 执行 server.reload()")
+            try:
+                server.reload()
+                new_plugin = pm.get_plugin("lumenbridge")
+                if new_plugin is None or not pm.is_plugin_enabled(new_plugin):
+                    raise RuntimeError("热重载后未检测到已启用的 LumenBridge 插件")
+                glog.info(f"[Update] 热重载完成，当前版本 v{new_plugin.version}")
+                _finish(ok=True, to_version=str(new_plugin.version))
+            except Exception as exc:  # noqa: BLE001
+                glog.error(f"[Update] phase2 热重载失败：{exc!r}，开始两阶段回滚")
+                # 不能在本任务内直接二次 reload（新插件已启用，会重蹈
+                # cancelTasks→removeCancelledTasks 改写迭代队列的覆辙），
+                # 再走一次 disable → restore+reload 两阶段
+                scheduler.run_task(ghost, phase3, delay=2)
+                scheduler.run_task(ghost, phase4, delay=4)
+
+        def phase3() -> None:
+            glog.info("[Update] phase3: 回滚前禁用全部插件")
+            try:
+                pm.disable_plugins()
+            except Exception as exc:  # noqa: BLE001
+                glog.error(f"[Update] phase3 失败：{exc!r}")
+
+        def phase4() -> None:
+            try:
+                if not self._restore_backup_wheel(target, backup_directory, plugins_dir):
+                    glog.error("[Update] 回滚失败：未能放回旧 wheel，请重启服务器恢复运行")
+                    _finish(ok=False, error="回滚失败，请重启服务器恢复 LumenBridge 运行")
+                    return
+                server.reload()
+                recovered = pm.get_plugin("lumenbridge")
+                if recovered is not None and pm.is_plugin_enabled(recovered):
+                    glog.error(
+                        f"[Update] 已恢复旧版本 v{recovered.version} 运行；"
+                        "新版本更新失败，请检查服务器日志或联系开发者"
+                    )
+                    _finish(ok=False, error="新版本启动失败，已自动回滚旧版本", recovered_version=str(recovered.version))
+                else:
+                    glog.error("[Update] 回滚后仍未检测到已启用的 LumenBridge，请重启服务器")
+                    _finish(ok=False, error="回滚后仍未恢复，请重启服务器")
+            except Exception as exc:  # noqa: BLE001
+                glog.error(f"[Update] 回滚阶段出错：{exc!r}")
+                _finish(ok=False, error=f"回滚阶段出错：{exc}")
+
+        # 延迟 5/6 tick：phase1 与 phase2 分属不同 tick，中间隔一次心跳
+        # 开头的 removeCancelledTasks（迭代外清理，安全）
+        scheduler.run_task(ghost, phase1, delay=5)
+        scheduler.run_task(ghost, phase2, delay=6)
+
+        if not done.wait(timeout=timeout):
+            return {"ok": False, "error": f"热重载超时（{timeout:g} 秒）未完成，请检查服务器日志确认结果"}
+        if outcome.get("ok"):
+            log(f"热重载完成，当前版本 v{outcome.get('to_version')}")
+        return outcome
