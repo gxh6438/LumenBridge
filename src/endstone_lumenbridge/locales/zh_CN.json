@@ -381,6 +381,23 @@
             "banned_word_params": "请文明发言！"
         }
     },
+    "groupbind": {
+        "command_word": "/lumen绑定",
+        "log": {
+            "key_issued": "已为适配器「{name}」签发群绑定密钥（5 分钟内有效，仅显示一次）",
+            "bind_success": "群绑定成功：适配器「{name}」写入群 {group}、管理员 {user}",
+            "bind_failed": "群绑定失败：{error}",
+            "reload_failed": "群绑定后重载连接失败（配置已保存，重载或重启后生效）：{error}"
+        },
+        "reply": {
+            "bind_success": "绑定成功！本群已加入互通群列表，你已成为管理员",
+            "already_bound": "本群已完成绑定，无需重复操作",
+            "key_invalid": "绑定密钥无效或已过期，请前往 LumenBridge 面板重新获取",
+            "format_hint": "指令格式：{command} 密钥（密钥请前往 LumenBridge 面板获取）",
+            "bind_failed": "绑定失败：{error}",
+            "missing_identity": "消息缺少群或发送者标识，无法绑定"
+        }
+    },
     "whitelist": {
         "title": "白名单绑定",
         "subtitle": "whitelist.json 绑定记录",
@@ -1648,7 +1665,20 @@
         "section_advanced": "高级设置",
         "enable_hint": "关闭后此适配器将停止收发消息",
         "item_count": "{n} 项",
-        "name_placeholder": "输入适配器名称"
+        "name_placeholder": "输入适配器名称",
+        "bindkey_button": "获取绑定密钥",
+        "bindkey_button_hint": "生成一次性密钥，在目标群发送绑定指令即可自动填入群号与管理员",
+        "bindkey_title": "获取绑定密钥",
+        "bindkey_intro": "将下方绑定指令发送到要互通的 QQ 群即可完成绑定（可以 @ 机器人，也可以不 @）。绑定成功后，本群自动加入群聊列表，发送者自动成为管理员；绑定多个群时管理员不会重复填写。",
+        "bindkey_command_label": "绑定指令",
+        "bindkey_copy": "一键复制绑定指令",
+        "bindkey_copied": "已复制，去群里发送吧",
+        "bindkey_copy_failed": "复制失败，请手动选中指令文本复制",
+        "bindkey_expires_suffix": "后自动失效",
+        "bindkey_expired": "密钥已失效",
+        "bindkey_once_badge": "仅显示一次",
+        "bindkey_warn": "密钥仅显示一次，关闭本窗口后无法再次查看；生成新密钥后旧密钥立即失效。",
+        "bindkey_generate_failed": "绑定密钥生成失败"
     },
     "hub": {
         "stop_failed": "停止适配器 {name} 失败：{error}",

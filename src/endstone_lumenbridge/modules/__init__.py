@@ -5,7 +5,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from .chat_probe import ChatAbsorptionProbe
     from .chat_sync import ChatSyncModule
+    from .group_bind import GroupBindModule
     from .regex_engine import RegexEngineModule
     from .whitelist import WhitelistModule
 
@@ -24,7 +26,20 @@ def __getattr__(name: str) -> Any:
     if name == "ChatFilterModule":
         from .chat_filter import ChatFilterModule
         return ChatFilterModule
+    if name == "ChatAbsorptionProbe":
+        from .chat_probe import ChatAbsorptionProbe
+        return ChatAbsorptionProbe
+    if name == "GroupBindModule":
+        from .group_bind import GroupBindModule
+        return GroupBindModule
     raise AttributeError(name)
 
 
-__all__ = ["ChatSyncModule", "WhitelistModule", "RegexEngineModule", "ChatFilterModule"]
+__all__ = [
+    "ChatSyncModule",
+    "WhitelistModule",
+    "RegexEngineModule",
+    "ChatFilterModule",
+    "ChatAbsorptionProbe",
+    "GroupBindModule",
+]

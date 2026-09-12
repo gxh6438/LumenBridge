@@ -852,7 +852,108 @@ def on_load(ctx):
 <body style="background:#fff !important">
 ```
 
-页面须自包含（内联样式与脚本）：iframe 经带 token 的 URL 加载，页内引用的相对 css/js 资源不会携带 token，将被拒绝访问。
+页面须自包含（内联样式与脚本）：iframe 经带 token 的 URL 加载，页内引用的相对路径 css/js 资源不会携带 token，将被拒绝访问。**唯一例外**是共享样式层 `/lumen.css`——它走静态路由、免鉴权，子插件页面可用绝对路径直接引用（见下节）。
+
+#### 页面样式：复用 LumenBridge 前端主题（推荐）
+
+主面板样式分为两层，子插件页面可直接引用共享层，获得与主面板完全一致的主题观感，无需自己重写一套样式：
+
+| 层 | 路径 | 定位 |
+|----|------|------|
+| 共享层（公开 API） | `/lumen.css` | 主题变量 + 全局元素样式 + 通用组件类，主面板与子插件共用 |
+| 主面板层（私有） | `/app.css` | 仅主面板使用，不构成子插件兼容性承诺，勿引用 |
+
+在 `<head>` 引用共享层（绝对路径，免鉴权，支持 gzip 与 ETag 304）：
+
+```html
+<link rel="stylesheet" href="/lumen.css">
+```
+
+样式三层用法（按需选择）：
+
+1. **仅引用共享层（推荐默认）**：与主面板一致的主题与组件风格，深浅色自动跟随系统；
+2. **共享层 + 页内 `<style>` 扩展**：先引用共享层，再用页内样式补充。自定义类请加插件名前缀（如 `.myplugin-chart`），避免与框架类冲突；
+3. **完全自写样式**：不引用共享层（页面融合行为不受影响）。
+
+最小页面模板（含 token 的标准取法与 API 调用）：
+
+```html
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<link rel="stylesheet" href="/lumen.css">
+<style>
+  /* 自定义类加插件名前缀，避免与框架类冲突 */
+  .myplugin-chart { margin-top: 14px; }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="page-title">数据中心</div>
+  <div class="page-sub">来自我的插件</div>
+  <div class="card glass">
+    <div class="grid stats">
+      <div class="k">在线玩家</div>
+      <div class="v"><span class="status-dot ok"></span><span id="online">-</span></div>
+    </div>
+    <div class="toolbar"><button class="btn small" onclick="refresh()">刷新</button></div>
+    <div class="hint">数据每分钟自动更新</div>
+  </div>
+</div>
+<script>
+// iframe 经带 token 的 URL 加载；调用 /api/plugin/* 前从 URL 取 token
+const TOKEN = new URLSearchParams(location.search).get("token") || "";
+async function api(method, path, body) {
+  const res = await fetch(path, {
+    method,
+    headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok || data.code !== 200) throw new Error(data.msg || res.status);
+  return data.data;
+}
+async function refresh() {
+  const stats = await api("GET", "/api/plugin/my_plugin/stats");
+  document.getElementById("online").textContent = stats.online;
+}
+refresh();
+</script>
+</body>
+</html>
+```
+
+共享层公开的 CSS 变量（不兼容变更需升主版本号）：
+
+| 变量 | 说明 |
+|------|------|
+| `--text` / `--muted` | 主文本 / 次要文本颜色 |
+| `--accent` / `--accent-soft` | 主题色 / 主题色浅底 |
+| `--green` / `--red` / `--orange` | 状态色（成功 / 危险 / 警告） |
+| `--glass` / `--glass-strong` / `--glass-border` | 毛玻璃卡片背景 / 加强底 / 边框 |
+| `--radius-lg` / `--radius-md` / `--radius-sm` | 圆角（22 / 16 / 12px） |
+| `--divider` / `--shadow` | 分隔线 / 卡片阴影 |
+| `--input-bg` / `--blur` / `--glass-saturate` | 输入框背景 / 毛玻璃模糊半径 / 饱和度 |
+
+深浅色主题自动跟随系统（`prefers-color-scheme`），引用共享层的页面无需处理；完全自写样式的页面建议同样适配。
+
+共享层公开的通用组件类：
+
+- **卡片**：`.card`（内含 `.k` / `.v` / `.v.small`）、`.card.glass`、`.glass`、`.section`、`.grid`（`.grid.stats`）
+- **按钮**：`.btn`（修饰符 `.small` / `.ghost` / `.danger` / `.full` / `.white`）、`.icon-btn`
+- **表单**：`.form-row`、`.switch`、`.segment`、`.lumen-select`、`.json-editor`、`.dropzone`
+- **展示**：`.tag`（修饰符 `.green` / `.red` / `.gray` / `.blue` / `.orange` / `.cyan`）、`.status-dot`（`.ok` / `.bad`）、`.toolbar`、`.hint`、`.empty-state`、`.table-wrap`、`.spin`、`.error-detail`、`.progress-track` / `.progress-bar`
+- **页面骨架**：`.page`、`.page-title`、`.page-sub`
+- **弹窗**：`.modal-mask`、`.modal`、`.close-x`、`.modal-body`
+- **无障碍**：`.sr-only`
+
+注意事项：
+
+- 页内引用**相对路径**的资源（`./xxx.css`）仍受 token 鉴权限制，无法访问；引用共享层必须用绝对路径 `/lumen.css`；
+- `/lumen.css` 中个别多选择器规则包含主面板私有类名（如 `.pc-row` / `.cf-row` / `.subplugin-card`），它们在子插件页面不会命中、无副作用，但请勿依赖这些私有类；
+- 子插件自定义类请一律加插件名前缀，避免未来框架新增通用类时发生冲突。
 
 ## 国际化
 

@@ -270,7 +270,11 @@ def test_bot_profile_cache():
 def test_frontend_regressions():
     static = ROOT / "src" / "endstone_lumenbridge" / "webui" / "static"
     app = (static / "app.js").read_text(encoding="utf-8")
-    html = (static / "index.html").read_text(encoding="utf-8")
+    # 样式已从 index.html 内联拆分为共享层(lumen.css) + 主面板层(app.css)，
+    # CSS 契约断言统一指向两层文件的内容
+    css = "\n".join(
+        (static / name).read_text(encoding="utf-8") for name in ("lumen.css", "app.css")
+    )
 
     load_config = app[app.index("async function loadConfig()") : app.index("async function saveConfig()")]
     load_subplugins = app[app.index("async function loadSubplugins(opts)") : app.index("async function toggleSubplugin")]
@@ -285,11 +289,11 @@ def test_frontend_regressions():
     assert 'document.addEventListener("visibilitychange"' in app
     assert "bot-profile-inline" in app
     # 开关尺寸修正为 42x24px（避免桌面端与手机端被拉得过宽过大）
-    assert ".switch { position: relative; width: 42px; height: 24px; flex: 0 0 42px" in html
-    assert "width: 42px !important; height: 24px !important" in html
-    assert "transform: translateX(18px)" in html
-    assert ".bot-profile-inline" in html
-    assert "max-height: calc(100dvh - 20px)" in html
+    assert ".switch { position: relative; width: 42px; height: 24px; flex: 0 0 42px" in css
+    assert "width: 42px !important; height: 24px !important" in css
+    assert "transform: translateX(18px)" in css
+    assert ".bot-profile-inline" in css
+    assert "max-height: calc(100dvh - 20px)" in css
 
 
 def main():

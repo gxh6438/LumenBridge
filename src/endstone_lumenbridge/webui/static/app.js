@@ -321,12 +321,15 @@ function closeModal(id) {
   if (el) el.classList.remove("show");
 }
 
+/** 复制文本到剪贴板，返回 Promise<boolean> 表示是否成功（旧调用方可忽略返回值） */
 function copyToClipboard(text) {
   if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
-  } else {
-    fallbackCopy(text);
+    return navigator.clipboard.writeText(text).then(
+      () => true,
+      () => fallbackCopy(text)
+    );
   }
+  return Promise.resolve(fallbackCopy(text));
 }
 
 function fallbackCopy(text) {
@@ -336,8 +339,10 @@ function fallbackCopy(text) {
   ta.style.opacity = "0";
   document.body.appendChild(ta);
   ta.select();
-  try { document.execCommand("copy"); } catch (e) {}
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
   document.body.removeChild(ta);
+  return ok;
 }
 
 function closeLogStream() {
@@ -5280,6 +5285,13 @@ ${aeField(t("connections.access_token"), secretFieldHtml("ae-token", t("connecti
       : aeField(isQQOfficial ? t("connections.main_group_openid") : t("connections.main_group"),
           `<input type="text" id="ae-main-group" placeholder="${isQQOfficial ? "OPENID1,OPENID2" : "111,222,333"}" value="${esc(Array.isArray(a.main_group) ? a.main_group.join(",") : (a.main_group || ""))}">`,
           isQQOfficial ? { hint: t("connections.main_group_openid_hint") } : {})}
+    <div class="bindkey-launch">
+      <button type="button" class="bindkey-launch-btn" onclick="openBindKeyModal('${esc(a.id)}')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>
+        <span>${esc(t("connections.bindkey_button"))}</span>
+      </button>
+      <div class="bindkey-launch-hint">${esc(t("connections.bindkey_button_hint"))}</div>
+    </div>
   </div></div>
 </div>
 
@@ -5363,6 +5375,107 @@ async function toggleSecretReveal(btn, inputId, adapterId, key) {
   } catch (e) {
     toast(e.message || t("connections.reveal_failed"), true);
   }
+}
+
+/* ---------------- 群绑定密钥（身份设置一键绑定群与管理员） ---------------- */
+
+let bindKeyTimer = null;   // 倒计时 setTimeout 句柄
+let bindKeyDeadline = 0;   // 到期时刻（Date.now() 毫秒），驱动倒计时免疫定时器漂移
+let bindKeyTotalMs = 1;    // 总时长（毫秒），用于进度条百分比换算
+
+/** 打开绑定密钥弹窗：每次打开都重新签发（新密钥生成即焚毁旧密钥），明文仅本次展示 */
+async function openBindKeyModal(adapterId) {
+  const modal = document.getElementById("bindkey-modal");
+  resetBindKeyUi();
+  modal.classList.add("show");
+  try {
+    const res = await api("POST", "/api/connections/bindkey", { id: String(adapterId || "") });
+    const info = (res && res.data) || {};
+    document.getElementById("bindkey-command").textContent = String(info.command || "");
+    document.getElementById("bindkey-copy-btn").disabled = false;
+    startBindKeyCountdown(Math.max(1, Number(info.expires_in) || 300));
+  } catch (e) {
+    closeBindKeyModal();
+    toast(e.message || t("connections.bindkey_generate_failed"), true);
+  }
+}
+
+function closeBindKeyModal() {
+  resetBindKeyUi();
+  document.getElementById("bindkey-modal").classList.remove("show");
+}
+
+/** 重置弹窗为初始加载态（打开与关闭时均调用，杜绝上一次密钥残留） */
+function resetBindKeyUi() {
+  stopBindKeyTimer();
+  const copyBtn = document.getElementById("bindkey-copy-btn");
+  document.getElementById("bindkey-command").textContent = "…";
+  copyBtn.disabled = true;
+  copyBtn.classList.remove("copied");
+  clearTimeout(copyBtn._t);
+  document.getElementById("bindkey-copy-label").textContent = t("connections.bindkey_copy");
+  document.getElementById("bindkey-countdown-bar").style.width = "100%";
+  document.getElementById("bindkey-countdown-text").textContent = "5:00";
+  const modal = document.getElementById("bindkey-modal");
+  modal.querySelector(".bindkey-cmd-card").classList.remove("expired");
+  modal.querySelector(".bindkey-countdown").classList.remove("low");
+}
+
+function stopBindKeyTimer() {
+  if (bindKeyTimer) { clearTimeout(bindKeyTimer); bindKeyTimer = null; }
+}
+
+/** 倒计时：进度条 + mm:ss 文案，最后 60 秒切换警示配色 */
+function startBindKeyCountdown(totalSeconds) {
+  stopBindKeyTimer();
+  bindKeyTotalMs = totalSeconds * 1000;
+  bindKeyDeadline = Date.now() + bindKeyTotalMs;
+  const bar = document.getElementById("bindkey-countdown-bar");
+  const text = document.getElementById("bindkey-countdown-text");
+  const wrap = document.querySelector("#bindkey-modal .bindkey-countdown");
+  const tick = () => {
+    const remain = bindKeyDeadline - Date.now();
+    if (remain <= 0) {
+      stopBindKeyTimer();
+      bar.style.width = "0%";
+      markBindKeyExpired();
+      return;
+    }
+    bar.style.width = Math.max(0, (remain / bindKeyTotalMs) * 100).toFixed(3) + "%";
+    wrap.classList.toggle("low", remain <= 60000);
+    const sec = Math.ceil(remain / 1000);
+    text.textContent =
+      String(Math.floor(sec / 60)).padStart(2, "0") + ":" +
+      String(sec % 60).padStart(2, "0") + " " +
+      t("connections.bindkey_expires_suffix");
+    bindKeyTimer = setTimeout(tick, 250);
+  };
+  tick();
+}
+
+/** 过期：模糊指令防继续复制、禁用按钮并轻提示（弹窗保留供用户阅读状态） */
+function markBindKeyExpired() {
+  document.querySelector("#bindkey-modal .bindkey-cmd-card").classList.add("expired");
+  document.getElementById("bindkey-copy-btn").disabled = true;
+  document.getElementById("bindkey-countdown-text").textContent = t("connections.bindkey_expired");
+  toast(t("connections.bindkey_expired"), true);
+}
+
+/** 一键复制绑定指令：clipboard API + execCommand 双回退，成功后按钮变绿反馈 */
+async function copyBindKeyCommand() {
+  const cmd = (document.getElementById("bindkey-command").textContent || "").trim();
+  if (!cmd || cmd === "…") return;
+  const ok = await copyToClipboard(cmd);
+  if (!ok) { toast(t("connections.bindkey_copy_failed"), true); return; }
+  const btn = document.getElementById("bindkey-copy-btn");
+  const label = document.getElementById("bindkey-copy-label");
+  btn.classList.add("copied");
+  label.textContent = t("connections.bindkey_copied");
+  clearTimeout(btn._t);
+  btn._t = setTimeout(() => {
+    btn.classList.remove("copied");
+    label.textContent = t("connections.bindkey_copy");
+  }, 2600);
 }
 
 /* ---------------- QQ 官方机器人扫码登录 ---------------- */

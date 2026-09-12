@@ -64,6 +64,8 @@ class FakeAdapter:
     app_id = "102345678"
     adapter_id = "qqo1"
     display_name = "qqo1"
+    # 与真实适配器属性契约对齐：on_ready 的静默判定会读取此开关
+    suppress_connection_log = True
 
     def __init__(self):
         self.logger = FakeLogger()

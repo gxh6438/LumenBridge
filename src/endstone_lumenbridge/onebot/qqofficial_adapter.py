@@ -554,7 +554,10 @@ class QQOfficialAdapter:
             self._access_token = token
             # 提前 2 分钟过期，避免边界失效
             self._token_expires = now + max(60, expires - 120)
-            self.logger.debug(_t("qqofficial.token_refreshed", seconds=expires))
+            # token 例行刷新属运行类日志：静默模式下不打印（约每小时
+            # 刷新一次，防刷屏）；排障时关闭后台静默日志即可看到
+            if not self.suppress_connection_log:
+                self.logger.debug(_t("qqofficial.token_refreshed", seconds=expires))
             return self._access_token
 
     def _api_domain(self) -> str:
@@ -774,9 +777,12 @@ class QQOfficialAdapter:
             }
         )
         self.bus.emit("bot.online", self)
-        self.logger.info(
-            _t("qqofficial.ready", name=self._bot_user.get("nickname") or self.app_id)
-        )
+        # 登录成功属连接类运行日志：静默模式下不打印（与 connecting /
+        # connected / resumed 及插件侧 bot_connected 同一抑制口径）
+        if not self.suppress_connection_log:
+            self.logger.info(
+                _t("qqofficial.ready", name=self._bot_user.get("nickname") or self.app_id)
+            )
 
     # ------------------------------------------------------------ 发送入口
     def send_group_msg(self, group_id: Any, message: Any) -> None:

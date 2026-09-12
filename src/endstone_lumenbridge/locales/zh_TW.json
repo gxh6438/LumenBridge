@@ -381,6 +381,23 @@
             "banned_word_params": "請文明發言！"
         }
     },
+    "groupbind": {
+        "command_word": "/lumen綁定",
+        "log": {
+            "key_issued": "已為轉接器「{name}」簽發群綁定密鑰（5 分鐘內有效，僅顯示一次）",
+            "bind_success": "群綁定成功：轉接器「{name}」寫入群 {group}、管理員 {user}",
+            "bind_failed": "群綁定失敗：{error}",
+            "reload_failed": "群綁定後重載連線失敗（配置已儲存，重載或重啟後生效）：{error}"
+        },
+        "reply": {
+            "bind_success": "綁定成功！本群已加入互通群清單，你已成為管理員",
+            "already_bound": "本群已完成綁定，無需重複操作",
+            "key_invalid": "綁定密鑰無效或已過期，請前往 LumenBridge 面板重新取得",
+            "format_hint": "指令格式：{command} 密鑰（密鑰請前往 LumenBridge 面板取得）",
+            "bind_failed": "綁定失敗：{error}",
+            "missing_identity": "訊息缺少群或傳送者標識，無法綁定"
+        }
+    },
     "whitelist": {
         "title": "白名單綁定",
         "subtitle": "whitelist.json 綁定記錄",
@@ -1433,6 +1450,7 @@
         "reload_overlay_title": "正在熱重載框架…",
         "reload_overlay_body": "伺服器插件正在重載，WebUI 面板會短暫無法存取。\n完成後本頁將自動重新整理，請勿關閉頁面。",
         "reload_overlay_timeout": "等待面板恢復逾時。請檢查伺服器控制台日誌：若新版本啟動失敗已自動回滾舊版本，直接重新整理頁面即可恢復。",
+        "reload_overlay_refresh": "重新整理頁面",
         "framework_check_failed": "框架更新檢查失敗",
         "framework_apply_failed": "框架更新失敗",
         "search_placeholder": "搜尋外掛名稱、簡介或標籤",
@@ -1647,7 +1665,20 @@
         "enable_hint": "關閉後此轉接器將停止收發訊息",
         "item_count": "{n} 項",
         "name_placeholder": "輸入轉接器名稱",
-        "admin_openid": "管理員 OpenID 清單"
+        "admin_openid": "管理員 OpenID 清單",
+        "bindkey_button": "取得綁定密鑰",
+        "bindkey_button_hint": "產生一次性密鑰，在目標群傳送綁定指令即可自動填入群號與管理員",
+        "bindkey_title": "取得綁定密鑰",
+        "bindkey_intro": "將下方綁定指令傳送到要互通的 QQ 群即可完成綁定（可以 @ 機器人，也可以不 @）。綁定成功後，本群自動加入群聊清單，傳送者自動成為管理員；綁定多個群時管理員不會重複填寫。",
+        "bindkey_command_label": "綁定指令",
+        "bindkey_copy": "一鍵複製綁定指令",
+        "bindkey_copied": "已複製，去群裡傳送吧",
+        "bindkey_copy_failed": "複製失敗，請手動選取指令文字複製",
+        "bindkey_expires_suffix": "後自動失效",
+        "bindkey_expired": "密鑰已失效",
+        "bindkey_once_badge": "僅顯示一次",
+        "bindkey_warn": "密鑰僅顯示一次，關閉本視窗後無法再次查看；產生新密鑰後舊密鑰立即失效。",
+        "bindkey_generate_failed": "綁定密鑰產生失敗"
     },
     "hub": {
         "stop_failed": "停止轉接器 {name} 失敗：{error}",
