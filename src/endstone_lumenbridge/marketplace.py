@@ -1397,6 +1397,9 @@ class MarketplaceClient:
             (receipt_dir / "framework_update.json").write_text(
                 json.dumps(receipt, ensure_ascii=False, indent=2), encoding="utf-8"
             )
+            # 旧 wheel 备份不无限累积：每次成功暂存新版本时只保留最近 3 份，
+            # 更早的备份（对应早已过时的版本）自动清理
+            self._cleanup_framework_backups(keep=3)
             log(f"新版本 v{version} 已暂存就绪，执行 /lumen update framework -y 热重载生效")
             return receipt
         finally:
@@ -1404,6 +1407,23 @@ class MarketplaceClient:
                 os.unlink(download)
             except OSError:
                 pass
+
+    def _cleanup_framework_backups(self, keep: int = 3) -> None:
+        """清理过旧的框架更新备份目录，仅保留最近 keep 份。
+
+        备份目录名为 %Y%m%d-%H%M%S 定长时间戳，字典序即时间序。
+        本次暂存的备份排在最新，不会被清理；回滚阶段使用的正是最新
+        备份，不受影响。
+        """
+        root = Path(self.plugin.data_folder).parent / ".lumenbridge_update_backups"
+        if not root.is_dir():
+            return
+        try:
+            entries = sorted(d for d in root.iterdir() if d.is_dir())
+            for old in (entries[:-keep] if keep > 0 else entries):
+                shutil.rmtree(old, ignore_errors=True)
+        except OSError:
+            pass
 
     @staticmethod
     def _file_sha256(path: Path) -> str:

@@ -71,7 +71,7 @@ def _install_endstone_stubs() -> None:
     event = _ensure_module("endstone.event")
     for attr in (
         "PlayerChatEvent", "PlayerDeathEvent", "PlayerJoinEvent",
-        "PlayerQuitEvent", "PlayerCommandEvent",
+        "PlayerQuitEvent", "PlayerCommandEvent", "BroadcastMessageEvent",
     ):
         if not hasattr(event, attr):
             setattr(event, attr, type(attr, (), {}))

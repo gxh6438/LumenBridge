@@ -298,7 +298,7 @@ class WebUIServer:
         # M2：纯空白字符串同样视同未设置（strip 后为空即走随机密码分支）。
         raw_password = str(webui_conf.get("password") or "").strip()
         self.password: str = raw_password if raw_password else "*"
-        self.secret: str = str(webui_conf.get("secret") or auth_util.generate_secret())
+        self.secret: str = str(webui_conf.get("secret") or self._load_or_persist_secret())
 
         if not self.password or self.password == "*":
             self.password = auth_util.generate_password(8)
@@ -317,6 +317,14 @@ class WebUIServer:
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        # 活跃连接注册表（handler setup 注册 / finish 注销）：
+        # ThreadingHTTPServer 的 shutdown()+server_close() 只关 listen socket，
+        # 已建立的 keep-alive 连接仍由 daemon 处理线程继续响应（僵尸连接）。
+        # 框架热重载后浏览器复用旧连接轮询 /api/health，永远只看到旧实例
+        # 在线（返回旧版本号）→ 前端恢复检测失效，页面卡在等待覆盖层。
+        # stop() 时必须主动断开全部活跃连接，强制前端下次请求新建连接。
+        self._live_conns: set[_socket_mod.socket] = set()
+        self._conn_lock = threading.Lock()
 
         # 子插件扩展注册表（被请求处理线程读、子插件加载线程写，需加锁保护）
         self.custom_apis: dict[tuple[str, str], tuple[Callable, bool]] = {}
@@ -351,6 +359,27 @@ class WebUIServer:
         self._qr_create_last: dict[str, float] = {}
 
         self.metrics_collector = ServerMetricsCollector(self.logger, interval=3.0)
+
+    def _load_or_persist_secret(self) -> str:
+        """读取（或首次生成并落盘）自动生成的会话签名密钥。
+
+        webui.secret 未配置时不再每次启动随机生成：热重载（/reload、
+        框架更新）后新实例复用同一密钥，浏览器登录态无缝保留。
+        与配置中明文的 webui.password 相比不引入额外泄露面。
+        """
+        path = Path(self.plugin.data_folder) / "data" / "webui_secret.txt"
+        try:
+            if path.is_file():
+                value = path.read_text(encoding="utf-8").strip()
+                if value:
+                    return value
+            path.parent.mkdir(parents=True, exist_ok=True)
+            value = auth_util.generate_secret()
+            path.write_text(value, encoding="utf-8")
+            return value
+        except OSError:
+            # 落盘失败（只读目录等）：退化为每次随机，热重载后需重新登录
+            return auth_util.generate_secret()
 
     def start(self) -> None:
         if self._httpd:
@@ -433,6 +462,19 @@ class WebUIServer:
         # 先通知 SSE 请求线程退出，再停止主 HTTP 循环。
         self._stop_event.set()
         self.metrics_collector.stop()
+        # 主动断开全部活跃 keep-alive 连接（僵尸连接根因修复，见 __init__ 注释）：
+        # 否则旧实例的 daemon 处理线程会继续在已建立连接上响应请求，
+        # 热重载后前端轮询 /api/health 始终由旧实例应答，页面无法感知恢复。
+        # 必须放在 httpd.shutdown() 之前：先断连接再停 accept 循环，
+        # 保证新连接无法再进入旧实例。
+        with self._conn_lock:
+            conns = list(self._live_conns)
+            self._live_conns.clear()
+        for conn in conns:
+            try:
+                conn.shutdown(_socket_mod.SHUT_RDWR)
+            except OSError:
+                pass
         httpd = self._httpd
         self._httpd = None
         if httpd:
@@ -857,6 +899,14 @@ class _RequestHandler(BaseHTTPRequestHandler):
     webui: WebUIServer  # 由子类注入
     protocol_version = "HTTP/1.1"
 
+    def finish(self) -> None:
+        try:
+            with self.webui._conn_lock:
+                self.webui._live_conns.discard(self.connection)
+        except Exception:  # noqa: BLE001
+            pass
+        super().finish()
+
     def version_string(self) -> str:  # type: ignore[override]
         """低危：Server 头固定为 LumenBridge，不暴露 Python/BaseHTTP 版本。"""
         return "LumenBridge"
@@ -929,6 +979,16 @@ class _RequestHandler(BaseHTTPRequestHandler):
     def setup(self) -> None:  # type: ignore[override]
         """把 wfile 包装为带 MSG_NOSIGNAL 的写，是抵御 SIGPIPE 杀进程的根本手段（即便宿主重置全局 SIGPIPE）。"""
         super().setup()
+        # 注册到活跃连接表：stop() 时统一断开（僵尸连接根因修复，
+        # 见 WebUIServer.__init__ 注释）——ThreadingHTTPServer 的
+        # shutdown()+server_close() 只关 listen socket，已建立的
+        # keep-alive 连接会由处理线程继续响应，热重载后前端轮询
+        # /api/health 始终命中旧实例，页面卡在等待覆盖层。
+        try:
+            with self.webui._conn_lock:
+                self.webui._live_conns.add(self.connection)
+        except Exception:  # noqa: BLE001
+            pass
         # 设置 socket 超时，防止 Slowloris 慢速攻击耗尽线程池
         try:
             self.connection.settimeout(30)
@@ -1617,8 +1677,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return self._send_json({"code": 200, "data": created, "msg": _t("connections.saved")})
 
         m_conn = re.fullmatch(r"/api/connections/([A-Za-z0-9_\-]+)", path)
-        # reload / reveal 是保留子路径（POST 字面量路由），不能落入 <id> 正则
-        if m_conn and m_conn.group(1) in ("reload", "reveal"):
+        # reload / reveal / bindkey 是保留子路径（POST 字面量路由），不能落入 <id> 正则
+        if m_conn and m_conn.group(1) in ("reload", "reveal", "bindkey"):
             m_conn = None
         if m_conn:
             connections = getattr(plugin, "connections", None)
@@ -1678,6 +1738,20 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 f"[WebUI] 审计：查看适配器敏感字段 ip={reveal_ip} adapter={adapter_id} key={key}"
             )
             return self._send_json({"code": 200, "data": {"value": str(adapter.get(key, "") or ""), "reveal_at": reveal_at}})
+
+        # 群绑定密钥：为适配器签发一次性绑定指令（仅本次返回明文，
+        # 5 分钟自动过期；签发新密钥时旧密钥立即销毁）
+        if method == "POST" and path == "/api/connections/bindkey":
+            connections = getattr(plugin, "connections", None)
+            group_bind = getattr(plugin, "group_bind_module", None)
+            if connections is None or group_bind is None:
+                return self._send_json({"code": 500, "msg": _t("connections.unavailable")}, 500)
+            body = self._read_body()
+            adapter_id = str(body.get("id", "") or "") if isinstance(body, dict) else ""
+            info = group_bind.issue_key(adapter_id)
+            if info is None:
+                return self._send_json({"code": 404, "msg": _t("connections.not_found", id=adapter_id)}, 404)
+            return self._send_json({"code": 200, "data": info})
 
         # ---------------- QQ 官方机器人扫码登录（q.qq.com lite 绑定接口）
         if method == "POST" and path == "/api/qqofficial/qr/create":

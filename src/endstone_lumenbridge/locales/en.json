@@ -381,6 +381,23 @@
             "banned_word_params": "Please keep it civil!"
         }
     },
+    "groupbind": {
+        "command_word": "/lumen bind",
+        "log": {
+            "key_issued": "Group-bind key issued for adapter \"{name}\" (valid for 5 minutes, shown once)",
+            "bind_success": "Group bind succeeded: adapter \"{name}\" saved group {group}, admin {user}",
+            "bind_failed": "Group bind failed: {error}",
+            "reload_failed": "Reload after group bind failed (config saved, effective after reload or restart): {error}"
+        },
+        "reply": {
+            "bind_success": "Bound! This group has been added to the sync list and you are now an admin",
+            "already_bound": "This group is already bound, no action needed",
+            "key_invalid": "Bind key is invalid or expired, please get a new one from the LumenBridge panel",
+            "format_hint": "Usage: {command} <key> (get the key from the LumenBridge panel)",
+            "bind_failed": "Bind failed: {error}",
+            "missing_identity": "Message is missing group or sender identity, cannot bind"
+        }
+    },
     "whitelist": {
         "title": "Whitelist",
         "subtitle": "whitelist.json binding records",
@@ -1648,7 +1665,20 @@
         "enable_hint": "When off, this adapter stops sending and receiving",
         "item_count": "{n} items",
         "name_placeholder": "Adapter name",
-        "admin_openid": "Admin OpenID list"
+        "admin_openid": "Admin OpenID list",
+        "bindkey_button": "Get bind key",
+        "bindkey_button_hint": "Issue a one-time key; send the bind command in the target group to auto-fill group & admin",
+        "bindkey_title": "Get bind key",
+        "bindkey_intro": "Send the command below to the QQ group you want to bridge (with or without @-ing the bot). Once bound, the group is added to the group list and the sender becomes an admin; admins are never duplicated when binding multiple groups.",
+        "bindkey_command_label": "Bind command",
+        "bindkey_copy": "Copy bind command",
+        "bindkey_copied": "Copied! Send it in the group",
+        "bindkey_copy_failed": "Copy failed, please select and copy the text manually",
+        "bindkey_expires_suffix": "until it expires",
+        "bindkey_expired": "Key expired",
+        "bindkey_once_badge": "Shown once",
+        "bindkey_warn": "The key is shown only once and cannot be viewed again after closing; issuing a new key immediately destroys the old one.",
+        "bindkey_generate_failed": "Failed to generate bind key"
     },
     "hub": {
         "stop_failed": "Failed to stop adapter {name}: {error}",

@@ -205,6 +205,58 @@ class WebUiHttpTests(unittest.TestCase):
         self.assertNotIn("Access-Control-Allow-Origin", headers)
         self.assertEqual(headers.get("Allow"), "GET, POST, PUT, DELETE")
 
+    # ─── 静态样式分层（lumen.css 共享层 / app.css 主面板层）───
+    # 子插件页面在 iframe 中通过 <link href="/lumen.css"> 引用共享样式，
+    # link 请求不携带鉴权 token，静态路由必须保持免鉴权可访问。
+
+    def fetch_static(self, path: str, headers: dict[str, str] | None = None):
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=3)
+        connection.request("GET", path, headers=headers or {})
+        response = connection.getresponse()
+        resp_headers = dict(response.getheaders())
+        body = response.read()
+        connection.close()
+        return response.status, resp_headers, body
+
+    def test_static_css_layers_served_with_css_mime_and_etag_revalidation(self) -> None:
+        static_dir = ROOT / "src" / "endstone_lumenbridge" / "webui" / "static"
+        for name in ("lumen.css", "app.css"):
+            with self.subTest(asset=name):
+                # 免鉴权访问（子插件 iframe 内 link 场景）
+                status, headers, body = self.fetch_static(f"/{name}")
+                self.assertEqual(status, 200)
+                self.assertEqual(headers.get("Content-Type"), "text/css; charset=utf-8")
+                # js/css 走 no-cache：每次重验证，ETag 命中即 304
+                self.assertEqual(headers.get("Cache-Control"), "no-cache")
+                etag = headers.get("ETag")
+                self.assertTrue(etag)
+                self.assertEqual(body, (static_dir / name).read_bytes())
+
+                status, headers, _body = self.fetch_static(f"/{name}", {"If-None-Match": etag})
+                self.assertEqual(status, 304)
+                self.assertEqual(headers.get("ETag"), etag)
+
+    def test_static_css_layers_negotiate_gzip(self) -> None:
+        static_dir = ROOT / "src" / "endstone_lumenbridge" / "webui" / "static"
+        import gzip as gzip_mod
+
+        for name in ("lumen.css", "app.css"):
+            with self.subTest(asset=name):
+                status, headers, body = self.fetch_static(f"/{name}", {"Accept-Encoding": "gzip"})
+                self.assertEqual(status, 200)
+                self.assertEqual(headers.get("Content-Encoding"), "gzip")
+                self.assertEqual(headers.get("Vary"), "Accept-Encoding")
+                self.assertEqual(
+                    gzip_mod.decompress(body),
+                    (static_dir / name).read_bytes(),
+                )
+
+                # 不支持 gzip 的客户端拿到未压缩原文
+                status, headers, body = self.fetch_static(f"/{name}")
+                self.assertEqual(status, 200)
+                self.assertNotIn("Content-Encoding", headers)
+                self.assertEqual(body, (static_dir / name).read_bytes())
+
 
 if __name__ == "__main__":
     unittest.main()
