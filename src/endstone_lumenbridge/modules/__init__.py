@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from .admin_command import AdminCommandModule
     from .chat_probe import ChatAbsorptionProbe
     from .chat_sync import ChatSyncModule
     from .group_bind import GroupBindModule
@@ -32,6 +33,9 @@ def __getattr__(name: str) -> Any:
     if name == "GroupBindModule":
         from .group_bind import GroupBindModule
         return GroupBindModule
+    if name == "AdminCommandModule":
+        from .admin_command import AdminCommandModule
+        return AdminCommandModule
     raise AttributeError(name)
 
 
@@ -42,4 +46,5 @@ __all__ = [
     "ChatFilterModule",
     "ChatAbsorptionProbe",
     "GroupBindModule",
+    "AdminCommandModule",
 ]

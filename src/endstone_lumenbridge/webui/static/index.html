@@ -145,6 +145,7 @@
         <div id="config-basic-pane">
           <div class="glass config-pane-panel">
           <div class="config-nav" id="config-nav">
+            <button class="config-nav-btn" data-target="chat" onclick="scrollToConfigSection('chat')" data-i18n="config_nav.chat">聊天转发</button>
             <button class="config-nav-btn" data-target="whitelist" onclick="scrollToConfigSection('whitelist')" data-i18n="config_nav.whitelist">白名单绑定</button>
             <button class="config-nav-btn" data-target="regex_engine" onclick="scrollToConfigSection('regex_engine')" data-i18n="config_nav.regex_engine">正则引擎</button>
             <button class="config-nav-btn" data-target="webui" onclick="scrollToConfigSection('webui')" data-i18n="config_nav.webui">Web 面板</button>
@@ -893,7 +894,7 @@
 <div class="sp-more-menu" id="sp-more-menu" role="menu"></div>
 <div class="sp-desc-popover" id="sp-desc-popover" role="tooltip"></div>
 
-<button id="back-to-top" onclick="window.scrollTo({top:0,behavior:'smooth'})" title="回到顶部">
+<button id="back-to-top" onclick="scrollToTop()" title="回到顶部">
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>
 </button>
 

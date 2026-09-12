@@ -146,6 +146,11 @@
             "zh_CN": "简体中文",
             "zh_TW": "繁體中文"
         },
+        "forward_cancelled_options": {
+            "auto": "自動（按展示證據判定）",
+            "always": "始終轉發",
+            "never": "取消即不轉發"
+        },
         "ws_mode_visual": "視覺化",
         "ws_mode_forward": "正向 WS",
         "ws_mode_reverse": "反向 WS",
@@ -396,6 +401,20 @@
             "format_hint": "指令格式：{command} 密鑰（密鑰請前往 LumenBridge 面板取得）",
             "bind_failed": "綁定失敗：{error}",
             "missing_identity": "訊息缺少群或傳送者標識，無法綁定"
+        }
+    },
+    "admincmd": {
+        "command_word": "/添加管理員",
+        "log": {
+            "added": "介面卡「{name}」新增管理員：{users}",
+            "denied": "非管理員 {user} 嘗試使用新增管理員指令（介面卡 {name}），已拒絕"
+        },
+        "reply": {
+            "permission_denied": "僅管理員可以使用該指令",
+            "format_hint": "指令格式：{command} @用戶 @用戶…（在訊息中 @ 要新增為管理員的人）",
+            "add_success": "已新增 {count} 位管理員：{users}",
+            "already_admin": "被 @ 的用戶均已是管理員，無需重複新增",
+            "add_failed": "新增失敗：{error}"
         }
     },
     "whitelist": {
@@ -1169,6 +1188,13 @@
             "label": "介面語言",
             "desc": "WebUI 使用的語言；設為自動偵測時，啟動後跟隨 Endstone 伺服器語言"
         },
+        "chat": {
+            "section": "聊天轉發",
+            "forward_cancelled": {
+                "label": "轉發被取消的聊天",
+                "desc": "被其他插件/addon取消的聊天是否仍轉發到QQ：auto=按廣播證據智慧判定（美化插件重發→轉發，禁言/屏蔽→不轉發）；always=始終轉發；never=取消即不轉發"
+            }
+        },
         "pip": {
             "section": "pip 套件管理",
             "enable": {
@@ -1410,6 +1436,7 @@
         "title": "設定分類",
         "connection": "連線設定",
         "sync": "群服互通",
+        "chat": "聊天轉發",
         "whitelist": "白名單綁定",
         "regex_engine": "正則引擎",
         "webui": "Web 面板",

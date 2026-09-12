@@ -1,6 +1,7 @@
 """LumenBridge 插件主类：Endstone 群服互通框架。"""
 
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Any, Callable
@@ -32,6 +33,7 @@ from .i18n import (
 )
 from .pip_manager import PipManager
 from .modules import (
+    AdminCommandModule,
     ChatAbsorptionProbe,
     ChatFilterModule,
     ChatSyncModule,
@@ -99,6 +101,7 @@ class LumenBridgePlugin(Plugin):
         self.regex_module: RegexEngineModule | None = None
         self.chat_filter: ChatFilterModule | None = None
         self.group_bind_module: GroupBindModule | None = None
+        self.admin_command_module: AdminCommandModule | None = None
         self.env_pool: EnvPool | None = None
         self.subplugin_manager: SubPluginManager | None = None
         self.marketplace: MarketplaceClient | None = None
@@ -122,9 +125,22 @@ class LumenBridgePlugin(Plugin):
         self._main_thread_id: int = threading.get_ident()
         # 周期性市场更新检查线程的停止信号（on_disable 置位，热重载/停服时退出循环）
         self._market_check_stop = threading.Event()
-        # 聊天吸收探针：跨事件关联（LOWEST 开窗 / 广播记录 / MONITOR 判定），
-        # 识别聊天美化插件取消原生聊天事件后重发导致的转发丢失（见 modules/chat_probe.py）
-        self._chat_probe = ChatAbsorptionProbe()
+        # 聊天吸收探针：时间戳回溯关联广播与原生聊天事件，识别聊天美化
+        # 插件取消原生聊天事件后重发导致的转发丢失（见 modules/chat_probe.py）
+        self._chat_probe = ChatAbsorptionProbe(window_ms=1000)
+
+    @property
+    def _chat_debug(self) -> bool:
+        """聊天事件链路诊断开关（惰性求值，事件处理器内访问）。
+
+        统一由配置 ``debug: true`` 控制（与全局调试日志同开关），
+        关闭时不输出任何 [chatdbg] 日志。
+        """
+        try:
+            cm = getattr(self, "config_manager", None)
+            return bool(cm.data.get("debug", False)) if cm else False
+        except Exception:
+            return False
 
     @property
     def i18n(self):
@@ -229,6 +245,7 @@ class LumenBridgePlugin(Plugin):
             self.regex_module = RegexEngineModule(self)
             self.chat_filter = ChatFilterModule(self)
             self.group_bind_module = GroupBindModule(self)
+            self.admin_command_module = AdminCommandModule(self)
 
             self.bus.on("bot.online", self._on_bot_online)
             self.bus.on("bot.offline", self._on_bot_offline)
@@ -347,6 +364,7 @@ class LumenBridgePlugin(Plugin):
         self.chat_filter = None
         # 群绑定密钥随实例销毁：密钥只存内存，停用即全部失效
         self.group_bind_module = None
+        self.admin_command_module = None
         self.marketplace = None
         # 失效 pip manager 缓存：禁用→启用复用同一实例时会持有旧 config_manager.data
         with self._pip_manager_lock:
@@ -688,23 +706,38 @@ class LumenBridgePlugin(Plugin):
             return key in groups or not groups
         return False
 
-    @event_handler(priority=EventPriority.LOWEST)
-    def on_player_chat_probe(self, event: PlayerChatEvent) -> None:
-        """聊天分发开窗（LOWEST 最先执行，先于一切取消方）。
-
-        聊天美化插件（如 u_beautiful_chat）会在 NORMAL 取消原生聊天事件，
-        改用 broadcast_message 重发格式化文本；窗口内捕获的广播是
-        “消息已实际展示”的证据，供 MONITOR 关窗判定（见 ChatAbsorptionProbe）。
-        """
-        self._chat_probe.open()
+    def _forward_cancelled_mode(self) -> str:
+        """读取 chat.forward_cancelled 策略（auto/always/never，非法值回退 auto）。"""
+        cm = getattr(self, "config_manager", None)
+        try:
+            cfg = cm.data.get("chat", {}) if cm else {}
+            mode = str(cfg.get("forward_cancelled", "auto"))
+        except Exception:
+            return "auto"
+        return mode if mode in ("auto", "always", "never") else "auto"
 
     @event_handler(priority=EventPriority.MONITOR)
     def on_player_chat(self, event: PlayerChatEvent) -> None:
-        # 关窗三态判定：被取消但窗口内发生过广播 → 聊天被美化插件接手
-        # 重发（玩家已看到消息），照常转发；被取消且无广播 → 被管理插件
-        # 抑制（如禁言），不转发（见 modules/chat_probe.py）
-        absorbed = self._chat_probe.close()
-        if event.is_cancelled and not absorbed:
+        # 时间戳回溯三态判定（见 modules/chat_probe.py）：
+        # - 未取消 → 正常聊天，照常转发；
+        # - 已取消 + 窗口内含原始消息的广播 → 聊天被美化插件接手重发
+        #   （玩家已看到消息），照常转发；
+        # - 已取消 + 无匹配广播 → 被管理插件抑制（禁言/屏蔽词/范围聊天），
+        #   不转发。chat.forward_cancelled 可覆盖此策略（always/never）。
+        evidence = self._chat_probe.absorb_evidence(event.player.name, event.message)
+        mode = self._forward_cancelled_mode()
+        if self._chat_debug:
+            self.logger.info(
+                f"[chatdbg] CHAT player={event.player.name} msg={event.message!r} "
+                f"cancelled={event.is_cancelled} evidence={evidence!r} mode={mode} "
+                f"thread={threading.get_ident()}"
+            )
+        if event.is_cancelled and (mode == "never" or (mode == "auto" and not evidence)):
+            if self._chat_debug:
+                self.logger.info(
+                    f"[chatdbg] SUPPRESSED player={event.player.name} msg={event.message!r} "
+                    f"mode={mode} probe={self._chat_probe.dump_debug()}"
+                )
             return
         name = event.player.name
         message = event.message
@@ -717,13 +750,15 @@ class LumenBridgePlugin(Plugin):
 
     @event_handler(priority=EventPriority.MONITOR)
     def on_broadcast_message(self, event: BroadcastMessageEvent) -> None:
-        """记录聊天分发窗口内的广播（MONITOR：只观察不修改）。
+        """无条件记录广播（MONITOR：只观察不修改），供聊天吸收探针回溯匹配。
 
         被其他插件取消的广播不会真正送达玩家，不构成“聊天已展示”
-        的证据，不计入窗口。
+        的证据，不计入。
         """
         if event.is_cancelled:
             return
+        if self._chat_debug:
+            self.logger.info(f"[chatdbg] BROADCAST msg={event.message!r} thread={threading.get_ident()}")
         self._chat_probe.record_broadcast(event.message)
 
     @event_handler(priority=EventPriority.MONITOR)

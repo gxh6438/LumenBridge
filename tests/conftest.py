@@ -81,7 +81,27 @@ def _install_endstone_stubs() -> None:
             setattr(priority, level, level.lower())
         event.EventPriority = priority
     if not hasattr(event, "event_handler"):
-        event.event_handler = lambda *a, **k: (lambda f: f)
+        def _event_handler(func=None, *, priority=None, ignore_cancelled=False):
+            """真实 endstone.event_handler 的离线等价实现。
+
+            与 Endstone 一致：在函数上打 _is_event_handler / _priority /
+            _ignore_cancelled 标记，供 register_events 扫描 dir(listener)
+            发现处理器；支持 @event_handler 与 @event_handler(...) 两种用法。
+            """
+            if priority is None:
+                priority = event.EventPriority.NORMAL
+
+            def decorator(f):
+                f._is_event_handler = True
+                f._priority = priority
+                f._ignore_cancelled = ignore_cancelled
+                return f
+
+            if func:
+                return decorator(func)
+            return decorator
+
+        event.event_handler = _event_handler
 
     # endstone.plugin：plugin.py 的 Plugin 基类
     plugin = _ensure_module("endstone.plugin")

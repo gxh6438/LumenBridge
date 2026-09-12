@@ -989,7 +989,7 @@ function sectionTitleOf(key) {
 function renderConfigForm() {
   const container = document.getElementById("config-form");
   if (!container || !configData || typeof configData !== "object") return;
-  const TOP_ORDER = ["connection", "admin_qq", "main_group", "debug", "sync", "whitelist", "regex_engine", "webui", "background", "language", "pip", "commands", "marketplace", "updates"];
+  const TOP_ORDER = ["connection", "admin_qq", "main_group", "debug", "chat", "sync", "whitelist", "regex_engine", "webui", "background", "language", "pip", "commands", "marketplace", "updates"];
   const ordered = {};
   for (const k of TOP_ORDER) {
     if (k in configData) ordered[k] = configData[k];
@@ -1034,6 +1034,14 @@ function renderConfigForm() {
             { value: "zh_TW", label: t("config.language_options.zh_TW") },
           ];
           ctrl = `<div class="ctrl">${buildSelect("cf-" + path, langOptions, String(val), t("config.select_language"))}</div>`;
+        } else if (path === "chat.forward_cancelled") {
+          const fcOptions = [
+            { value: "auto", label: t("config.forward_cancelled_options.auto") },
+            { value: "always", label: t("config.forward_cancelled_options.always") },
+            { value: "never", label: t("config.forward_cancelled_options.never") },
+          ];
+          const cur = fcOptions.some((o) => o.value === String(val)) ? String(val) : "auto";
+          ctrl = `<div class="ctrl">${buildSelect("cf-" + path, fcOptions, cur)}</div>`;
         } else if (typeof val === "boolean") {
           ctrl = `<div class="switch"><input type="checkbox" id="cf-${path}" ${val ? "checked" : ""}>
                   <label class="track" for="cf-${path}"></label></div>`;
@@ -3873,7 +3881,7 @@ function initConfigNavSpy() {
   const nav = document.getElementById("config-nav");
   if (!nav) return;
   const buttons = nav.querySelectorAll(".config-nav-btn");
-  const keys = ["connection", "sync", "whitelist", "regex_engine", "webui", "background", "language", "pip", "commands", "marketplace", "updates"];
+  const keys = ["connection", "sync", "chat", "whitelist", "regex_engine", "webui", "background", "language", "pip", "commands", "marketplace", "updates"];
   const sections = keys
     .map((k) => document.getElementById("config-section-" + k))
     .filter(Boolean);
@@ -3958,6 +3966,20 @@ window.addEventListener("scroll", () => {
   if (!btn) return;
   btn.classList.toggle("show", window.scrollY > 300);
 }, { passive: true });
+
+// 回到顶部：点击立即隐藏按钮（意图明确），再平滑滚动；
+// 部分浏览器 smooth 动画结束/中断不触发 scroll 事件，click 时的直接隐藏
+// 保证按钮必定消失；用户再次下滚时 scroll 监听会重新唤出按钮。
+function scrollToTop() {
+  const btn = document.getElementById("back-to-top");
+  if (btn) btn.classList.remove("show");
+  try {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  } catch (e) {
+    // 极旧浏览器不支持 scrollTo options：直接跳顶
+    window.scrollTo(0, 0);
+  }
+}
 
 
 let marketTaskTimer = null;

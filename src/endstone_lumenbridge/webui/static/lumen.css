@@ -352,6 +352,20 @@ textarea.json-editor {
 .modal-mask.show { display: flex; animation: fadeIn .22s ease; }
 .modal-mask[data-closable="true"] { cursor: pointer; }
 .modal-mask[data-closable="true"] .modal { cursor: default; }
+/* 性能降载：弹窗打开时停用遮罩下方所有毛玻璃层的 backdrop-filter。
+   多层全屏高斯模糊叠加（页面玻璃卡片 × N + 遮罩 + 弹窗本体）是弹窗
+   页面卡顿的主因，GPU 每帧需对整个视口做多遍模糊采样；遮罩本身已有
+   半透明黑 + 6px 模糊完全盖住下方内容，停用后视觉差异肉眼不可见。
+   弹窗本体（.modal）与其内部下拉菜单的效果保留。
+   :has() 不支持的旧浏览器自动忽略本规则，功能不受影响。 */
+body:has(.modal-mask.show) .glass:not(.modal),
+body:has(.modal-mask.show) .adapter-card,
+body:has(.modal-mask.show) .tabbar,
+body:has(.modal-mask.show) .config-pane-switch,
+body:has(.modal-mask.show) .log-box {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
 /* 子插件弹窗外围遮罩条：与 .modal-mask 同色同模糊、z-index 同层（盖过底部导航 tabbar），
    点击视为点击弹窗外区域（转发关闭给 iframe 内的弹窗）。
    关键：容器本身 pointer-events:none——容器铺满全屏，若可点击会盖在 iframe 上方，
