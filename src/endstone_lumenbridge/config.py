@@ -17,6 +17,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # connection / admin_qq / main_group / sync 由适配器卡片单独配置（见 connections.ConnectionManager）
     "debug": False,
 
+    # 聊天转发行为：
+    # - forward_cancelled: 被(其他插件/addon)取消的聊天是否仍转发到 QQ
+    #   auto   = 默认，时间戳回溯判定：取消但消息经广播重发展示 → 转发；
+    #            取消且无展示证据（禁言/屏蔽词/范围聊天）→ 不转发
+    #   always = 始终转发（兼容无广播信号的重发型聊天插件，代价是禁言
+    #            插件拦截的消息也会转发）
+    #   never  = 取消即不转发（最严格）
+    "chat": {
+        "forward_cancelled": "auto",
+    },
+
     # "auto" = 启动时自动检测 Endstone 服务器语言
     "language": "auto",
 

@@ -1814,7 +1814,7 @@ textarea.file-editor {
   box-shadow: 0 6px 18px rgba(48, 209, 88, .28), inset 0 1px .5px rgba(255, 255, 255, .3);
 }
 
-/* 倒计时：渐变进度条 + 等宽数字；最后 60 秒切警示色 */
+/* 倒计时：纯色进度条 + 等宽数字；最后 60 秒切警示色 */
 .bindkey-countdown {
   display: flex; align-items: center; gap: 12px; margin-top: 14px;
 }
@@ -1824,7 +1824,7 @@ textarea.file-editor {
 }
 .bindkey-countdown-bar {
   height: 100%; width: 100%; border-radius: 999px;
-  background: linear-gradient(90deg, var(--accent), #bf5af2);
+  background: var(--accent);
   transition: width .3s linear, background .3s ease;
 }
 .bindkey-countdown.low .bindkey-countdown-bar { background: var(--orange); }

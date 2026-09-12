@@ -145,6 +145,11 @@
             "zh_CN": "简体中文",
             "zh_TW": "繁體中文"
         },
+        "forward_cancelled_options": {
+            "auto": "Auto (detect via display evidence)",
+            "always": "Always forward",
+            "never": "Never forward when cancelled"
+        },
         "ws_mode_visual": "Visual",
         "ws_mode_forward": "Forward WS",
         "ws_mode_reverse": "Reverse WS",
@@ -396,6 +401,20 @@
             "format_hint": "Usage: {command} <key> (get the key from the LumenBridge panel)",
             "bind_failed": "Bind failed: {error}",
             "missing_identity": "Message is missing group or sender identity, cannot bind"
+        }
+    },
+    "admincmd": {
+        "command_word": "/addadmin",
+        "log": {
+            "added": "Adapter \"{name}\": admins added: {users}",
+            "denied": "Non-admin {user} tried to use the add-admin command (adapter {name}), rejected"
+        },
+        "reply": {
+            "permission_denied": "Only admins can use this command",
+            "format_hint": "Usage: {command} @user @user… (mention the users to promote in the message)",
+            "add_success": "Added {count} admin(s): {users}",
+            "already_admin": "All mentioned users are already admins, nothing changed",
+            "add_failed": "Failed to add: {error}"
         }
     },
     "whitelist": {
@@ -1169,6 +1188,13 @@
             "label": "Interface language",
             "desc": "Language used by the WebUI; Auto Detect follows the Endstone server language at startup"
         },
+        "chat": {
+            "section": "Chat Forwarding",
+            "forward_cancelled": {
+                "label": "Forward Cancelled Chats",
+                "desc": "Whether chats cancelled by other plugins/addons still forward to QQ: auto = smart detection via broadcast evidence (reformatted chat forwards, mute/filter blocks); always = always forward; never = never forward cancelled chats"
+            }
+        },
         "pip": {
             "section": "pip Packages",
             "enable": {
@@ -1410,6 +1436,7 @@
         "title": "Categories",
         "connection": "Connection",
         "sync": "Chat Sync",
+        "chat": "Chat Forwarding",
         "whitelist": "Whitelist",
         "regex_engine": "Regex Engine",
         "webui": "Web Panel",

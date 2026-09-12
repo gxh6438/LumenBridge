@@ -217,6 +217,8 @@ class _NullLock:
 CONFIG_LABEL_KEYS: dict[str, str] = {
     "debug": "debug",
     "language": "language",
+    "chat": "chat.section",
+    "chat.forward_cancelled": "chat.forward_cancelled",
     "whitelist": "whitelist.section",
     "whitelist.enable": "whitelist.enable",
     "whitelist.auto_add": "whitelist.auto_add",
