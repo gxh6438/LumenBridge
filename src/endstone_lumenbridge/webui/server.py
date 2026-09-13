@@ -11,6 +11,7 @@ import os
 import platform
 import re
 import secrets
+import sys
 import threading
 import time
 import urllib.error
@@ -135,6 +136,11 @@ SENSITIVE_KEYS = {
 
 # 上传/URL 下载的统一大小上限（16MB），防止全量读入内存导致 DoS
 _MAX_UPLOAD_BYTES = 16 * 1024 * 1024
+
+# 进程级会话密钥在 sys 模块上的挂载属性名：插件热重载/框架更新会重建
+# WebUIServer 实例甚至重导入本模块，sys 模块对象在进程内恒存，是跨实例
+# 共享状态的可靠载体（不落盘，进程重启即消失）
+_PROCESS_SECRET_ATTR = "_lumenbridge_webui_secret"
 
 EDITABLE_SUFFIXES = {".json", ".py", ".txt", ".md", ".yml", ".yaml", ".cfg", ".ini", ".html", ".css", ".js"}
 
@@ -296,11 +302,15 @@ class WebUIServer:
         webui_conf = plugin.config_manager.data.get("webui", {})
         self.host: str = str(webui_conf.get("host") or "127.0.0.1")
         self.port: int = int(webui_conf.get("port") or 8300)
-        # ""/"*" 视为待生成随机密码，避免 hmac.compare_digest(b"", b"") 通过登录。
+        # ""/"*" 视为待生成随机密码；支持 pbkdf2_sha256$... 哈希格式与旧明文格式
+        #（明文在首次成功登录后自动迁移为哈希，见登录路由处理）。
         # M2：纯空白字符串同样视同未设置（strip 后为空即走随机密码分支）。
         raw_password = str(webui_conf.get("password") or "").strip()
         self.password: str = raw_password if raw_password else "*"
-        self.secret: str = str(webui_conf.get("secret") or self._load_or_persist_secret())
+        # 密码是否来自配置（决定登录后能否回写哈希）：随机生成的不落盘、
+        # 保持每次启动重新生成的设计，不参与自动迁移
+        self._password_from_config: bool = bool(raw_password)
+        self.secret: str = str(webui_conf.get("secret") or self._process_scoped_secret())
 
         if not self.password or self.password == "*":
             self.password = auth_util.generate_password(8)
@@ -362,26 +372,31 @@ class WebUIServer:
 
         self.metrics_collector = ServerMetricsCollector(self.logger, interval=3.0)
 
-    def _load_or_persist_secret(self) -> str:
-        """读取（或首次生成并落盘）自动生成的会话签名密钥。
+    def _process_scoped_secret(self) -> str:
+        """获取进程级会话签名密钥（不落盘）。
 
-        webui.secret 未配置时不再每次启动随机生成：热重载（/reload、
-        框架更新）后新实例复用同一密钥，浏览器登录态无缝保留。
-        与配置中明文的 webui.password 相比不引入额外泄露面。
+        webui.secret 未配置时：热重载（/lumen reload、框架更新）在同一
+        进程内重建实例，通过 sys 模块属性复用同一密钥，浏览器登录态无缝
+        保留；服务器进程重启（新进程）则重新生成——已签发 token 签名校验
+        不过，必须重新登录，避免"重启后无需密码仍可进入面板"。
+        旧版本曾把密钥落盘到 data/webui_secret.txt（重启后旧 token 仍有效），
+        该文件已不再使用，每次调用顺带清理（含同进程后续实例）。
         """
-        path = Path(self.plugin.data_folder) / "data" / "webui_secret.txt"
+        legacy = Path(self.plugin.data_folder) / "data" / "webui_secret.txt"
         try:
-            if path.is_file():
-                value = path.read_text(encoding="utf-8").strip()
-                if value:
-                    return value
-            path.parent.mkdir(parents=True, exist_ok=True)
-            value = auth_util.generate_secret()
-            path.write_text(value, encoding="utf-8")
-            return value
+            if legacy.is_file():
+                legacy.unlink()
         except OSError:
-            # 落盘失败（只读目录等）：退化为每次随机，热重载后需重新登录
-            return auth_util.generate_secret()
+            pass
+        secret = getattr(sys, _PROCESS_SECRET_ATTR, None)
+        if isinstance(secret, str) and secret:
+            return secret
+        secret = auth_util.generate_secret()
+        try:
+            setattr(sys, _PROCESS_SECRET_ATTR, secret)
+        except Exception:
+            pass  # sys 模块只读的极端环境：退化为实例级密钥
+        return secret
 
     def start(self) -> None:
         if self._httpd:
@@ -553,6 +568,65 @@ class WebUIServer:
                 lock = min(self.LOGIN_LOCK_BASE_SECONDS * (2 ** (exceed - 1)), self.LOGIN_LOCK_MAX_SECONDS)
                 state["locked_until"] = now + lock
 
+    def _upgrade_password_storage(self, plain: str) -> None:
+        """把配置中的明文密码迁移为哈希存储（密码本身不变，token 不失效）。
+
+        旧版本配置以明文保存 webui.password，泄露面大；首次用明文密码成功
+        登录即回写为 pbkdf2 哈希。随机生成（未落盘）的密码不参与迁移。
+        """
+        try:
+            hashed = auth_util.hash_password(plain)
+            cm = self.plugin.config_manager
+            if cm is not None:
+                cm.apply_patch({"webui": {"password": hashed}})
+            self.password = hashed
+            self._password_from_config = True
+            self.logger.info("[WebUI] 管理员密码已自动迁移为哈希存储")
+        except Exception:
+            # 迁移失败（只读配置等）不影响登录：保持明文，下次再试
+            pass
+
+    # 控制台密码重置上限：命令参数不适合承载超长口令，128 覆盖所有
+    # 常规密码管理器生成的强口令
+    MAX_CONSOLE_PASSWORD_LENGTH = 128
+
+    def set_webui_password(self, plain: str) -> None:
+        """重置管理员密码（/lumen password 控制台命令调用，仅限控制台）。
+
+        哈希后落盘（配置文件不出现明文）、运行时立即生效，并使所有已签发
+        token 失效——旧会话必须用新密码重新登录。无效输入（空白/超长）
+        抛 ValueError，由命令层转为用法提示；配置写入失败原样抛出。
+        """
+        pw = str(plain).strip()
+        if not pw:
+            raise ValueError("empty password")
+        if len(pw) > self.MAX_CONSOLE_PASSWORD_LENGTH:
+            raise ValueError("password too long")
+        hashed = auth_util.hash_password(pw)
+        cm = self.plugin.config_manager
+        if cm is not None:
+            cm.apply_patch({"webui": {"password": hashed}})
+        self.password = hashed
+        self._password_from_config = True
+        self.auth_provider.invalidate_tokens()
+
+    def clear_webui_password(self) -> str:
+        """清除管理员密码并转入随机模式（/lumen password 无参数时调用）。
+
+        配置写回 "*" 哨兵（空串会被校验拒绝），此后每次启动生成随机密码；
+        当前运行期立即生成一个随机密码并返回，由调用方打印到服务器控制台
+        stdout（不走 logger，避免明文进入 WebUI 日志缓冲/SSE 被回看）。
+        所有已签发 token 同步失效。
+        """
+        cm = self.plugin.config_manager
+        if cm is not None:
+            cm.apply_patch({"webui": {"password": "*"}})
+        new_pw = auth_util.generate_password(12)
+        self.password = new_pw
+        self._password_from_config = False
+        self.auth_provider.invalidate_tokens()
+        return new_pw
+
     def refresh_config(self) -> None:
         """按最新配置刷新运行参数（供 /lumen reload 调用，不整体重建实例）。
 
@@ -568,10 +642,12 @@ class WebUIServer:
             if isinstance(raw, dict):
                 conf = raw
 
-        # M2：空白密码视同未设置，保持现值（不被 reload 悄悄换掉）
+        # M2：空白密码视同未设置，保持现值（不被 reload 悄悄换掉）。
+        # 哈希与明文格式的变更均直接采纳；明文由首次登录触发迁移。
         new_password = str(conf.get("password") or "").strip()
         if new_password and new_password != "*" and new_password != self.password:
             self.password = new_password
+            self._password_from_config = True
             self.auth_provider.invalidate_tokens()
             self.logger.info("[WebUI] 管理员密码已按新配置更新")
 
@@ -1486,6 +1562,66 @@ class _RequestHandler(BaseHTTPRequestHandler):
         kept = [d for d in deps if d not in missing and _norm(d) in others_need]
         return removable, kept
 
+    def _run_zip_install(self, tmp_zip: str) -> tuple[tuple[dict[str, Any], int] | None, tuple[bool, str, str]]:
+        """主线程执行子插件 ZIP 安装：统一互斥、超时与临时文件清理。
+
+        返回 (错误响应, (ok, msg, name))：错误响应非 None 时表示流程
+        已失败（互斥冲突 / 调度异常 / 超时），调用方直接发送给客户端。
+        """
+        plugin = self.plugin
+        result: list[Any] = [False, _t("webui.msg.install_timeout"), ""]
+        done = threading.Event()
+        # 安装与 reload/uninstall 同为主线程长操作：必须经 _main_op_lock
+        # 串行化，否则并发读写 subplugins 字典与插件目录会产生半安装状态
+        finish, defer = self._acquire_main_op(done)
+        if finish is None:
+            return ({"code": 409, "msg": "另一主线程操作正在执行，请稍后再试"}, 409), tuple(result)
+
+        def _cleanup() -> None:
+            try:
+                os.unlink(tmp_zip)
+            except OSError:
+                pass
+
+        def do_install() -> None:
+            try:
+                result[0], result[1], result[2] = plugin.subplugin_manager.install_from_zip(tmp_zip)
+            except Exception as e:  # noqa: BLE001
+                result[0], result[1] = False, _t("webui.msg.install_exception", error=e)
+            finally:
+                done.set()
+                _cleanup()
+
+        deferred = False
+        try:
+            try:
+                plugin.run_on_main(do_install)
+            except Exception as e:  # noqa: BLE001
+                # 调度失败时 do_install 不会执行，须在此清理临时文件
+                _cleanup()
+                return ({"code": 500, "msg": _t("webui.msg.install_exception", error=e)}, 500), tuple(result)
+            if not done.wait(timeout=30):
+                # 超时路径锁交由 defer 的守护线程兜底释放（等任务真正完成），
+                # 不能被 finally 的 finish() 覆盖，否则 defer 形同虚设
+                defer()
+                deferred = True
+                return ({"code": 400, "msg": _t("webui.msg.install_timeout")}, 400), tuple(result)
+        finally:
+            if not deferred:
+                finish()
+        return None, (bool(result[0]), str(result[1]), str(result[2]))
+
+    def _send_install_result(self, ok: bool, msg: str, name: str) -> None:
+        """安装结果响应：ZIP 已落盘和可运行是两个状态（见 upload 端点注释）。"""
+        loaded = False
+        manager = self.plugin.subplugin_manager
+        if name and manager:
+            with manager._lock:
+                loaded = bool(getattr(manager.subplugins.get(name), "loaded", False))
+        if ok:
+            return self._send_json({"code": 200, "msg": msg, "data": {"name": name, "loaded": loaded}})
+        return self._send_json({"code": 400, "msg": msg}, 400)
+
     def _route_api(self, method: str, path: str, query: dict[str, str]) -> None:
         if method == "POST" and path == "/api/auth/login":
             body = self._read_body() or {}
@@ -1497,10 +1633,15 @@ class _RequestHandler(BaseHTTPRequestHandler):
             ok, gmsg = self.webui._login_check_allowed(ip)
             if not ok:
                 return self._send_json({"code": 429, "msg": gmsg}, 429)
-            if hmac.compare_digest(str(body.get("password", "")).encode("utf-8"),
-                                   str(self.webui.password).encode("utf-8")):
+            input_pw = str(body.get("password", ""))
+            if auth_util.verify_password(input_pw, self.webui.password):
                 self.webui._login_record_result(ip, True)
                 token = self.webui.auth_provider.issue_token()
+                # 旧配置明文密码：登录成功后自动迁移为哈希存储（密码不变、
+                # token 不失效）；随机生成的密码（未落盘）不迁移
+                if (self.webui._password_from_config
+                        and not auth_util.is_hashed_password(self.webui.password)):
+                    self.webui._upgrade_password_storage(input_pw)
                 return self._send_json({"code": 200, "data": {"token": token}})
             self.webui._login_record_result(ip, False)
             return self._send_json({"code": 401, "msg": _t("webui.msg.password_error")}, 401)
@@ -1623,6 +1764,15 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
                 unmask(body, cm.data)
 
+                # 用户在配置页设置了新密码（非掩码回传）：落盘前转为哈希，
+                # 配置文件中不再出现明文密码
+                body_webui = body.get("webui")
+                if isinstance(body_webui, dict) and isinstance(body_webui.get("password"), str):
+                    typed_pw = body_webui["password"].strip()
+                    if (typed_pw and set(typed_pw) != {"*"}
+                            and not auth_util.is_hashed_password(typed_pw)):
+                        body_webui["password"] = auth_util.hash_password(typed_pw)
+
                 # 由 ConfigManager 统一校验并原子合并/保存，避免未知键/错误类型/危险范围值落盘后在 reload 时失败。
                 try:
                     cm.apply_patch(body)
@@ -1639,6 +1789,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     new_secret = str(new_webui_conf.get("secret") or "").strip()
                     if new_password and new_password != self.webui.password and set(new_password) != {"*"}:
                         self.webui.password = new_password
+                        self.webui._password_from_config = True
                         self.webui.auth_provider.invalidate_tokens()
                     if new_secret and new_secret != self.webui.secret and set(new_secret) != {"*"}:
                         self.webui.secret = new_secret
@@ -2625,69 +2776,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
             with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tf:
                 tf.write(content)
                 tmp_zip = tf.name
-            tmp_zip_cleaned = [False]
-
-            def _cleanup_tmp_zip() -> None:
-                if tmp_zip_cleaned[0]:
-                    return
-                tmp_zip_cleaned[0] = True
-                try:
-                    os.unlink(tmp_zip)
-                except OSError:
-                    pass
-
-            # 临时文件清理统一由 do_install 的 finally 负责（含超时场景），
-            # 请求线程超时返回后不再二次等待，避免请求线程被继续占用
-            result: list[Any] = [False, _t("webui.msg.install_timeout"), ""]
-            done = threading.Event()
-            # 安装与 reload/uninstall 同为主线程长操作：必须经 _main_op_lock
-            # 串行化，否则并发读写 subplugins 字典与插件目录会产生半安装状态
-            finish, defer = self._acquire_main_op(done)
-            if finish is None:
-                _cleanup_tmp_zip()
-                return self._send_json({"code": 409, "msg": "另一主线程操作正在执行，请稍后再试"}, 409)
-            deferred = False
-
-            def do_install() -> None:
-                try:
-                    result[0], result[1], result[2] = plugin.subplugin_manager.install_from_zip(tmp_zip)
-                except Exception as e:  # noqa: BLE001
-                    result[0], result[1] = False, _t("webui.msg.install_exception", error=e)
-                finally:
-                    done.set()
-                    _cleanup_tmp_zip()
-
-            try:
-                try:
-                    plugin.run_on_main(do_install)
-                except Exception as e:  # noqa: BLE001
-                    # 调度失败时 do_install 不会执行，须在此清理临时文件
-                    _cleanup_tmp_zip()
-                    return self._send_json({"code": 500, "msg": _t("webui.msg.install_exception", error=e)}, 500)
-                if not done.wait(timeout=30):
-                    # 超时路径锁交由 defer 的守护线程兜底释放（等任务真正完成），
-                    # 不能被 finally 的 finish() 覆盖，否则 defer 形同虚设
-                    defer()
-                    deferred = True
-                    return self._send_json({"code": 400, "msg": _t("webui.msg.install_timeout")}, 400)
-            finally:
-                if not deferred:
-                    finish()
-            ok, msg, name = bool(result[0]), str(result[1]), str(result[2])
-            loaded = False
-            manager = plugin.subplugin_manager
-            if name and manager:
-                with manager._lock:
-                    loaded = bool(getattr(manager.subplugins.get(name), "loaded", False))
-            if ok:
-                # ZIP 已落盘和可运行是两个状态：依赖缺失/加载异常时仍应让
-                # 前端刷新列表展示可诊断错误，而不能伪装成已完全启用。
-                return self._send_json({
-                    "code": 200,
-                    "msg": msg,
-                    "data": {"name": name, "loaded": loaded},
-                })
-            return self._send_json({"code": 400, "msg": msg}, 400)
+            error, (ok, msg, name) = self._run_zip_install(tmp_zip)
+            if error is not None:
+                return self._send_json(*error)
+            # ZIP 已落盘和可运行是两个状态：依赖缺失/加载异常时仍应让
+            # 前端刷新列表展示可诊断错误，而不能伪装成已完全启用。
+            return self._send_install_result(ok, msg, name)
 
         if method == "POST" and path == "/api/subplugins/install/url":
             body = self._read_body() or {}
@@ -2748,61 +2842,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
             with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tf:
                 tf.write(data)
                 tmp_zip = tf.name
-            tmp_zip_cleaned2 = [False]
-
-            def _cleanup_tmp_zip2() -> None:
-                if tmp_zip_cleaned2[0]:
-                    return
-                tmp_zip_cleaned2[0] = True
-                try:
-                    os.unlink(tmp_zip)
-                except OSError:
-                    pass
-
-            result2: list[Any] = [False, _t("webui.msg.install_timeout"), ""]
-            done2 = threading.Event()
-            # 与 upload 安装端点同款主线程操作互斥（见上方注释）
-            finish2, defer2 = self._acquire_main_op(done2)
-            if finish2 is None:
-                _cleanup_tmp_zip2()
-                return self._send_json({"code": 409, "msg": "另一主线程操作正在执行，请稍后再试"}, 409)
-            deferred2 = False
-
-            def do_install2() -> None:
-                try:
-                    result2[0], result2[1], result2[2] = plugin.subplugin_manager.install_from_zip(tmp_zip)
-                except Exception as e:  # noqa: BLE001
-                    result2[0], result2[1] = False, _t("webui.msg.install_exception", error=e)
-                finally:
-                    done2.set()
-                    _cleanup_tmp_zip2()
-
-            try:
-                try:
-                    plugin.run_on_main(do_install2)
-                except Exception as e:  # noqa: BLE001
-                    _cleanup_tmp_zip2()
-                    return self._send_json({"code": 500, "msg": _t("webui.msg.install_exception", error=e)}, 500)
-                if not done2.wait(timeout=30):
-                    defer2()
-                    deferred2 = True
-                    return self._send_json({"code": 400, "msg": _t("webui.msg.install_timeout")}, 400)
-            finally:
-                if not deferred2:
-                    finish2()
-            ok, msg, name = bool(result2[0]), str(result2[1]), str(result2[2])
-            loaded = False
-            manager = plugin.subplugin_manager
-            if name and manager:
-                with manager._lock:
-                    loaded = bool(getattr(manager.subplugins.get(name), "loaded", False))
-            if ok:
-                return self._send_json({
-                    "code": 200,
-                    "msg": msg,
-                    "data": {"name": name, "loaded": loaded},
-                })
-            return self._send_json({"code": 400, "msg": msg}, 400)
+            error, (ok, msg, name) = self._run_zip_install(tmp_zip)
+            if error is not None:
+                return self._send_json(*error)
+            return self._send_install_result(ok, msg, name)
 
         m = re.fullmatch(r"/api/subplugins/([A-Za-z0-9_\-]+)/uninstall-preview", path)
         if m and method == "GET":

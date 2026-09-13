@@ -13,6 +13,41 @@ from typing import Any
 
 TOKEN_TTL = 24 * 3600
 
+# 管理员密码的哈希存储格式：pbkdf2_sha256$<迭代数>$<盐hex>$<摘要hex>
+_HASH_SCHEME = "pbkdf2_sha256"
+_PBKDF2_ITERATIONS = 240_000
+# 迭代数上限：防配置被人为塞入天文数字导致每次登录耗时暴涨（DoS）
+_PBKDF2_MAX_ITERATIONS = 2_000_000
+
+
+def hash_password(plain: str) -> str:
+    """生成带随机盐的 PBKDF2-SHA256 密码哈希串（配置存储用）。"""
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", plain.encode("utf-8"), salt, _PBKDF2_ITERATIONS)
+    return f"{_HASH_SCHEME}${_PBKDF2_ITERATIONS}${salt.hex()}${digest.hex()}"
+
+
+def is_hashed_password(stored: str) -> bool:
+    """判断存储值是否已是哈希格式（决定登录校验与自动迁移分支）。"""
+    return isinstance(stored, str) and stored.startswith(_HASH_SCHEME + "$")
+
+
+def verify_password(plain: str, stored: str) -> bool:
+    """校验密码：存储值为哈希串则走 PBKDF2，否则按明文恒时比较（旧配置兼容）。"""
+    if is_hashed_password(stored):
+        try:
+            _, iters_s, salt_hex, digest_hex = stored.split("$", 3)
+            iters = int(iters_s)
+            salt = bytes.fromhex(salt_hex)
+            expected = bytes.fromhex(digest_hex)
+        except (ValueError, AttributeError):
+            return False
+        if iters <= 0 or iters > _PBKDF2_MAX_ITERATIONS:
+            return False
+        got = hashlib.pbkdf2_hmac("sha256", plain.encode("utf-8"), salt, iters)
+        return hmac.compare_digest(got, expected)
+    return hmac.compare_digest(str(plain).encode("utf-8"), str(stored).encode("utf-8"))
+
 
 def generate_secret() -> str:
     """生成随机签名密钥"""

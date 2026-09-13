@@ -1,5 +1,8 @@
 "use strict";
 
+// 日志级别白名单：防止畸形/恶意 level 注入 HTML
+const LOG_LEVELS = new Set(["trace", "debug", "info", "warn", "warning", "error", "critical", "fatal"]);
+
 let TOKEN = localStorage.getItem("lumen_token") || "";
 let configMode = "form"; // form | json
 let configData = null;
@@ -29,9 +32,11 @@ let pipTaskState = null;       // { taskId, done, success, subpluginName, status
 let pipPollTimer = null;
 let reloadPromptState = null;  // { subpluginName, isConfig }
 let subpluginDepsCache = {};   // 子插件名 -> 缺失依赖列表
-let subpluginErrorCache = {};  // 子插件名 -> 错误信息全文
+let subpluginErrorCache = {}; // 子插件名 -> 错误信息全文
 let subpluginMarketCache = {}; // 子插件名 -> { market, version, hasError, hasMissing }，更新流程复用
 let editingDepsPlugin = "";
+let subpluginsGeneration = 0;  // 并发刷新守卫：晚到的旧响应不再覆盖新数据
+let marketplaceGeneration = 0; // 同上（市场列表搜索/排序快速切换）
 let configNavObserver = null;
 let spMoreMenuState = null;    // { name, btn } 当前打开的 ⋯ 菜单
 let marketUpdateState = null;  // { name, marketId, detail, currentVersion, selectedVersion } 市场更新流程状态
@@ -257,15 +262,6 @@ function cssEscape(s) {
   return window.CSS && CSS.escape ? CSS.escape(String(s ?? "")) : String(s ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
 }
 
-function textAction(label, onclick, extraClass = "ghost", symbol = "") {
-  const icon = symbol ? `<span class="action-icon" aria-hidden="true">${symbol}</span>` : "";
-  return `<button class="btn small ${extraClass}" onclick="${onclick}">${icon}<span>${esc(label)}</span></button>`;
-}
-
-function spMenuItem(label, onclick, cls = "") {
-  return `<button class="btn small ${cls}" onclick="${onclick}">${esc(label)}</button>`;
-}
-
 document.addEventListener("click", (e) => {
   if (!e.target.closest(".custom-select")) closeAllCustomSelects();
 });
@@ -311,9 +307,13 @@ function fmtSize(bytes) {
 }
 
 function closeModal(id) {
-  // 关闭子插件配置弹窗时丢弃暂存文件（取消 = 不上传）
+  // 关闭子插件配置弹窗时丢弃暂存文件（取消 = 不上传）并释放预览 blob
   if (id === "plugin-config-modal") {
     editingPluginPendingFiles = {};
+    document.querySelectorAll("#plugin-config-modal img[data-blob-src]").forEach((img) => {
+      try { URL.revokeObjectURL(img.dataset.blobSrc); } catch (e) {}
+      delete img.dataset.blobSrc;
+    });
   }
   // 关闭文件弹窗时解除编辑器 live 标记，恢复外层玻璃模糊
   if (id === "files-modal") setEditorLive("file-editor-host", false);
@@ -986,6 +986,9 @@ function sectionTitleOf(key) {
   return (info && info._) ? info._ : key;
 }
 
+// 与服务端 SENSITIVE_KEYS 对齐：配置表单中这些字段渲染为密码框（带眼睛按钮）
+const SENSITIVE_FIELD_KEYS = new Set(["password", "secret", "access_token", "app_secret", "client_secret", "api_key", "token", "private_key"]);
+
 function renderConfigForm() {
   const container = document.getElementById("config-form");
   if (!container || !configData || typeof configData !== "object") return;
@@ -1049,6 +1052,13 @@ function renderConfigForm() {
           ctrl = `<div class="ctrl"><input type="number" id="cf-${path}" value="${esc(val)}"></div>`;
         } else if (Array.isArray(val)) {
           ctrl = `<div class="ctrl"><input type="text" id="cf-${path}" value="${esc(val.join(", "))}" data-array="1"></div>`;
+        } else if (typeof val === "string" && SENSITIVE_FIELD_KEYS.has(key)) {
+          // 敏感字段（webui.password 等）：密码框 + 本地明文切换眼睛
+          ctrl = `<div class="ctrl"><div class="secret-field">
+            <input type="password" id="cf-${path}" value="${esc(val)}" autocomplete="new-password" spellcheck="false">
+            <button type="button" class="secret-eye" data-shown="0" onclick="togglePwVisibility(this)"
+                    data-i18n-title="login.show_password" title="${esc(t("login.show_password"))}">${EYE_SHOW_SVG}</button>
+          </div></div>`;
         } else {
           ctrl = `<div class="ctrl"><input type="text" id="cf-${path}" value="${esc(val)}"></div>`;
         }
@@ -1767,10 +1777,13 @@ async function openPluginConfig(name) {
   }
 }
 
+let savePluginConfigInflight = false; // 防重复提交：保存/上传进行中忽略再次点击
 async function savePluginConfig() {
+  if (savePluginConfigInflight) return;
   const name = editingPluginConfig;
   const schema = editingPluginSchema;
   if (!name || !schema || !Array.isArray(schema.items)) return;
+  savePluginConfigInflight = true;
   try {
     // 1) 先保存普通配置字段（file/section 类型跳过，file 由独立端点处理）
     const body = {};
@@ -1791,15 +1804,21 @@ async function savePluginConfig() {
         const fileItem = schema.items.find((it) => it.key === itemKey && it.type === "file");
         const uploadUrl = fileItem ? fileItem.upload_url : "";
         if (!uploadUrl) continue;
+        // 上传端点必须同源：upload_url 来自子插件 schema，外链会把 token 发给第三方
+        const resolved = new URL(uploadUrl, location.href);
+        if (resolved.origin !== location.origin) {
+          toast(t("subplugins.upload_url_rejected", { url: uploadUrl }), true);
+          return;
+        }
         const form = new FormData();
         form.append("file", file);
         const token = localStorage.getItem("lumen_token") || "";
-        const resp = await fetch(uploadUrl, {
+        const resp = await fetch(resolved.pathname + resolved.search, {
           method: "POST",
           headers: token ? { Authorization: "Bearer " + token } : {},
           body: form,
         });
-        const data = await resp.json();
+        const data = await resp.json().catch(() => ({}));
         if (data.code !== 200 || (data.data && data.data.ok === false)) {
           const msg = (data.data && data.data.msg) || data.msg || "文件上传失败";
           toast(msg, true);
@@ -1813,6 +1832,7 @@ async function savePluginConfig() {
     pcSetDirty(false);
     closeModal("plugin-config-modal");
   } catch (e) { toast(t("subplugins.config_save_failed", { error: e.message }), true); }
+  finally { savePluginConfigInflight = false; }
 }
 
 // 文件配置项：选择文件后只做本地预览，暂存 File 对象，等保存按钮才上传
@@ -1826,9 +1846,14 @@ function handlePluginConfigFileChange(inputEl) {
   pcRefreshDirty(); // 选择文件即视为有未保存更改
   // 本地预览（不上传）
   if (previewEl) {
+    // 覆盖前释放上一张预览图的 blob URL，防重复选择时内存泄漏
+    const prevImg = previewEl.querySelector("img[data-blob-src]");
+    if (prevImg) {
+      try { URL.revokeObjectURL(prevImg.dataset.blobSrc); } catch (e) {}
+    }
     if (file.type.startsWith("image/")) {
       const url = URL.createObjectURL(file);
-      previewEl.innerHTML = `<img src="${url}" style="max-width:100%;max-height:80px;border-radius:6px;object-fit:contain">`;
+      previewEl.innerHTML = `<img src="${url}" data-blob-src="${url}" style="max-width:100%;max-height:80px;border-radius:6px;object-fit:contain">`;
     } else {
       previewEl.innerHTML = `<span class="file-upload-hint">${esc(file.name)}</span>`;
     }
@@ -2855,11 +2880,13 @@ function markOverflowSpDescs() {
 async function loadSubplugins(opts) {
   const feedback = !!(opts && opts.feedback);
   if (feedback) toast(t("subplugins.refreshing"));
+  const generation = ++subpluginsGeneration;
   try {
     const [pluginsResult, configsResult] = await Promise.all([
       api("GET", "/api/subplugins"),
       api("GET", "/api/plugins/configs").catch(() => ({ data: [] })),
     ]);
+    if (generation !== subpluginsGeneration) return;
     const data = Array.isArray(pluginsResult.data) ? pluginsResult.data : [];
     pluginConfigNames = new Set(Array.isArray(configsResult.data) ? configsResult.data : []);
     const box = document.getElementById("sp-list");
@@ -3400,7 +3427,7 @@ function appendLog(entry) {
   const box = document.getElementById("log-box");
   const line = document.createElement("div");
   line.className = "log-line";
-  const lv = (entry.level || "info").toLowerCase();
+  const lv = LOG_LEVELS.has((entry.level || "").toLowerCase()) ? entry.level.toLowerCase() : "info";
   line.innerHTML = `<span class="t">${esc(entry.time)}</span>` +
     `<span class="lv lv-${lv}">${lv.toUpperCase()}</span>` +
     `<span style="color:#64d2ff">[${esc(entry.plugin)}]</span> ${esc(entry.msg)}`;
@@ -3961,18 +3988,24 @@ function startDashboardRefresh() {
 }
 startDashboardRefresh();
 
+// 返回顶部点击后的"动画窗口期"：期间 scroll 监听器不干预按钮显隐。
+// 部分浏览器 smooth 滚动动画中途/结束不触发 scroll 事件，动画期间滚过
+// 300px 阈值时监听器会把刚隐藏的按钮重新唤出且无后续事件将其收回
+//（表现为"点击回顶后按钮不消失，要点第二次"）；窗口期兜底保证按钮
+// 必定消失，用户再次下滚时监听器恢复工作。
+let _scrollTopSuppressUntil = 0;
+
 window.addEventListener("scroll", () => {
   const btn = document.getElementById("back-to-top");
   if (!btn) return;
+  if (performance.now() < _scrollTopSuppressUntil) return;
   btn.classList.toggle("show", window.scrollY > 300);
 }, { passive: true });
 
-// 回到顶部：点击立即隐藏按钮（意图明确），再平滑滚动；
-// 部分浏览器 smooth 动画结束/中断不触发 scroll 事件，click 时的直接隐藏
-// 保证按钮必定消失；用户再次下滚时 scroll 监听会重新唤出按钮。
 function scrollToTop() {
   const btn = document.getElementById("back-to-top");
   if (btn) btn.classList.remove("show");
+  _scrollTopSuppressUntil = performance.now() + 1500;
   try {
     window.scrollTo({ top: 0, behavior: "smooth" });
   } catch (e) {
@@ -4013,10 +4046,12 @@ async function loadMarketplace() {
   const query = document.getElementById("marketplace-search").value.trim();
   const sortWrap = document.getElementById("marketplace-sort-wrap");
   const sort = (sortWrap && sortWrap.dataset.value) || "score";
+  const generation = ++marketplaceGeneration;
   status.textContent = t("marketplace.loading");
   list.innerHTML = `<div style="color:var(--muted);padding:12px">${esc(t("marketplace.loading"))}</div>`;
   try {
     const res = await api("GET", `/api/market/plugins?limit=48&q=${encodeURIComponent(query)}&sort=${encodeURIComponent(sort)}`);
+    if (generation !== marketplaceGeneration) return;
     const data = res.data || {};
     const items = Array.isArray(data.items) ? data.items : [];
     status.textContent = t("marketplace.results", { count: data.total || items.length });
@@ -5078,13 +5113,13 @@ function aeSelectHtml(id, options, selected) {
   const cur = options.find((o) => String(o.value) === String(selected)) || options[0] || { value: "", name: "" };
   const items = options.map((o) => {
     const active = String(o.value) === String(cur.value);
-    return `<div class="ae-select-item${active ? " active" : ""}" data-value="${esc(o.value)}" onclick="pickAeSelect('${esc(id)}','${esc(o.value)}')">
+    return `<div class="ae-select-item${active ? " active" : ""}" data-value="${esc(o.value)}" onclick="pickAeSelect(this)">
       <span class="ae-item-name">${esc(o.name)}${active ? `<span class="ae-item-check">${AE_CHECK_SVG}</span>` : ""}</span>
       ${o.desc ? `<span class="ae-item-desc">${esc(o.desc)}</span>` : ""}
     </div>`;
   }).join("");
   return `<div class="ae-select" id="${esc(id)}" data-value="${esc(cur.value)}">
-  <button type="button" class="ae-select-btn" onclick="toggleAeSelect('${esc(id)}', event)">
+  <button type="button" class="ae-select-btn" onclick="toggleAeSelect(this, event)">
     <span class="ae-select-value">${esc(cur.name)}</span>
     <span class="ae-select-caret">${AE_CARET_SVG}</span>
   </button>
@@ -5092,9 +5127,9 @@ function aeSelectHtml(id, options, selected) {
 </div>`;
 }
 
-function toggleAeSelect(id, ev) {
+function toggleAeSelect(btn, ev) {
   if (ev) ev.stopPropagation();
-  const el = document.getElementById(id);
+  const el = btn.closest(".ae-select");
   if (!el) return;
   document.querySelectorAll(".ae-select.open").forEach((s) => { if (s !== el) s.classList.remove("open"); });
   el.classList.toggle("open");
@@ -5104,9 +5139,11 @@ function closeAllAeSelects() {
   document.querySelectorAll(".ae-select.open").forEach((s) => s.classList.remove("open"));
 }
 
-function pickAeSelect(id, value) {
-  const el = document.getElementById(id);
+function pickAeSelect(item) {
+  const el = item.closest(".ae-select");
   if (!el) return;
+  const id = el.id;
+  const value = item.dataset.value;
   el.dataset.value = value;
   el.classList.remove("open");
   // 重渲染以更新按钮文案与选中态
@@ -5114,10 +5151,10 @@ function pickAeSelect(id, value) {
   const cur = options.find((o) => String(o.value) === String(value));
   const valEl = el.querySelector(".ae-select-value");
   if (valEl && cur) valEl.textContent = cur.name;
-  el.querySelectorAll(".ae-select-item").forEach((item) => {
-    const active = item.dataset.value === String(value);
-    item.classList.toggle("active", active);
-    const name = item.querySelector(".ae-item-name");
+  el.querySelectorAll(".ae-select-item").forEach((it) => {
+    const active = it.dataset.value === String(value);
+    it.classList.toggle("active", active);
+    const name = it.querySelector(".ae-item-name");
     if (name) {
       let check = name.querySelector(".ae-item-check");
       if (active && !check) {
@@ -5362,6 +5399,21 @@ function adapterNameCancel() {
 
 const EYE_SHOW_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
 const EYE_HIDE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+
+/** 本地明文切换（登录页/配置页密码框）：仅切换输入框自身可见性，不请求服务端 */
+function togglePwVisibility(btn) {
+  const field = btn.closest(".secret-field");
+  const input = field && field.querySelector("input");
+  if (!input || !btn) return;
+  const show = btn.dataset.shown !== "1";
+  input.type = show ? "text" : "password";
+  btn.dataset.shown = show ? "1" : "0";
+  btn.innerHTML = show ? EYE_HIDE_SVG : EYE_SHOW_SVG;
+  // 同步 data-i18n-title：语言切换时 applyI18n 能重挂正确的提示
+  const titleKey = show ? "login.hide_password" : "login.show_password";
+  btn.setAttribute("data-i18n-title", titleKey);
+  btn.title = t(titleKey);
+}
 
 /** 密钥输入框：带明文/掩码切换的眼睛按钮（明文经 /api/connections/reveal 获取） */
 function secretFieldHtml(inputId, placeholder, maskedValue, adapterId, key) {
