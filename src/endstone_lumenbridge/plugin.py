@@ -76,7 +76,7 @@ class LumenBridgePlugin(Plugin):
     commands = {
         "lumen": {
             "description": "LumenBridge 群服互通管理命令",
-            "usages": ["/lumen (status|reload|say|plugins|pip|update)<action: LumenAction> [message: message]"],
+            "usages": ["/lumen (status|reload|say|plugins|pip|update|password)<action: LumenAction> [message: message]"],
             "permissions": ["lumenbridge.command.lumen"],
         },
     }
@@ -125,6 +125,8 @@ class LumenBridgePlugin(Plugin):
         self._main_thread_id: int = threading.get_ident()
         # 周期性市场更新检查线程的停止信号（on_disable 置位，热重载/停服时退出循环）
         self._market_check_stop = threading.Event()
+        # 市场检查线程引用：幂等补启用（reload 时不叠加重复线程）
+        self._market_thread: threading.Thread | None = None
         # 聊天吸收探针：时间戳回溯关联广播与原生聊天事件，识别聊天美化
         # 插件取消原生聊天事件后重发导致的转发丢失（见 modules/chat_probe.py）
         self._chat_probe = ChatAbsorptionProbe(window_ms=1000)
@@ -265,13 +267,7 @@ class LumenBridgePlugin(Plugin):
             market_check = isinstance(market_cfg, dict) and bool(market_cfg.get("enable")) and bool(market_cfg.get("check_on_start", True))
             auto_update = isinstance(updates_cfg, dict) and bool(updates_cfg.get("enable", True)) and bool(updates_cfg.get("auto_update", True))
             if market_check or auto_update:
-                # 复用实例（禁用→启用）时清除上轮 on_disable 置位的停止信号
-                self._market_check_stop.clear()
-                threading.Thread(
-                    target=self._check_market_updates_background,
-                    name="LumenBridge-MarketCheck",
-                    daemon=True,
-                ).start()
+                self._ensure_market_thread()
 
             webui_cfg = self.config_manager.data.get("webui", {})
             if isinstance(webui_cfg, dict) and webui_cfg.get("enable", True):
@@ -369,6 +365,11 @@ class LumenBridgePlugin(Plugin):
         # 失效 pip manager 缓存：禁用→启用复用同一实例时会持有旧 config_manager.data
         with self._pip_manager_lock:
             self._pip_manager = None
+        # 补齐与 on_enable 的对称清理（含 connections 内的协议端凭据）
+        self.config_manager = None
+        self.connections = None
+        with self._bot_profile_lock:
+            self._bot_profiles.clear()
         self._tee_logger = None
         self._raw_logger = None
         self.logger.info(_t("plugin.disabled"))
@@ -397,6 +398,24 @@ class LumenBridgePlugin(Plugin):
             self._run_market_check_once(client)
             if self._market_check_stop.wait(interval):
                 return
+
+    def _ensure_market_thread(self) -> None:
+        """按需启动市场检查线程（on_enable 与 /lumen reload 补启共用）。
+
+        幂等：先清除历史 on_disable 置位的停止信号（否则线程启动后
+        立即退出且无任何日志），已有存活线程时不重复启动，防止反复
+        reload 叠加多个检查线程。
+        """
+        self._market_check_stop.clear()
+        thread = self._market_thread
+        if thread is not None and thread.is_alive():
+            return
+        self._market_thread = threading.Thread(
+            target=self._check_market_updates_background,
+            name="LumenBridge-MarketCheck",
+            daemon=True,
+        )
+        self._market_thread.start()
 
     def _run_market_check_once(self, client: Any) -> None:
         """执行一轮市场更新检查：子插件记录更新；框架本体自动暂存并提示。"""
@@ -660,7 +679,11 @@ class LumenBridgePlugin(Plugin):
             finally:
                 done.set()
 
-        self.server.scheduler.run_task(self, _run, delay=0)
+        try:
+            self.server.scheduler.run_task(self, _run, delay=0)
+        except Exception:
+            # 调度失败（插件已停用/调度器不可用）：兑现"异常返回 default"契约
+            return default
         if not done.wait(timeout):
             cancelled.set()
             return default
@@ -863,10 +886,17 @@ class LumenBridgePlugin(Plugin):
 
         action = args[0].lower() if args else "status"
 
-        known_actions = {"status", "reload", "say", "plugins", "pip", "update"}
+        known_actions = {"status", "reload", "say", "plugins", "pip", "update", "password"}
         if action not in known_actions:
             sender.send_message(f"{ColorFormat.RED}{_t('plugin.command.unknown_action', action=action)}{ColorFormat.RESET}")
             return True
+
+        # 密码重置仅限服务器控制台：硬门放在 allow_in_game/OP 权限检查之前。
+        # 控制台访问 = OS 级信任（本就能直接读改 config.json）；游戏内 OP 是
+        # 独立认证域，被盗 OP 账号不能借此接管可安装子插件（任意代码执行）
+        # 的 WebUI。玩家即使配置了 allow_in_game 也一律拒绝。
+        if action == "password":
+            return self._handle_password_command(sender, args[1:] if len(args) > 1 else [])
 
         # config_manager 为 None 时默认拒绝（安全降级），避免配置加载失败后权限体系失效
         if self.config_manager:
@@ -944,11 +974,7 @@ class LumenBridgePlugin(Plugin):
                     market_check = isinstance(market_cfg, dict) and bool(market_cfg.get("enable")) and bool(market_cfg.get("check_on_start", True))
                     auto_update = isinstance(updates_cfg, dict) and bool(updates_cfg.get("enable", True)) and bool(updates_cfg.get("auto_update", True))
                     if market_check or auto_update:
-                        threading.Thread(
-                            target=self._check_market_updates_background,
-                            name="LumenBridge-MarketCheck",
-                            daemon=True,
-                        ).start()
+                        self._ensure_market_thread()
                 sender.send_message(
                     f"{ColorFormat.GREEN}{_t('plugin.command.reload_success', rules=count, subplugins=sub_count)}"
                     f"{ColorFormat.RESET}"
@@ -1006,6 +1032,63 @@ class LumenBridgePlugin(Plugin):
             mgr = PipManager(self.config_manager.data, log)
             self._pip_manager = mgr
             return mgr
+
+    def _handle_password_command(self, sender: CommandSender, args: list[str]) -> bool:
+        """处理 /lumen password [新密码]：重置 WebUI 管理员密码（仅限控制台）。
+
+        无参数 = 清除密码并立即生成随机密码打印到控制台（等同配置哨兵 "*"
+        的语义）；带参数 = 设置该密码，哈希落盘并实时生效。两种路径都会使
+        所有已签发 WebUI token 失效。WebUI 未启用时仅写入配置，下次启动
+        生效。调用前 on_command 已确保 sender 是控制台。
+        """
+        from endstone.command import ConsoleCommandSender  # type: ignore
+
+        if not isinstance(sender, ConsoleCommandSender):
+            sender.send_message(f"{ColorFormat.RED}{_t('plugin.command.password_console_only')}{ColorFormat.RESET}")
+            return True
+
+        if self.config_manager is None:
+            sender.send_message(f"{ColorFormat.RED}{_t('commands.config_unavailable')}{ColorFormat.RESET}")
+            return True
+
+        webui = self.webui
+        # 贪心 message 参数：密码原样取首个参数（不按空白展开，保留内部空格）；
+        # 纯空白输入视同无效（与"留空清除"区分，避免静默清掉密码）
+        raw = str(args[0]) if args else ""
+        pw = raw.strip()
+        if raw and not pw:
+            sender.send_message(f"{ColorFormat.RED}{_t('plugin.command.password_invalid')}{ColorFormat.RESET}")
+            return True
+
+        if webui is None:
+            # WebUI 未启用：只写配置（新密码哈希落盘 / 随机模式哨兵）
+            try:
+                if pw:
+                    from .webui.auth import hash_password
+                    self.config_manager.apply_patch({"webui": {"password": hash_password(pw)}})
+                else:
+                    self.config_manager.apply_patch({"webui": {"password": "*"}})
+                sender.send_message(f"{ColorFormat.GREEN}{_t('plugin.command.password_staged')}{ColorFormat.RESET}")
+            except Exception as e:  # noqa: BLE001
+                sender.send_message(f"{ColorFormat.RED}{_t('plugin.command.password_failed', error=e)}{ColorFormat.RESET}")
+            return True
+
+        if not pw:
+            new_pw = webui.clear_webui_password()
+            # 随机密码只走控制台 stdout、不经 logger：避免进入 WebUI 日志
+            # 缓冲/SSE 被在线会话回看，与启动时随机密码的打印路径一致
+            print(f"[WebUI] {_t('plugin.random_password', password=new_pw)}", flush=True)
+            sender.send_message(f"{ColorFormat.GREEN}{_t('plugin.command.password_cleared')}{ColorFormat.RESET}")
+            return True
+
+        try:
+            webui.set_webui_password(pw)
+            sender.send_message(f"{ColorFormat.GREEN}{_t('plugin.command.password_set_ok')}{ColorFormat.RESET}")
+        except ValueError:
+            sender.send_message(f"{ColorFormat.RED}{_t('plugin.command.password_invalid')}{ColorFormat.RESET}")
+        except Exception as e:  # noqa: BLE001
+            sender.send_message(f"{ColorFormat.RED}{_t('plugin.command.password_failed', error=e)}{ColorFormat.RESET}")
+        return True
 
     def _handle_pip_command(self, sender: CommandSender, args: list[str]) -> bool:
         """处理 /lumen pip install|list|uninstall 子命令。
@@ -1355,7 +1438,7 @@ def _merge_subplugin_command_palette() -> None:
     时静默跳过，绝不阻断插件加载。
     """
     try:
-        merge_command_palette_into(LumenBridgePlugin.commands)
+        merge_command_palette_into(LumenBridgePlugin.commands, allowed_permissions=set(LumenBridgePlugin.permissions))
     except Exception:
         pass
 

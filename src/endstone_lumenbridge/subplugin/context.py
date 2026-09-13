@@ -117,6 +117,20 @@ def sanitize_usages(name: str, usages: list[str] | None) -> list[str]:
     return valid or [default_usage(name)]
 
 
+def _clean_command_identifiers(values: list[str] | None) -> list[str]:
+    """清洗 alias / 权限名为合法标识符（与命令名同规），非法项直接剔除。
+
+    含非法字符的 alias 与未声明的权限名会让 Endstone 在下次启动时
+    "Unable to register command"（与 usage 非法的后果相同）。
+    """
+    out: list[str] = []
+    for raw in values or []:
+        v = str(raw).strip().lower()
+        if v and _PALETTE_NAME_RE.fullmatch(v) and v not in out:
+            out.append(v)
+    return out
+
+
 def add_command_palette_entry(
     name: str,
     description: str = "",
@@ -131,20 +145,27 @@ def add_command_palette_entry(
             "description": str(description or f"LumenBridge subplugin command /{name}"),
             "usages": sanitize_usages(name, usages),
         }
-        if aliases:
-            entry["aliases"] = [str(a).strip().lower() for a in aliases if str(a).strip()]
-        if permissions:
-            entry["permissions"] = [str(p) for p in permissions]
+        clean_aliases = _clean_command_identifiers(aliases)
+        if clean_aliases:
+            entry["aliases"] = clean_aliases
+        clean_perms = _clean_command_identifiers(permissions)
+        if clean_perms:
+            entry["permissions"] = clean_perms
         palette[str(name)] = entry
         write_command_palette(palette)
 
 
-def merge_command_palette_into(commands: dict[str, dict[str, Any]]) -> int:
+def merge_command_palette_into(
+    commands: dict[str, dict[str, Any]],
+    allowed_permissions: set[str] | None = None,
+) -> int:
     """把启动面板中的命令并入目标 commands 字典（如 LumenBridgePlugin.commands）。
 
     必须在插件模块导入期调用：endstone 加载器在 ``ep.load()`` 之后立即快照
     ``cls.__dict__['commands']`` 并构造 Command 对象，之后再改类属性无效。
     面板文件可能被手工编辑损坏，任何条目问题都只跳过该条，绝不抛异常。
+    ``allowed_permissions``：已声明的权限名集合，未在其中（或未提供集合时
+    为空）的权限名一律剔除——未声明的权限会让命令注册失败。
     """
     merged = 0
     try:
@@ -163,11 +184,16 @@ def merge_command_palette_into(commands: dict[str, dict[str, Any]]) -> int:
                 # 否则 Endstone 解析失败导致 "Unable to register command"
                 "usages": sanitize_usages(name, entry.get("usages")),
             }
-            aliases = [str(a).strip().lower() for a in (entry.get("aliases") or []) if str(a).strip()]
+            aliases = _clean_command_identifiers(entry.get("aliases"))
+            # 剔除与其他已并入命令的 name/alias 冲突的别名
+            taken = set(commands) | {a for c in commands.values() for a in (c.get("aliases") or [])}
+            aliases = [a for a in aliases if a not in taken and a != name]
             if aliases:
                 clean["aliases"] = aliases
             # 权限名未在插件 permissions 声明会导致注册失败，面板默认不带权限
-            permissions = [str(p) for p in (entry.get("permissions") or []) if str(p).strip()]
+            permissions = _clean_command_identifiers(entry.get("permissions"))
+            if allowed_permissions is not None:
+                permissions = [p for p in permissions if p in allowed_permissions]
             if permissions:
                 clean["permissions"] = permissions
             commands[name] = clean
@@ -237,8 +263,10 @@ class EnvPool:
     def set(self, key: str, value: Any) -> None:
         with self._lock:
             self._data[key] = value
-        self._plugin.bus.emit(f"env.update.{key}", value)
-        self._plugin.bus.emit("env.update", key, value)
+        bus = getattr(self._plugin, "bus", None)
+        if bus is not None:
+            bus.emit(f"env.update.{key}", value)
+            bus.emit("env.update", key, value)
 
 
 class PrefixedLogger:
@@ -347,7 +375,11 @@ class MCBridge:
         """监听游戏事件：兼容别名或任意 Endstone 事件类名（回调收原生事件对象）。"""
         internal = self._EVENT_MAP.get(event_name)
         if internal:
-            self._plugin.bus.on(internal, callback)
+            bus = getattr(self._plugin, "bus", None)
+            if bus is None:
+                # 主插件停用/reload 中间态：注册拒绝而非抛 AttributeError
+                return False
+            bus.on(internal, callback)
             self._bus_handlers.append((internal, callback))
             return True
         return self._listen_endstone(event_name, callback)
@@ -420,7 +452,11 @@ class MCBridge:
             finally:
                 done.set()
 
-        self._plugin.run_on_main(run)
+        try:
+            self._plugin.run_on_main(run)
+        except Exception:
+            # 调度失败（插件停用/调度器不可用）：按失败语义返回 False
+            return False
         if not done.wait(timeout=5.0):
             cancelled.set()
             return False
@@ -460,7 +496,12 @@ class MCBridge:
             finally:
                 done.set()
 
-        self._plugin.run_on_main(run)
+        try:
+            self._plugin.run_on_main(run)
+        except Exception:
+            # 调度失败：run 不会执行，直接返回失败快照（不等满超时）
+            output = re.sub(r"§.", "", "\n".join(outputs), flags=re.DOTALL).strip()
+            return {"success": False, "output": output}
         if not done.wait(timeout=timeout):
             cancelled.set()
         output = re.sub(r"§.", "", "\n".join(outputs), flags=re.DOTALL).strip()
@@ -471,7 +512,12 @@ class MCBridge:
         def run() -> None:
             self._plugin.server.broadcast_message(message)
 
-        self._plugin.run_on_main(run)
+        try:
+            self._plugin.run_on_main(run)
+        except Exception:
+            # 调度失败（插件停用/调度器不可用）：广播无法送达，吞掉避免
+            # 杀死子插件残留线程正在执行的清理逻辑
+            pass
 
     @property
     def online_players(self) -> list[str]:
@@ -849,6 +895,13 @@ class LumenContext:
         self._registered_commands: list[str] = []
         # H14：本上下文经 lumen.scheduler 注册的定时任务对象，_cleanup 逐个 cancel
         self._scheduled_tasks: set[Any] = set()
+        # _cleanup 后置位：拒绝再次注册事件（旧 context 重复注册会永久泄漏 handler）
+        self._disposed = False
+
+    @property
+    def _bus(self) -> Any:
+        """当前事件总线；主插件停用/reload 中间态时为 None。"""
+        return getattr(self._plugin, "bus", None)
 
     @property
     def debug(self) -> bool:
@@ -940,22 +993,37 @@ class LumenContext:
             self.QClient.call_action(action, params, callback=callback, timeout=timeout)
 
     def on(self, event: str, handler: Callable[..., Any]) -> Callable[..., Any]:
-        self._plugin.bus.on(event, handler)
+        bus = self._bus
+        if self._disposed:
+            raise RuntimeError(f"[{self.pluginName}] Subplugin context has been cleaned up, event {event!r} registration rejected")
+        if bus is None:
+            raise RuntimeError(f"[{self.pluginName}] LumenBridge is disabled, event {event!r} registration rejected")
+        bus.on(event, handler)
         self._handlers.append((event, handler))
         return handler
 
     def once(self, event: str, handler: Callable[..., Any]) -> Callable[..., Any]:
-        self._plugin.bus.once(event, handler)
+        bus = self._bus
+        if self._disposed:
+            raise RuntimeError(f"[{self.pluginName}] Subplugin context has been cleaned up, event {event!r} registration rejected")
+        if bus is None:
+            raise RuntimeError(f"[{self.pluginName}] LumenBridge is disabled, event {event!r} registration rejected")
+        bus.once(event, handler)
         self._handlers.append((event, handler))
         return handler
 
     def off(self, event: str, handler: Callable[..., Any]) -> None:
-        self._plugin.bus.off(event, handler)
+        bus = self._bus
+        if bus is None:
+            return
+        bus.off(event, handler)
         if (event, handler) in self._handlers:
             self._handlers.remove((event, handler))
 
     def emit(self, event: str, *args: Any, **kwargs: Any) -> None:
-        self._plugin.bus.emit(event, *args, **kwargs)
+        bus = self._bus
+        if bus is not None:
+            bus.emit(event, *args, **kwargs)
 
     def register_regex_action(self, action_type: str, handler: Callable[..., Any]) -> None:
         """向正则引擎注册自定义动作"""
@@ -1015,8 +1083,14 @@ class LumenContext:
 
     def _cleanup(self) -> None:
         """卸载子插件时移除其注册的全部事件监听器"""
+        self._disposed = True
+        bus = self._bus
         for event, handler in self._handlers:
-            self._plugin.bus.off(event, handler)
+            if bus is not None:
+                try:
+                    bus.off(event, handler)
+                except Exception:
+                    pass
         self._handlers.clear()
         # 注销本上下文注册的正则引擎自定义动作，避免热重载后旧 action 残留
         # （防御部分初始化的实例：_regex_actions 可能尚未创建）
@@ -1033,10 +1107,11 @@ class LumenContext:
         bus_handlers = getattr(self.mc, "_bus_handlers", None)
         if bus_handlers is not None:
             for event, handler in list(bus_handlers):
-                try:
-                    self._plugin.bus.off(event, handler)
-                except Exception:
-                    pass
+                if bus is not None:
+                    try:
+                        bus.off(event, handler)
+                    except Exception:
+                        pass
             bus_handlers.clear()
         commands = getattr(self, "_commands", None)
         if commands:

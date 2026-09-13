@@ -103,6 +103,10 @@ class MarketplaceClient:
         # 防止两个 WebUI 框架更新任务并发执行，导致 wheel 互相覆盖、备份目录错乱或暂存文件残留
         self._framework_update_lock = threading.Lock()
         self._last_checked: dict[str, dict[str, Any]] = {}
+        # 单飞合并：并发触发的更新检查（后台周期线程 + WebUI 手动检查）
+        # 复用同一次在途请求的结果，避免对市场发起重复网络请求与清单写入
+        self._check_flight_lock = threading.Lock()
+        self._check_flight: dict[str, Any] | None = None
         # 市场站点的匿名访客身份（LBMARKETVISITOR Cookie）：点赞状态与防刷计数
         # 都绑定该身份。Python 客户端不自动管理 Cookie，若每次请求换一个身份，
         # 点赞会变成"永远新增"且无法取消；因此持久化到插件数据目录。
@@ -757,6 +761,23 @@ class MarketplaceClient:
             manifest = None
         return parse_requires_from_manifest(manifest)
 
+    def _local_name_for_market_id(self, market_id: str) -> str:
+        """按市场 ID 反查本地已装子插件名；无匹配时回退 market_id 本身。
+
+        市场下载的 zip 落地为临时文件名（lumen_market_xxxx），若安装包清单
+        缺 name 字段，安装器需要调用方提供有意义的兜底名：升级场景取现有
+        本地目录名保持连续（否则升级会新建一个随机名目录），全新安装取
+        market_id。两者均通过 loader 的安全名校验口径。
+        """
+        manager = self.plugin.subplugin_manager
+        if manager is not None:
+            with manager._lock:
+                for subplugin in manager.subplugins.values():
+                    origin = subplugin.manifest.get("_market") if isinstance(subplugin.manifest, dict) else None
+                    if isinstance(origin, dict) and str(origin.get("id") or "") == market_id:
+                        return subplugin.name
+        return market_id
+
     def _find_market_plugin_by_manifest_name(self, name: str) -> dict[str, Any] | None:
         """按子插件名（lumen.json 的 name）在市场精确匹配插件。
 
@@ -976,13 +997,31 @@ class MarketplaceClient:
         release = self._select_release(detail, requested_version)
         log(f"选中版本 v{release['version']}")
         path = self._download_verified(str(release["download_url"]), str(release["sha256"]), log=log, progress=progress)
+        # 临时 zip 的删除职责在主线程任务结束时执行（zip 已关闭，Windows 也可
+        # 安全删除）；调用方仅在任务确定不会执行（调度失败/cancelled 跳过）
+        # 时兜底清理，避免超时路径删除正被主线程使用的文件
+        cleaned = threading.Event()
+        # 下载落地的临时文件名无意义，清单缺 name 时由兜底名接管（见
+        # _local_name_for_market_id）
+        fallback_name = self._local_name_for_market_id(market_id)
+
+        def _install_zip() -> Any:
+            try:
+                return manager.install_from_zip(path, fallback_name=fallback_name)
+            finally:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+                cleaned.set()
+
         try:
             manager = self.plugin.subplugin_manager
             if manager is None:
                 raise MarketplaceError("子插件管理器不可用")
             log("正在安装子插件...")
             progress(95, "正在安装")
-            outcome = self._run_on_main_wait(lambda: manager.install_from_zip(path))
+            outcome = self._run_on_main_wait(_install_zip)
             if not isinstance(outcome, tuple) or len(outcome) != 3:
                 raise MarketplaceError("子插件安装器返回无效结果")
             ok, message, name = bool(outcome[0]), str(outcome[1]), str(outcome[2])
@@ -1022,10 +1061,13 @@ class MarketplaceClient:
                 "restart_required": not loaded,
             }
         finally:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+            if not cleaned.is_set():
+                # 主线程任务确定不会执行（调度失败/超时后 cancelled 跳过）：
+                # 由调用方兜底清理临时文件
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
 
     def cached_updates(self) -> dict[str, dict[str, Any]]:
         """返回 WebUI 可安全读取的最近更新检查快照。"""
@@ -1033,6 +1075,37 @@ class MarketplaceClient:
             return {name: dict(info) for name, info in self._last_checked.items()}
 
     def check_subplugin_updates(self, *, force: bool = False) -> dict[str, dict[str, Any]]:
+        """检查所有市场来源子插件的可用更新（单飞合并并发请求）。
+
+        后台周期线程与 WebUI 手动"检查更新"可能同时触发：在途检查未完成时，
+        后来者等待并复用其结果，避免对市场发起重复网络请求与重复清单写入。
+        在途结果为刚生成的新鲜数据，对 force 调用方语义等价。
+        """
+        while True:
+            with self._check_flight_lock:
+                flight = self._check_flight
+                if flight is None:
+                    flight = {"event": threading.Event(), "result": None, "error": None}
+                    self._check_flight = flight
+                    break
+            flight["event"].wait()
+            if flight["error"] is not None:
+                raise flight["error"]
+            return flight["result"]
+        try:
+            result = self._do_check_subplugin_updates(force=force)
+        except BaseException as exc:
+            flight["error"] = exc
+            raise
+        else:
+            flight["result"] = result
+            return result
+        finally:
+            with self._check_flight_lock:
+                self._check_flight = None
+            flight["event"].set()
+
+    def _do_check_subplugin_updates(self, *, force: bool = False) -> dict[str, dict[str, Any]]:
         """检查所有市场来源子插件；网络失败只记录错误，不影响运行中的子插件。
 
         网络请求在锁外执行，避免长时间持 _check_lock 阻塞 cached_updates()。

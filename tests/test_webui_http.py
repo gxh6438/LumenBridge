@@ -160,6 +160,12 @@ class WebUiHttpTests(unittest.TestCase):
 
     def test_masked_full_config_round_trip_keeps_real_secrets(self) -> None:
         token = self.login()
+        # 首次登录后明文密码自动迁移为哈希存储（密码不变，登录态不受影响）
+        stored_pw = self.plugin.config_manager.data["webui"]["password"]
+        self.assertTrue(stored_pw.startswith("pbkdf2_sha256$"), stored_pw)
+        # 迁移后仍可用原密码登录（哈希校验路径）
+        status, _headers, data = self.request("POST", "/api/auth/login", {"password": "test-password"})
+        self.assertEqual(status, 200, data)
         status, _headers, response = self.request("GET", "/api/config", token=token)
         self.assertEqual(status, 200)
         full_config = response["data"]
@@ -169,7 +175,8 @@ class WebUiHttpTests(unittest.TestCase):
         self.assertEqual(response["code"], 200)
         # 掩码 ****** 回传时应被还原为真实密钥，而非把掩码写入配置
         self.assertEqual(self.plugin.config_manager.data["webui"]["secret"], "super-secret")
-        self.assertEqual(self.plugin.config_manager.data["webui"]["password"], "test-password")
+        # 掩码还原的是已迁移的哈希串，而非明文
+        self.assertEqual(self.plugin.config_manager.data["webui"]["password"], stored_pw)
         primary = self.plugin.connections.primary_websocket()
         self.assertEqual(primary["access_token"], "onebot-secret")
 
@@ -256,6 +263,141 @@ class WebUiHttpTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertNotIn("Content-Encoding", headers)
                 self.assertEqual(body, (static_dir / name).read_bytes())
+
+
+class PasswordHashTests(unittest.TestCase):
+    """管理员密码哈希存储（pbkdf2_sha256$iters$salt$digest）。"""
+
+    def test_hash_round_trip_and_rejects_wrong_password(self) -> None:
+        from endstone_lumenbridge.webui import auth as auth_util
+        stored = auth_util.hash_password("s3cret!")
+        self.assertTrue(auth_util.is_hashed_password(stored))
+        self.assertFalse(auth_util.is_hashed_password("s3cret!"))
+        # 每次哈希带独立随机盐
+        self.assertNotEqual(stored, auth_util.hash_password("s3cret!"))
+        self.assertTrue(auth_util.verify_password("s3cret!", stored))
+        self.assertFalse(auth_util.verify_password("wrong", stored))
+        self.assertFalse(auth_util.verify_password("", stored))
+        # 旧明文格式仍可直接比较（兼容）
+        self.assertTrue(auth_util.verify_password("plain", "plain"))
+        self.assertFalse(auth_util.verify_password("plain", "other"))
+
+    def test_malformed_hash_and_iteration_cap_rejected(self) -> None:
+        from endstone_lumenbridge.webui import auth as auth_util
+        for bad in ("pbkdf2_sha256$abc$00$00", "pbkdf2_sha256$100$zz$00",
+                    "pbkdf2_sha256$0$00$00", "pbkdf2_sha256$999999999$00$00"):
+            with self.subTest(stored=bad):
+                self.assertFalse(auth_util.verify_password("x", bad))
+
+
+class SessionSecretTests(unittest.TestCase):
+    """会话签名密钥进程化：热重载保会话、进程重启必失效。"""
+
+    def _new_webui(self, tmp: Path, with_secret: bool):
+        from endstone_lumenbridge.webui.server import _PROCESS_SECRET_ATTR
+        plugin = DummyPlugin(tmp)
+        # DummyPlugin.__init__ 把端口置 0 用于请求临时空闲端口；恢复合法端口，
+        # 否则后续 apply_patch 的全量校验会因端口范围失败
+        plugin.config_manager.data["webui"]["port"] = 10240
+        if not with_secret:
+            plugin.config_manager.apply_patch({"webui": {"secret": ""}})
+            plugin.config_manager.data["webui"]["secret"] = ""
+        webui = WebUIServer(plugin)
+        plugin.webui = webui
+        return webui, _PROCESS_SECRET_ATTR
+
+    def test_hot_reload_reuses_process_secret_but_restart_invalidates(self) -> None:
+        import sys as _sys
+        tmp1 = Path(tempfile.mkdtemp())
+        webui, attr = self._new_webui(tmp1, with_secret=False)
+        token = webui.auth_provider.issue_token()
+        # 同进程重建实例（/lumen reload 场景）：密钥复用，token 仍有效
+        webui2, _ = self._new_webui(Path(tempfile.mkdtemp()), with_secret=False)
+        self.assertEqual(webui.secret, webui2.secret)
+        self.assertTrue(webui2.auth_provider.verify_token(token))
+        # 模拟进程重启（新进程无 sys 属性）：旧 token 全部失效
+        old_secret = getattr(_sys, attr)
+        delattr(_sys, attr)
+        try:
+            webui3, _ = self._new_webui(Path(tempfile.mkdtemp()), with_secret=False)
+            self.assertNotEqual(webui3.secret, old_secret)
+            self.assertFalse(webui3.auth_provider.verify_token(token))
+        finally:
+            setattr(_sys, attr, old_secret)
+
+    def test_legacy_disk_secret_file_is_cleaned_up(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        legacy = tmp / "data" / "webui_secret.txt"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text("stale-secret-from-old-version", encoding="utf-8")
+        webui, _ = self._new_webui(tmp, with_secret=False)
+        self.assertFalse(legacy.exists())
+        self.assertNotEqual(webui.secret, "stale-secret-from-old-version")
+
+    def test_configured_secret_still_wins(self) -> None:
+        webui, _ = self._new_webui(Path(tempfile.mkdtemp()), with_secret=True)
+        self.assertEqual(webui.secret, "super-secret")
+
+
+class ConfigSavePasswordHashingTests(unittest.TestCase):
+    """配置页修改密码：落盘前哈希、旧 token 立即失效。"""
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.plugin = DummyPlugin(Path(self.tempdir.name))
+        self.plugin.config_manager.data["webui"]["port"] = 10240
+        self.webui = WebUIServer(self.plugin)
+        self.plugin.webui = self.webui
+        self.webui.start()
+        self.port = self.webui._httpd.server_address[1]
+        self.base = f"http://127.0.0.1:{self.port}"
+        self.token = self._login("test-password")
+        # 登录触发明文→哈希迁移
+        self.assertTrue(self.plugin.config_manager.data["webui"]["password"].startswith("pbkdf2_sha256$"))
+
+    def tearDown(self) -> None:
+        self.webui.stop()
+        self.tempdir.cleanup()
+
+    def _request(self, method: str, path: str, body: object | None = None, token: str = ""):
+        headers = {}
+        payload = None
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+            payload = json.dumps(body).encode("utf-8")
+        if token:
+            headers["Authorization"] = "Bearer " + token
+        request = Request(self.base + path, data=payload, headers=headers, method=method)
+        try:
+            with urlopen(request, timeout=3) as response:
+                return response.status, json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+
+    def _login(self, password: str) -> str:
+        status, data = self._request("POST", "/api/auth/login", {"password": password})
+        assert status == 200, data
+        return data["data"]["token"]
+
+    def test_new_password_saved_as_hash_and_takes_effect(self) -> None:
+        status, data = self._request("POST", "/api/config", {"webui": {"password": "brand-new-pw"}}, self.token)
+        self.assertEqual(status, 200, data)
+        stored = self.plugin.config_manager.data["webui"]["password"]
+        self.assertTrue(stored.startswith("pbkdf2_sha256$"), stored)
+        self.assertNotIn("brand-new-pw", stored)
+        # 改密后旧 token 失效，需用新密码重新登录
+        status, _ = self._request("GET", "/api/overview", token=self.token)
+        self.assertEqual(status, 401)
+        self._login("brand-new-pw")
+        status, _ = self._request("GET", "/api/overview", token=self._login("brand-new-pw"))
+        self.assertEqual(status, 200)
+
+    def test_masked_password_roundtrip_keeps_existing_hash(self) -> None:
+        before = self.plugin.config_manager.data["webui"]["password"]
+        status, data = self._request("POST", "/api/config", {"webui": {"password": "******"}}, self.token)
+        self.assertEqual(status, 200, data)
+        # 掩码回传被还原为原哈希，不会被二次哈希或清空
+        self.assertEqual(self.plugin.config_manager.data["webui"]["password"], before)
 
 
 if __name__ == "__main__":

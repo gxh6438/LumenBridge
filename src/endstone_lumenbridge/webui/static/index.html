@@ -31,8 +31,12 @@
     <div class="login-logo"><img src="logo.png" alt="Logo" decoding="async"></div>
     <h1>LumenBridge</h1>
     <p class="sub" data-i18n="login.subtitle">Endstone 群服互通 · 控制面板</p>
-    <input type="password" id="login-password" data-i18n-placeholder="login.password_placeholder" placeholder="管理员密码（见服务器控制台）"
-           onkeydown="if(event.key==='Enter')login()">
+    <div class="secret-field login-pw-field">
+      <input type="password" id="login-password" data-i18n-placeholder="login.password_placeholder" placeholder="管理员密码（见服务器控制台）"
+             onkeydown="if(event.key==='Enter')login()" autocomplete="current-password" spellcheck="false">
+      <button type="button" class="secret-eye" data-shown="0" onclick="togglePwVisibility(this)"
+              data-i18n-title="login.show_password" title="查看密码" aria-label="查看密码"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+    </div>
     <button class="btn full" onclick="login()" data-i18n="login.button">登 录</button>
     <div class="login-err" id="login-err"></div>
   </div>

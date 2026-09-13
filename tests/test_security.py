@@ -457,12 +457,15 @@ def test_password_timing_safe():
         check("源码使用 hmac.compare_digest",
               "compare_digest" in server_src and "hmac" in server_src,
               "未找到 hmac.compare_digest 调用")
-        # 进一步确认密码比较处使用 compare_digest（而非 ==）。
-        # 窗口需覆盖路由匹配与密码比较之间的限速/请求体校验逻辑，
-        # 取 1200 字符防止中间插入防御代码后误报。
-        login_section = server_src[server_src.index("api/auth/login"):server_src.index("api/auth/login") + 1200]
-        check("登录密码比较使用 compare_digest", "compare_digest" in login_section,
-              "登录路由未使用 compare_digest")
+        # 密码比较逻辑收敛在 auth.verify_password（哈希与明文分支均恒时比较），
+        # 登录路由必须经由它而非自行 == 比较。窗口覆盖限速/请求体校验逻辑。
+        auth_src = (SRC / "endstone_lumenbridge" / "webui" / "auth.py").read_text("utf-8")
+        verify_section = auth_src[auth_src.index("def verify_password"):auth_src.index("def verify_password") + 1600]
+        check("verify_password 恒时比较（compare_digest）", "compare_digest" in verify_section,
+              "verify_password 未使用 compare_digest")
+        login_section = server_src[server_src.index("api/auth/login"):server_src.index("api/auth/login") + 1400]
+        check("登录经由 auth_util.verify_password", "auth_util.verify_password" in login_section,
+              "登录路由未调用 verify_password")
 
         # 6. 时序测试：错误密码和正确密码响应时间不应有显著差异
         # （hmac.compare_digest 是恒定时间，理论上时间相近）

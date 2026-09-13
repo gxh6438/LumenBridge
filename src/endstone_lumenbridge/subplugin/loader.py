@@ -638,16 +638,20 @@ class SubPluginManager:
             sp = self.subplugins.get(name)
             folder = sp.folder if sp else None
             if folder is None:
-                if self.plugins_dir.is_dir():
-                    for d in self.plugins_dir.iterdir():
-                        if not d.is_dir():
-                            continue
-                        mf = d / MANIFEST_NAME
-                        if mf.is_file():
-                            mdata = _read_manifest_dict(mf)
-                            if mdata and mdata.get("name") == name:
-                                folder = d
-                                break
+                try:
+                    entries = list(self.plugins_dir.iterdir()) if self.plugins_dir.is_dir() else []
+                except OSError:
+                    # plugins_dir 被外部删除/不可读：与 discover 同口径容错
+                    entries = []
+                for d in entries:
+                    if not d.is_dir():
+                        continue
+                    mf = d / MANIFEST_NAME
+                    if mf.is_file():
+                        mdata = _read_manifest_dict(mf)
+                        if mdata and mdata.get("name") == name:
+                            folder = d
+                            break
                 if folder is None:
                     folder = self.plugins_dir / name
                 # 二次校验：防符号链接等绕过
@@ -796,15 +800,20 @@ class SubPluginManager:
             return required
         return ""
 
-    def install_from_zip(self, zip_path: str | Path) -> tuple[bool, str, str]:
+    def install_from_zip(self, zip_path: str | Path, *, fallback_name: str = "") -> tuple[bool, str, str]:
         """从 ZIP 安装（或升级）子插件，返回 (成功, 消息, 插件名)。
 
         ZIP 根目录可直接含 main.py 或包一层文件夹；同名插件需版本更高才覆盖。
+        ``fallback_name``：清单缺 name 时的兜底名（市场下载的临时文件名无
+        意义，由市场层传入现有本地名或 market_id，保持升级目录连续）。
         """
         zip_path = Path(zip_path)
         if not zip_path.is_file():
             return False, _t("subplugin_runtime.log.install_zip_not_exist"), ""
-        tmp_dir = Path(tempfile.mkdtemp(prefix="lumen_install_"))
+        try:
+            tmp_dir = Path(tempfile.mkdtemp(prefix="lumen_install_"))
+        except OSError as e:
+            return False, _t("subplugin_runtime.log.install_prepare_failed", error=e), ""
         try:
             try:
                 with zipfile.ZipFile(zip_path) as zf:
@@ -857,6 +866,9 @@ class SubPluginManager:
                 # M29：加密 ZIP 在 zf.open/read 时抛 RuntimeError
                 #（"File ... is encrypted, password required"）等不受支持的情况
                 return False, "ZIP 已加密或不支持，无法安装", ""
+            except OSError as e:
+                # 解压写盘失败（磁盘满/权限等）：中止安装而非向上抛裸异常
+                return False, _t("subplugin_runtime.log.install_extract_failed", error=e), ""
 
             root = None
             if (tmp_dir / ENTRY_NAME).is_file():
@@ -875,10 +887,20 @@ class SubPluginManager:
                 if mdata is None:
                     return False, _t("subplugin_runtime.log.install_manifest_failed", manifest=MANIFEST_NAME), ""
                 manifest.update(mdata)
-            name = manifest.get("name") or (root.name if root != tmp_dir else zip_path.stem)
-            # 防路径穿越：恶意 ZIP 可在 lumen.json 写 "name": "../evil"
-            if not _is_safe_name(name):
-                return False, _t("subplugin_runtime.log.install_invalid_name", name=name), ""
+            # 名称解析链：清单 name → 调用方兜底名（市场升级时为现有本地名，
+            # 保持目录连续）→ ZIP 内层文件夹名 → zip 文件名。市场下载落地为
+            # lumen_market_xxx 临时文件，stem 无意义，必须排在兜底名之后
+            raw_name = manifest.get("name")
+            if _is_safe_name(raw_name):
+                name = raw_name
+            elif _is_safe_name(fallback_name):
+                name = fallback_name
+            elif root != tmp_dir and _is_safe_name(root.name):
+                name = root.name
+            elif _is_safe_name(zip_path.stem):
+                name = zip_path.stem
+            else:
+                return False, _t("subplugin_runtime.log.install_invalid_name", name=raw_name), ""
             manifest["name"] = name
             # min_v 版本闸：安装期即拦截（加载期 _load_one 双闸兜底，防手改清单）
             unmet = self._unmet_min_version(manifest)
@@ -922,7 +944,12 @@ class SubPluginManager:
                             ".py", ".pyc", ".pyo", ".so", ".pyd", ".dll",
                         }:
                             preserved[str(old.relative_to(dest))] = old
-                    backup_dir = Path(tempfile.mkdtemp(prefix="lumen_upgrade_"))
+                    backup_dir = None
+                    try:
+                        backup_dir = Path(tempfile.mkdtemp(prefix="lumen_upgrade_"))
+                    except OSError as e:
+                        # 备份目录创建失败：插件已卸载但目录完整，可重试升级
+                        return False, _t("subplugin_runtime.log.install_prepare_failed", error=e), name
                     upgrade_ok = False
 
                     def _restore_preserved(target_dir: Path) -> None:
@@ -955,10 +982,11 @@ class SubPluginManager:
                             return False, _t("subplugin_runtime.log.install_failed_cleanup", name=name), name
                         try:
                             shutil.copytree(root, dest)
-                        except OSError:
-                            # 新代码写入失败（磁盘满/权限）：回填用户数据文件到半成品目录
+                        except OSError as e:
+                            # 新代码写入失败（磁盘满/权限）：回填用户数据到半成品
+                            # 目录后按失败返回（finally 仍保留备份目录）
                             _restore_preserved(dest)
-                            raise
+                            return False, _t("subplugin_runtime.log.install_copy_failed", error=e), name
                         # 用户数据优先于新包自带同名文件
                         _restore_preserved(dest)
                         upgrade_ok = True
@@ -972,14 +1000,24 @@ class SubPluginManager:
                             )
                     action = _t("subplugin_runtime.log.install_action_upgrade", version=manifest.get('version', '?'))
                 else:
-                    shutil.copytree(root, dest)
+                    try:
+                        shutil.copytree(root, dest)
+                    except OSError as e:
+                        # 全新安装写入失败：清理半成品目录后按失败返回
+                        shutil.rmtree(dest, ignore_errors=True)
+                        return False, _t("subplugin_runtime.log.install_copy_failed", error=e), ""
                     action = _t("subplugin_runtime.log.install_action_install", version=manifest.get('version', '?'))
 
                 # 清单写入必须与目录替换同锁：锁外写入时并发 reload_all/
                 # discover 可在中间态抢先加载该目录（同名同 folder 重复加载、
                 # 监听器重复注册），并发 set_enabled 还会与固定 tmp 文件名
                 # （lumen.json.tmp）交错产出损坏清单
-                _write_manifest_atomic(dest / MANIFEST_NAME, manifest)
+                try:
+                    _write_manifest_atomic(dest / MANIFEST_NAME, manifest)
+                except OSError as e:
+                    # 代码已完整落盘仅清单写失败：返回失败让调用方感知，
+                    # 目录保留（下次启动 discover 会生成默认清单兜底加载）
+                    return False, _t("subplugin_runtime.log.manifest_save_failed", name=name, error=e), name
 
                 sp = SubPlugin(dest, manifest)
                 if manifest.get("load", True):
