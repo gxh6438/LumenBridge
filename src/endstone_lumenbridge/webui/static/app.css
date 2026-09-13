@@ -34,6 +34,20 @@
 .login-card h1 { font-size: 25px; font-weight: 700; letter-spacing: .3px; }
 .login-card .sub { color: var(--muted); font-size: 13.5px; margin: 6px 0 26px; }
 .login-card input { margin-bottom: 14px; text-align: center; }
+/* 密码框包 .secret-field（带眼睛按钮）：间距上移到容器——flex 容器不折叠
+   外距，输入框的 margin-bottom 会把容器撑高 14px，绝对定位的眼睛按钮按
+   容器静态居中即偏下 7px；左右对称的 42px padding 让 text-align:center
+   的文字（含占位符）在视觉上真正居中，不被右侧眼睛按钮挤偏 */
+.login-pw-field { margin-bottom: 14px; }
+/* 字体回归页面默认：等宽字体（.secret-field 供配置页密钥展示）的掩码圆点
+   U+25CF 在行框内按 x-height 定位，视觉中心比行框中心高约 3px，看起来
+   整体偏上；系统 UI 字体的圆点居中良好。letter-spacing 对掩码无意义，一并去除 */
+.login-pw-field input { margin-bottom: 0; padding-left: 42px; font-family: inherit; letter-spacing: normal; }
+/* 掩码态垂直补偿：Chromium 的 password disc 按字体基线在 x-height 区域绘制，
+   视觉中心比输入框中心高 4px（实测，且与字体无关）。上下 padding 对称增减
+   （10/10 → 14/6）内容盒下移 4px 圆点即居中，总高度不变。选择器按
+   type=password 生效：眼睛切换为明文后回落默认 padding，明文本身居中良好 */
+.login-pw-field input[type="password"] { padding-top: 14px; padding-bottom: 6px; }
 .login-err { color: var(--red); font-size: 13px; min-height: 18px; margin-top: 12px; }
 
 #app-view { display: none; }
