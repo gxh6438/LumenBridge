@@ -72,8 +72,7 @@ class AdapterHub:
         self.connections = connections
         self._adapters: dict[str, OneBotAdapter] = {}
         self._lock = threading.RLock()
-        # "无已启用适配器" 告警只提示一次：WebUI 每次保存都会触发
-        # sync_from_manager，无卡片时重复告警会在后台刷屏
+        # "无已启用适配器" 告警只提示一次（WebUI 保存会反复触发 sync）
         self._warned_no_adapters = False
 
     # ------------------------------------------------------------- 实例管理
@@ -85,8 +84,7 @@ class AdapterHub:
             except (TypeError, ValueError):
                 connect_interval = 60000
             try:
-                # 附加事件订阅位（如 1<<1 频道成员、1<<24 群成员进退群），
-                # 用于叠加默认 Intents 之外的特权事件
+                # 附加事件订阅位（叠加默认 Intents 之外的特权事件）
                 extra_intents = int(cfg.get("extra_intents", 0) or 0)
             except (TypeError, ValueError):
                 extra_intents = 0
@@ -125,11 +123,9 @@ class AdapterHub:
         return adapter
 
     def sync_from_manager(self) -> None:
-        """按 connections.json 当前状态差量重建适配器实例（未变化卡片保持不动）。
+        """按 connections.json 差量重建适配器实例（未变化卡片保持不动）。
 
-        stop() 可能阻塞数秒（等待 WS 关闭与线程回收），持锁调用会阻塞
-        其他 API 门面请求；因此锁内只做 diff 与待停/待建收集，锁外执行
-        stop()，再回锁内创建并启动新实例。
+        stop() 可能阻塞数秒，锁内只做 diff 与收集，锁外执行 stop()。
         """
         with self._lock:
             desired: dict[str, dict[str, Any]] = {
@@ -295,8 +291,7 @@ class AdapterHub:
         if name in _GROUP_ROUTED_METHODS and args:
             routed = self._route_by_group(args[0])
             if name.startswith("get_"):
-                # 查询类方法只取一个目标：多适配器命中时避免
-                # 同一 callback 被触发多次
+                # 查询类只取一个目标，避免同一 callback 被触发多次
                 return routed[:1]
             return routed
         return self.connected()
@@ -349,11 +344,7 @@ class AdapterHub:
 
     @staticmethod
     def _fail_callback(args: tuple, kwargs: dict) -> None:
-        """无可用适配器时按查询回调约定回 None。
-
-        回调可能在 args 任意位置（部分方法带默认尾参，如
-        get_record(file, callback, out_format="mp3")），按位置扫描。
-        """
+        """无可用适配器时按查询回调约定回 None（按位置扫描 args/kwargs 找回调）。"""
         callback = next((a for a in args if callable(a)), None)
         if callback is None:
             callback = next((v for v in kwargs.values() if callable(v)), None)
@@ -383,15 +374,14 @@ class AdapterHub:
                 return getattr(adapter, name)(*args, **kwargs)
             targets = self._targets(name, args)
             if not targets:
-                # 无连接时保持与单适配器断线一致的行为：查询回调直接给 None
+                # 无连接时与单适配器断线行为一致：查询回调给 None
                 if name.startswith("get_"):
                     self._fail_callback(args, kwargs)
                 return None
             results = [getattr(a, name)(*args, **kwargs) for a in targets]
             if len(results) == 1:
                 return results[0]
-            # fire-and-forget 方法（返回 None）多实例时也统一返回 None，
-            # 避免调用方拿到 [None, None] 误判为有值
+            # fire-and-forget 多实例统一返回 None，避免 [None, None] 被误判为有值
             return None if all(r is None for r in results) else results
 
         return _delegate

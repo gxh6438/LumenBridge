@@ -21,23 +21,18 @@ if TYPE_CHECKING:
     from ..plugin import LumenBridgePlugin
 
 
-# 子插件命令面板：endstone 的 Command name/aliases setter 在注册后为 no-op，
-# Python API 不支持运行期注册新命令，BDS 命令表在插件加载时冻结。子插件命令
-# 由此面板在服务器启动时并入 LumenBridgePlugin.commands 预声明（见
-# plugin._merge_subplugin_command_palette），运行期仅做 handler 绑定。
+# 子插件命令面板：BDS 命令表在插件加载时冻结，无法运行期注册新命令，
+# 由该面板在启动时并入 LumenBridgePlugin.commands 预声明，运行期仅绑定 handler。
 COMMAND_PALETTE_PATH = Path("plugins/lumenbridge/data/command_palette.json")
 
-# 低危项：command_palette.json 读-改-写锁。多个子插件并发注册命令时，
-# 无锁的 read → merge → write 会互相覆盖丢失对方的条目
+# 面板读-改-写锁：防并发注册命令时互相覆盖条目
 _PALETTE_LOCK = threading.Lock()
 
-# 子插件命令注册表（plugin._lumen_sub_commands）的查重-写入锁：
-# check-then-set 两步无锁时，并发注册同名命令会双双通过查重互相覆盖
+# 命令注册表查重-写入锁：防并发注册同名命令互相覆盖
 _COMMAND_REGISTRY_LOCK = threading.Lock()
 
 _PALETTE_NAME_RE = re.compile(r"[a-z0-9_\-]+")
-# Endstone usage 语法中的合法参数 token：
-# 可选 (a|b) 枚举组 + <必选参数> / [可选参数]（参数名后可带 ": 类型"，类型可含空格）
+# Endstone usage 合法参数 token：(a|b) 枚举组、<参数>/[参数]（可带 ": 类型"）
 _USAGE_TOKEN_RE = re.compile(
     r"(?:\([A-Za-z0-9_|]+\))?[<\[][A-Za-z0-9_]+(?::\s*[A-Za-z][A-Za-z0-9_]*)?[>\]]"
 )
@@ -46,11 +41,8 @@ _USAGE_TOKEN_RE = re.compile(
 def read_command_palette() -> dict[str, dict[str, Any]]:
     """读取启动命令面板（损坏/缺失返回空 dict，绝不抛异常）。
 
-    文件损坏（非法 JSON / 非对象）时先备份为 .corrupt 再返回空：面板
-    汇总了全部子插件的命令声明，add_command_palette_entry 的
-    read→merge→write 会用"空面板 + 新条目"整体覆写原文件，不备份则
-    其他子插件的命令声明全部丢失（重启后命令批量消失），
-    与 whitelist / regex_engine 的同款防护对齐。
+    损坏时先备份为 .corrupt 再返回空：read→merge→write 会整体覆写原文件，
+    不备份则其他子插件的命令声明全部丢失。
     """
     try:
         data = json.loads(COMMAND_PALETTE_PATH.read_text(encoding="utf-8"))
@@ -88,9 +80,8 @@ def write_command_palette(palette: dict[str, dict[str, Any]]) -> None:
 def default_usage(name: str) -> str:
     """命令的默认 usage：/{name} [args: message]。
 
-    Endstone 在启动时按 usage 语法构建命令树，参数必须是 <x>/[x]/(a|b) 形式，
-    字面 "..." 会触发 "Syntax Error" 导致命令注册失败；[args: message] 为
-    官方贪心字符串参数，可接住任意子命令与参数。
+    参数必须是 <x>/[x]/(a|b) 形式，字面 "..." 会触发 Syntax Error；
+    [args: message] 为官方贪心字符串参数。
     """
     return f"/{name} [args: message]"
 
@@ -98,10 +89,8 @@ def default_usage(name: str) -> str:
 def sanitize_usages(name: str, usages: list[str] | None) -> list[str]:
     """清洗 usage 列表，剔除 Endstone 无法解析的非法项，全无效时回退默认。
 
-    非法 usage（如旧版默认 "/{name} ..."、无类型中括号 "[页码]"）会导致
-    Endstone 启动时 "Unable to register command"，此处逐项校验语法：
-    usage 须以 "/{name}" 开头，其余部分只能是若干参数 token ——
-    (a|b)枚举组、<参数> / [参数] / <参数: 类型> / [参数: 类型]（类型可含空格）。
+    非法 usage 会导致 Endstone 启动时 "Unable to register command"：
+    须以 "/{name}" 开头，其余只能由参数 token 组成。
     """
     prefix = f"/{name}"
     valid: list[str] = []
@@ -120,8 +109,7 @@ def sanitize_usages(name: str, usages: list[str] | None) -> list[str]:
 def _clean_command_identifiers(values: list[str] | None) -> list[str]:
     """清洗 alias / 权限名为合法标识符（与命令名同规），非法项直接剔除。
 
-    含非法字符的 alias 与未声明的权限名会让 Endstone 在下次启动时
-    "Unable to register command"（与 usage 非法的后果相同）。
+    非法 alias / 权限名会导致 Endstone 启动时 "Unable to register command"。
     """
     out: list[str] = []
     for raw in values or []:
@@ -161,11 +149,9 @@ def merge_command_palette_into(
 ) -> int:
     """把启动面板中的命令并入目标 commands 字典（如 LumenBridgePlugin.commands）。
 
-    必须在插件模块导入期调用：endstone 加载器在 ``ep.load()`` 之后立即快照
-    ``cls.__dict__['commands']`` 并构造 Command 对象，之后再改类属性无效。
-    面板文件可能被手工编辑损坏，任何条目问题都只跳过该条，绝不抛异常。
-    ``allowed_permissions``：已声明的权限名集合，未在其中（或未提供集合时
-    为空）的权限名一律剔除——未声明的权限会让命令注册失败。
+    必须在插件模块导入期调用：endstone 在 ``ep.load()`` 后立即快照类级
+    commands 构造 Command 对象，之后再改无效。条目损坏只跳过该条，不抛异常。
+    ``allowed_permissions``：已声明权限名集合，未在其中的一律剔除（未声明的权限会让注册失败）。
     """
     merged = 0
     try:
@@ -180,8 +166,7 @@ def merge_command_palette_into(
         try:
             clean: dict[str, Any] = {
                 "description": str(entry.get("description") or f"LumenBridge subplugin command /{name}"),
-                # 清洗面板文件中的 usage（含旧版写入的 "/name ..." 非法默认值），
-                # 否则 Endstone 解析失败导致 "Unable to register command"
+                # 清洗面板中的 usage，非法项会导致 Endstone 注册失败
                 "usages": sanitize_usages(name, entry.get("usages")),
             }
             aliases = _clean_command_identifiers(entry.get("aliases"))
@@ -219,8 +204,7 @@ class EnvPool:
     def set_current_group(self, gid: int, source: Any = None) -> None:
         """事件分发前设置当前来源群号（线程本地），仅主群才设置以兼容旧插件过滤。
 
-        来源适配器自身的群列表同样视为"主群"；AstrBot 适配器（群号在其
-        插件端配置）未配置群列表时接受任意来源群。
+        适配器自身群列表同样视为"主群"；未配置群列表时接受任意来源群。
         """
         # config_manager 在 reload 过程中可能为 None
         cm = self._plugin.config_manager
@@ -248,9 +232,7 @@ class EnvPool:
                 if gid is not None:
                     return gid
                 cm = self._plugin.config_manager
-                # 低危项：无配置管理器（reload 中间态/未初始化）时返回 None 而非 0，
-                # 避免 0 被当成有效群号参与比较（已排查仓库与示例插件，
-                # 调用点均为相等性比较，无 ==0 真值判断依赖）
+                # reload 中间态无配置管理器时返回 None 而非 0，避免 0 被当有效群号
                 return cm.main_group if cm is not None else None
             if key == "main_groups":
                 cm = self._plugin.config_manager
@@ -286,7 +268,6 @@ class PrefixedLogger:
         self._logger.error(f"{self._prefix}{msg}")
 
     def debug(self, msg: Any) -> None:
-        # 必须用 debug 级别，否则调试日志无法通过日志级别关闭
         self._logger.debug(f"{self._prefix}{msg}")
 
 
@@ -317,8 +298,7 @@ class Storage:
                 try:
                     return json.loads(path.read_text(encoding="utf-8"))
                 except (json.JSONDecodeError, UnicodeDecodeError):
-                    # 文件损坏（非法 JSON 或非 UTF-8 字节）：备份原文件再写默认值，
-                    # 避免直接覆盖用户数据；UnicodeDecodeError 不继承 OSError 需单独捕获
+                    # 损坏时先备份再写默认值，避免直接覆盖用户数据
                     import time as _time
                     backup = path.with_suffix(path.suffix + f".corrupt-{int(_time.time())}")
                     try:
@@ -331,7 +311,7 @@ class Storage:
                             path.write_text(json.dumps(default, ensure_ascii=False, indent=4), encoding="utf-8")
                     return default
                 except OSError:
-                    # I/O 错误（文件占用/权限）：不覆盖文件，直接返回 default
+                    # I/O 错误：不覆盖文件，直接返回 default
                     return default
             if default is not None:
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -363,12 +343,11 @@ class MCBridge:
 
     def __init__(self, plugin: "LumenBridgePlugin") -> None:
         self._plugin = plugin
-        # M32：原生 listener 为 per-event 单例，回调挂可变分发表（详见 _listen_endstone）
+        # 原生 listener 为 per-event 单例，回调挂可变分发表（详见 _listen_endstone）
         self._endstone_dispatch: dict[str, list[Callable[..., Any]]] = {}
         # 已注册的原生 listener 登记表：(event_name, listener)
         self._endstone_listeners: list[tuple[str, Any]] = []
-        # 经内部事件总线注册的回调（_EVENT_MAP 别名），卸载时必须 off，
-        # 否则热重载后旧回调残留总线，同一事件被重复触发
+        # 经内部总线注册的回调，卸载时必须 off，防热重载后重复触发
         self._bus_handlers: list[tuple[str, Callable[..., Any]]] = []
 
     def listen(self, event_name: str, callback: Callable[..., Any]) -> bool:
@@ -387,11 +366,8 @@ class MCBridge:
     def _listen_endstone(self, event_name: str, callback: Callable[..., Any]) -> bool:
         """动态注册原生 Endstone 事件监听（按类名反射构造 @event_handler 监听器类）。
 
-        M32：Endstone 未暴露 unregister_events，逐回调创建 listener 会在每次
-        热重载后堆积一批永不移除的原生监听器。改为 per-event 单例：同一事件名
-        只创建/注册一次 listener，其 handler 从可变分发表
-        ``_endstone_dispatch[event_name]`` 取当前全部回调执行；_cleanup 只清空
-        分发表（listener 保留但不再分发），对外 listen() 签名与行为不变。
+        Endstone 未暴露 unregister_events，故同一事件仅创建一个 listener，
+        回调存于可变分发表；_cleanup 清空分发表即停止分发。
         """
         try:
             import endstone.event as es_event
@@ -403,8 +379,7 @@ class MCBridge:
             # 先保证分发表就绪：listener 注册成功后事件可能立即触发
             dispatch = self._endstone_dispatch.setdefault(event_name, [])
             if not any(evt == event_name for evt, _l in self._endstone_listeners):
-                # 闭包捕获分发表对象本身（而非 self），_cleanup 原地清空后
-                # listener 自动变 no-op，且不额外持有 context 引用
+                # 闭包捕获分发表本身，_cleanup 原地清空后 listener 自动 no-op
                 dispatch_table = self._endstone_dispatch
 
                 def _handler(listener_self: Any, event: Any) -> None:  # noqa: ANN401
@@ -428,16 +403,14 @@ class MCBridge:
     def runcmd(self, cmd: str) -> bool:
         """在游戏主线程执行命令，返回 dispatch_command 的真实结果。
 
-        等待主线程 dispatch 完成后取真实 bool（最多等 5 秒，超时/异常返回
-        False）。勿在游戏主线程调用（等待主线程排队任务会死锁，同 runcmdEx）。
+        最多等 5 秒，超时/异常返回 False。勿在游戏主线程调用（会死锁）。
         """
         done = threading.Event()
         cancelled = threading.Event()
         box: list[bool] = [False]
 
         def run() -> None:
-            # 超时后调用方已返回 False；排队中的任务不再执行，避免
-            # 超时后命令仍延迟生效（调用方重试即重复执行），同 runcmdEx
+            # 超时后排队任务不再执行，避免命令延迟生效
             if cancelled.is_set():
                 done.set()
                 return
@@ -470,7 +443,7 @@ class MCBridge:
         result: dict[str, Any] = {"success": False}
 
         def run() -> None:
-            # 超时后调用方已返回快照；排队中的任务不再执行，避免超时后仍产生副作用
+            # 超时后排队任务不再执行，避免延迟副作用
             if cancelled.is_set():
                 done.set()
                 return
@@ -515,8 +488,7 @@ class MCBridge:
         try:
             self._plugin.run_on_main(run)
         except Exception:
-            # 调度失败（插件停用/调度器不可用）：广播无法送达，吞掉避免
-            # 杀死子插件残留线程正在执行的清理逻辑
+            # 调度失败吞掉异常，避免杀死子插件残留线程的清理逻辑
             pass
 
     @property
@@ -527,7 +499,6 @@ class MCBridge:
         cancelled = threading.Event()
 
         def _fetch() -> None:
-            # 超时后调用方已返回空列表；排队中的任务不再执行
             if cancelled.is_set():
                 done.set()
                 return
@@ -561,10 +532,7 @@ class WebBridge:
         self._pending_pages: list[tuple[str, str]] = []
         self._pending_apis: list[tuple[str, str, Any, bool]] = []
         self._pending_lock = threading.Lock()
-        # H16：本子插件已注册的 Web 扩展记录，_revoke_registrations 据此逐项撤销：
-        #   _registered_apis  → ("METHOD", "/api/plugin/xxx")，对应 webui.custom_apis 键
-        #   _registered_pages → "/plugin-views/..."，对应 webui.custom_pages 条目的 url
-        #   _registered_configs → schema 名，对应 webui.plugins_config_schema 键
+        # 已注册的 Web 扩展记录（api/page/config），供卸载时逐项撤销
         self._registered_apis: list[tuple[str, str]] = []
         self._registered_pages: list[str] = []
         self._registered_configs: list[str] = []
@@ -606,8 +574,7 @@ class WebBridge:
         webui = self._webui
         target_name = name or self._name
         if str(target_name) not in self._registered_configs:
-            # H16：builder 后续 register 时会写入 plugins_config_schema，
-            # 先记录 schema 名供卸载撤销（builder 未真正注册时撤销为无害 pop）
+            # 先记录 schema 名供卸载撤销（builder 未注册时撤销为无害 pop）
             self._registered_configs.append(str(target_name))
         if webui:
             return webui.create_config(target_name)
@@ -626,7 +593,7 @@ class WebBridge:
         # 与 webui.register_api 内部构造的完整路径保持一致，供卸载时按键撤销
         full = "/api/plugin" + (path if isinstance(path, str) and path.startswith("/") else "/" + str(path))
         if not need_auth:
-            # H16：免鉴权 API 任何能连到 WebUI 端口的客户端都可调用，注册时即告警
+            # 免鉴权 API 任何能连到端口的客户端都可调用，注册时即告警
             self._logger.warning(
                 f"registerApi: {str(method).upper()} {full} 以 need_auth=False 注册，"
                 f"未持 token 的客户端也可访问，请确认安全风险"
@@ -645,18 +612,18 @@ class WebBridge:
     ) -> None:
         """注册 WebUI 自定义页面。
 
-        tab=False（默认）：页面进移动端「其它」面板与桌面侧栏；
-        tab=True：页面额外注册为移动端底栏 tab（滚动条内、「其它」之前）。
-        icon 为 tab 图标：传内置图标名（"model"/"bot"/"chat"/"shield"/
-        "spark"/"gear"/"chart"）渲染与主面板同风格的 SVG；
-        传其它短文本则按字符图标显示；缺省用默认图标。
-        注意：页面在 iframe 中经带 token 的 URL 加载，页内引用的相对
-        资源（css/js）不会携带 token，自定义页面须自包含（内联样式与脚本）。
-        主面板会在页面加载后注入融合基础样式（画布透明），并按内容高度
-        自适应 iframe（自然流页面随内容延伸到底部导航栏之下随整页滚动；
-        满屏型页面 height:100% 会被主面板撑到至少一屏，短内容也铺满
-        视口）。如需保留自己的背景色，请用内联样式覆盖（内联 !important
-        优先级最高）：<body style="background:#fff !important">。
+        tab=False（默认）：进移动端「其它」面板与桌面侧栏；tab=True：
+        额外注册为移动端底栏 tab。
+        icon：传内置图标名（"model"/"bot"/"chat"/"shield"/"spark"/"gear"/
+        "chart"/"home"/"user"/"users"/"server"/"database"/"map"/"box"/"gift"/
+        "trophy"/"crown"/"coin"/"fire"/"zap"/"heart"/"star"/"bell"/"clock"/
+        "calendar"/"music"/"image"/"search"/"link"/"lock"/"book"/"code"/
+        "terminal"/"globe"）渲染同风格 SVG；传 emoji 按字符渲染（建议单个）；
+        缺省用默认图标。
+        注意：页面在 iframe 中经带 token 的 URL 加载，相对资源不携带 token，
+        须自包含（内联样式与脚本）。主面板会注入融合基础样式并按内容高度
+        自适应 iframe；如需保留背景色，用内联样式覆盖：
+        <body style="background:#fff !important">。
         """
         webui = self._webui
         if webui:
@@ -670,11 +637,10 @@ class WebBridge:
     register_page = registerPage
 
     def _revoke_registrations(self) -> None:
-        """H16：卸载时撤销本子插件注册的全部 API / 自定义页面 / 配置表单。
+        """卸载时撤销本子插件注册的全部 API / 自定义页面 / 配置表单。
 
-        WebUI 三个注册表是进程级全局状态，热重载若不撤销，旧 handler 会残留
-        并与新 handler 并存（路由命中已卸载插件的闭包，可能持有过期 storage）。
-        通过 context 持有的 webui 引用，在 _ext_lock 保护下逐键删除。
+        WebUI 注册表是进程级全局状态，热重载不撤销则旧 handler 残留；
+        在 _ext_lock 保护下逐键删除。
         """
         with self._pending_lock:
             # 尚未 flush 的暂存注册直接丢弃（webui 未就绪即被卸载的场景）
@@ -757,10 +723,7 @@ def register_subplugin_command(
         logger.warning(f"register_command: handler for /{cmd_name} is not callable")
         return False
 
-    # 跨子插件命令名查重（注册表挂在插件实例上，所有上下文共享）。
-    # 查重到写入全程持锁：无锁时两个线程并发注册同名命令会双双通过
-    # 查重，后写者静默覆盖先注册者的 handler。命令注册是低频操作，
-    # 锁内的面板文件 I/O 与日志开销可以接受
+    # 查重到写入全程持锁：防并发注册同名命令时后写者覆盖先注册者的 handler
     with _COMMAND_REGISTRY_LOCK:
         registry = plugin.__dict__.setdefault("_lumen_sub_commands", {})
         if cmd_name in registry:
@@ -800,13 +763,10 @@ def plugin_register_command_compat(
 ) -> bool:
     """插件对象上的 register_command 兼容入口。
 
-    PicServer_Rank3 等子插件会经 ``lumen.plugin.register_command(...)`` 注册
-    命令（而非上下文）。子插件加载期间（loader 设置了 ``_lumen_loading_context``）
-    转发给对应上下文，保证归属与卸载清理正确；其余场景以 "plugin" 归属直接注册。
-
-    H15：加载期的 compat 注册同时登记到全局 ``_lumen_plugin_commands`` 与
-    context 自身的 ``_registered_commands``（按 owner 记录），_cleanup 时把
-    属于本 context 的条目从全局列表移除，绑定随卸载释放。
+    子插件加载期间（loader 设置了 ``_lumen_loading_context``）转发给对应
+    上下文，保证归属与卸载清理正确；其余场景以 "plugin" 归属直接注册。
+    注册同时登记全局 ``_lumen_plugin_commands`` 与 context 的
+    ``_registered_commands``，_cleanup 时随卸载释放。
     """
     ctx = plugin.__dict__.get("_lumen_loading_context")
     if ctx is not None:
@@ -824,14 +784,11 @@ def plugin_register_command_compat(
 
 
 class _SchedulerWrapper:
-    """Endstone 调度器代理（H14）。
+    """Endstone 调度器代理。
 
-    透传 scheduler 的全部属性与方法，仅包装任务注册类方法（run_task /
-    run_task_later / run_task_timer 等）：把返回的 task 对象记录到所属
-    context 的 ``_scheduled_tasks``，供 ``_cleanup`` 统一 cancel——否则热
-    重载后旧 context 的定时任务永不取消，周期任务会重复执行。cancel_task
-    同步从记录集合移除，保持集合与调度器实际状态一致。对外签名不变，
-    子插件对 ``lumen.scheduler.*`` 的调用完全无感知。
+    透传全部属性与方法，仅包装 run_task* 类方法：把返回的 task 记录到
+    所属 context 的 ``_scheduled_tasks``，供 ``_cleanup`` 统一 cancel，
+    防热重载后旧定时任务重复执行；cancel_task 同步移除记录。
     """
 
     def __init__(self, scheduler: Any, owner: "LumenContext") -> None:
@@ -856,8 +813,7 @@ class _SchedulerWrapper:
                 result = attr(*args, **kwargs)
                 tasks = getattr(self._owner, "_scheduled_tasks", None)
                 if tasks is not None:
-                    # 官方签名 cancel_task(id: int)：按 task_id 匹配移除，
-                    # 兼容少数端实现的 cancel_task(task) 写法
+                    # 官方签名 cancel_task(id)：按 task_id 匹配，兼容传 task 的写法
                     ids = {id(a) for a in args}
                     for task in list(tasks):
                         if id(task) in ids or getattr(task, "task_id", None) in args:
@@ -890,10 +846,9 @@ class LumenContext:
         self._regex_actions: list[str] = []
         # 本上下文绑定的服务器命令名，_cleanup 时统一解除 handler 绑定
         self._commands: list[str] = []
-        # H15：本上下文（含 compat 路径）注册的命令名，_cleanup 时从全局
-        # _lumen_plugin_commands 移除属于本上下文的条目
+        # 本上下文注册的命令名，_cleanup 时从全局 _lumen_plugin_commands 移除
         self._registered_commands: list[str] = []
-        # H14：本上下文经 lumen.scheduler 注册的定时任务对象，_cleanup 逐个 cancel
+        # 本上下文经 lumen.scheduler 注册的定时任务，_cleanup 逐个 cancel
         self._scheduled_tasks: set[Any] = set()
         # _cleanup 后置位：拒绝再次注册事件（旧 context 重复注册会永久泄漏 handler）
         self._disposed = False
@@ -921,11 +876,10 @@ class LumenContext:
 
     @property
     def scheduler(self) -> Any:
-        """Endstone 任务调度器（0.11：run_task(plugin, task, delay=0, period=0) 统一同步/延迟/周期任务；cancel_task 等）。
+        """Endstone 任务调度器（0.11：run_task 统一同步/延迟/周期任务；cancel_task 等）。
 
-        H14：返回记录型代理——run_task* 返回的 task 会记入 ``_scheduled_tasks``，
-        ``_cleanup`` 时统一 cancel，防热重载后旧定时任务残留重复执行；
-        其余属性/方法原样透传，对外签名与用法不变。
+        返回记录型代理：run_task* 的 task 记入 ``_scheduled_tasks``，
+        ``_cleanup`` 时统一 cancel，防热重载后旧任务重复执行。
         """
         raw = self._plugin.server.scheduler
         wrapper = getattr(self, "_scheduler_wrapper", None)
@@ -1042,20 +996,11 @@ class LumenContext:
     ) -> bool:
         """注册子插件服务器命令（handler(sender, args) -> bool，主线程执行）。
 
-        endstone 0.11 的 Python API 不支持运行期注册新命令（BDS 命令表在
-        插件加载时冻结，Command 的 name/aliases setter 注册后为 no-op），故
-        采用「启动面板 + 运行期绑定」两段式：
-
-        - 命令已在 command_palette.json 声明（服务器启动时由
-          plugin._merge_subplugin_command_palette 并入类级 commands）→
-          绑定 handler，本次启动即可用，返回 True；
-        - 未声明 → 写入面板文件后同样返回 True 并告警提示「重启服务器后
-          生效」：本启动 /name 暂不可用，重启后面板命令注册、子插件再次
-          加载时绑定即生效（返回 False 会让子插件直接加载失败，故不采用）；
-        - 命令名非法、handler 不可调用或已被其他子插件注册 → 返回 False。
-
-        aliases 参数仅为面板记录（重启后随命令一并声明）。子插件卸载时解除
-        handler 绑定（面板声明保留，重启后仍可被再次绑定）。
+        endstone 0.11 不支持运行期注册新命令，故用「启动面板 + 运行期绑定」
+        两段式：已在 command_palette.json 声明 → 绑定 handler，本次启动即
+        可用；未声明 → 写入面板并告警「重启后生效」（返回 False 会让子插件
+        直接加载失败，故不采用）；命令名非法/不可调用/被占用 → 返回 False。
+        aliases 仅为面板记录；卸载时解除 handler 绑定（面板声明保留）。
         """
         ok = register_subplugin_command(
             self._plugin, self.logger, self.pluginName,
@@ -1075,9 +1020,8 @@ class LumenContext:
     ) -> Any:
         """把 func 调度到主线程执行并阻塞等待返回值（同步主线程桥）。
 
-        主线程内调用直接同步执行；后台线程调用则调度并等待，超时或
-        异常返回 default（超时后排队任务不再执行，防延迟副作用）。
-        子插件在 OneBot/WebUI 线程触碰 Endstone API 前用它桥接。
+        主线程内直接同步执行；后台线程调度并等待，超时/异常返回 default。
+        子插件在后台线程触碰 Endstone API 前用它桥接。
         """
         return self._plugin.call_on_main(func, timeout=timeout, default=default)
 
@@ -1092,8 +1036,7 @@ class LumenContext:
                 except Exception:
                     pass
         self._handlers.clear()
-        # 注销本上下文注册的正则引擎自定义动作，避免热重载后旧 action 残留
-        # （防御部分初始化的实例：_regex_actions 可能尚未创建）
+        # 注销正则引擎自定义动作（防御部分初始化实例：属性可能未创建）
         regex_actions = getattr(self, "_regex_actions", None)
         if regex_actions is None:
             regex_actions = []
@@ -1119,10 +1062,9 @@ class LumenContext:
             for cmd_name in list(commands):
                 registry.pop(cmd_name, None)
             commands.clear()
-            # 面板声明（command_palette.json）保留：BDS 命令注册属启动期，
-            # 卸载子插件不注销命令本身，仅解除 handler 绑定（on_command 找不到
-            # 绑定即返回 False），重启后命令可被再次绑定
-        # H15：从全局 _lumen_plugin_commands 移除属于本 context 的命令登记
+            # 面板声明保留：BDS 命令注册属启动期，卸载仅解除 handler 绑定，
+            # 重启后命令可被再次绑定
+        # 从全局 _lumen_plugin_commands 移除属于本 context 的命令登记
         registered_commands = getattr(self, "_registered_commands", None)
         if registered_commands:
             plugin_commands = self._plugin.__dict__.get("_lumen_plugin_commands")
@@ -1142,9 +1084,7 @@ class LumenContext:
                 cancel = None
             for task in list(scheduled):
                 try:
-                    # Endstone 0.11 cancel_task 签名为 cancel_task(id: int)，
-                    # 直接传 Task 对象会抛 TypeError 且被下方 except 吞掉，
-                    # 任务实际从未取消（热重载后周期任务重复执行）
+                    # task.cancel() 失败时退回 cancel_task(task_id)，确保任务真正取消
                     task.cancel()
                 except Exception:
                     if callable(cancel):
@@ -1153,9 +1093,8 @@ class LumenContext:
                         except Exception:
                             pass  # 任务已结束/已被取消等情况不阻断其余清理
             scheduled.clear()
-        # M32：原生 listener 为 per-event 单例且无法注销（Endstone 未暴露
-        # unregister_events）；清空分发表使其不再分发，并置 _lumen_active=False
-        # 双保险，避免热重载后子插件回调被重复触发
+        # 原生 listener 无法注销：清空分发表并置 _lumen_active=False 双保险，
+        # 避免热重载后子插件回调被重复触发
         dispatch_table = getattr(self.mc, "_endstone_dispatch", None)
         if dispatch_table is not None:
             dispatch_table.clear()

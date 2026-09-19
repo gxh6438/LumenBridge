@@ -1,11 +1,10 @@
 """QQ 官方机器人消息发送器。
 
-消费发送队列，按凭据优先级（被动 msg_id → 入群 event_id → 主动）组装
-请求体发送。富媒体经 /v2/{groups|users}/{target}/files 上传（url 或本地
-base64）；错误码驱动重试（借鉴 Gensokyo）：超时/网络错误按间隔重试并
-递增 msg_seq 规避官方 (msg_id, msg_seq) 去重，event_id 无效（40034025）
-清除后立即重发，主动消息被拒（22009）不入重试交补发栈，被动回复成功后
-借剩余额度补发（Gensokyo AtoP）。依赖以 adapter 引用注入，避免循环导入。
+消费发送队列，按凭据优先级（被动 msg_id → 入群 event_id → 主动）组装发送。
+富媒体经 /v2/{groups|users}/{target}/files 上传；错误码驱动重试：超时/网络
+错误按间隔重试并递增 msg_seq 规避官方 (msg_id, msg_seq) 去重，event_id
+无效（40034025）清除后立即重发，主动被拒（22009）交补发栈，被动回复成功
+后借剩余额度补发。依赖以 adapter 引用注入，避免循环导入。
 """
 
 from __future__ import annotations
@@ -37,10 +36,8 @@ def _payload_body(content: str, file_info: str) -> dict[str, Any]:
     """按内容选择官方消息载体。
 
     - 富媒体：msg_type=7，content 作配文；
-    - 含出站 @ 标记（extract_payload 已归一为官方文本链
-      <qqbot-at-user id="openid" />）：切换 markdown 载体（msg_type=2），
-      Gensokyo-ForSpark 实测该组合可渲染真实 @（纯文本 + 文本链、
-      markdown + <at id=""> 均显示原文）；其余文本同步转义防误解析；
+    - 含出站 @ 标记（官方文本链）：切换 markdown 载体（msg_type=2），
+      实测仅该组合可渲染真实 @；其余文本同步转义防误解析；
     - 其余：纯文本 msg_type=0。
     """
     if file_info:
@@ -98,7 +95,7 @@ class MessageSender:
     async def post_message(
         self, kind: str, target: str, body: dict[str, Any], has_media: bool
     ) -> str:
-        """发送单条消息，含错误码驱动的重试矩阵（借鉴 Gensokyo）。
+        """发送单条消息，含错误码驱动的重试矩阵。
 
         返回 "ok" / "rejected"（主动被拒 22009，可入补发栈）/ "failed"。
         超时/网络错误按间隔重试（文本 1s / 富媒体 3s，递增 msg_seq 规避
@@ -116,8 +113,7 @@ class MessageSender:
         for attempt in range(1, retry_max + 1):
             try:
                 data = await self.ad._api_request("POST", path, body)
-                # 重试期间 body 内 msg_seq 已递增：把最终消耗的序号回写
-                # 凭据池，否则池下次发出的 seq 与官方已消费的重复而被去重
+                # 重试期间 msg_seq 已递增：回写凭据池，否则下次 seq 重复被去重
                 if "msg_id" in body and "msg_seq" in body:
                     self.ad.credentials.sync_passive_seq(
                         target, str(body["msg_id"]), int(body["msg_seq"])
@@ -137,9 +133,7 @@ class MessageSender:
                     and body.get("msg_type") == 2
                     and "markdown" in str(e.detail or e).lower()
                 ):
-                    # markdown 能力未开通（如"不允许发送原生 markdown"）：
-                    # 降级纯文本（@ 不渲染，还原为 @Openid前8位 可读文本，
-                    # 学 Gensokyo 兜底），去重字段保留
+                    # markdown 能力未开通：降级纯文本（@ 不渲染，还原为可读文本）
                     md_fallback_retried = True
                     body["content"] = markdown_to_plain_text(
                         str((body.get("markdown") or {}).get("content") or "")
@@ -148,15 +142,13 @@ class MessageSender:
                     body["msg_type"] = 0
                     continue
                 if biz == BIZ_EVENT_ID_INVALID and "event_id" in body and not event_id_retried:
-                    # 官方判定该 event_id 无效：从存储移除，否则窗口内后续
-                    # 每条消息都先白白消耗一轮重试再降级主动通道（连锁丢失）
+                    # event_id 无效：移除缓存，否则后续消息空耗重试轮次再降级
                     self.ad.credentials.purge_event_id(target)
                     body.pop("event_id", None)
                     event_id_retried = True
                     continue
                 if biz == BIZ_MSG_ID_EXPIRED and "msg_id" in body and not msg_id_retried:
-                    # msg_id 已被官方判定过期：清掉凭据字段并从池中移除，
-                    # 改走主动通道重发一次（沿用旧凭据只会整轮重试失败）
+                    # msg_id 官方判定过期：移除凭据改走主动通道重发一次
                     self.ad.credentials.purge_passive(target, str(body.get("msg_id") or ""))
                     body.pop("msg_id", None)
                     body.pop("msg_seq", None)
@@ -193,10 +185,10 @@ class MessageSender:
 
     # ------------------------------------------------------------ 补发栈
     async def flush_active_stack(self, target: str) -> None:
-        """借被动凭据补发该目标栈内的主动消息（Gensokyo AtoP 机制）。
+        """借被动凭据补发该目标栈内的主动消息（AtoP 机制）。
 
-        仅在被动回复发送成功后调用：复用凭据池剩余额度（同 msg_id 配
-        递增 msg_seq），每次至多 ACTIVE_STACK_FLUSH 条，凭据耗尽即止。
+        仅在被动回复发送成功后调用：复用凭据池剩余额度，每次至多
+        ACTIVE_STACK_FLUSH 条，凭据耗尽即止。
         """
         for _ in range(ACTIVE_STACK_FLUSH):
             item = self.ad.credentials.pop_active(target)
@@ -228,8 +220,7 @@ class MessageSender:
                         self.ad.logger.info(_t("qqofficial.active_flushed", target=target))
                 else:
                     if result == "rejected" and "msg_id" not in body:
-                        # msg_id 过期降级后被拒：条目已出栈，回栈首等待下次
-                        # 机会，否则该条消息静默丢失
+                        # 过期降级后被拒：回栈首等待下次，否则静默丢失
                         self.ad.credentials.unshift_active(item)
                     self.ad.logger.warning(
                         _t("qqofficial.active_flush_failed", target=target, error=result)
@@ -252,8 +243,7 @@ class MessageSender:
                 return
             kind, target, content, media = item
             try:
-                # 先上传富媒体：失败仅告警并降级为纯文本，不消耗被动回复
-                # 凭据（msg_seq），避免媒体故障导致整条消息放弃
+                # 富媒体先上传：失败降级纯文本，不消耗被动凭据（msg_seq）
                 file_info = ""
                 if media is not None:
                     try:
@@ -277,20 +267,16 @@ class MessageSender:
                         body["event_id"] = event_id
                         self.ad.logger.debug(_t("qqofficial.event_id_reply", target=target))
                     else:
-                        # 群聊主动消息几乎必被官方拒绝（22009），回复会"消失"
-                        #（用户表现为"命令生效但群里无返回"）；静默模式下
-                        # 不打印，排障时可关闭开关查看
+                        # 群聊主动消息几乎必被拒（22009）即"命令生效但群里无返回"
                         if not self.ad.suppress_connection_log:
                             self.ad.logger.warning(
                                 _t("qqofficial.send_no_credential", target=target, head=content[:40])
                             )
                 result = await self.post_message(kind, str(target), body, media is not None)
                 if result == "rejected":
-                    # msg_id 过期降级主动通道被拒（凭据已在 post_message 内
-                    # 被清除，body 不再含 msg_id）同样入栈，否则消息被静默丢弃
+                    # 过期降级后被拒（body 已无 msg_id）同样入栈，否则静默丢失
                     if passive is None or "msg_id" not in body:
-                        # 主动消息被拒（22009）：入栈等下次被动回复时借道补发。
-                        # 入栈提示属运行提示类日志：静默模式下不打印
+                        # 主动被拒（22009）：入栈等下次被动回复借道补发
                         self.ad.credentials.push_active((kind, str(target), content, media))
                         if not self.ad.suppress_connection_log:
                             self.ad.logger.info(
@@ -324,8 +310,7 @@ class MessageSender:
         target = _normalize_target(target)
         content, media = extract_payload(message)
         if not content and media is None:
-            # 空载荷丢弃必须留痕：base64 图片未被解析时被无声丢弃，
-            # 用户侧表现为"无响应、无报错"
+            # 空载荷丢弃须留痕：base64 未解析被无声丢弃时用户无感知
             self.ad.logger.warning(
                 _t("qqofficial.send_dropped_empty", target=target)
             )

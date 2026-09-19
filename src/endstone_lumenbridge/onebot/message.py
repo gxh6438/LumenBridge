@@ -8,9 +8,8 @@ from typing import Any, Iterable
 
 Segment = dict[str, Any]
 
-# 允许读取本地图片的根目录白名单（默认为空 = 禁止读本地文件）。
-# 防止消息变量（如 $1 来自用户输入）拼出任意路径，把服务器本地文件
-# base64 后外发到 QQ 群造成信息泄露。插件启用时注册数据目录。
+# 本地图片根目录白名单（默认空 = 禁止读本地文件）：防止用户可控的消息
+# 变量拼出任意路径，把本地文件 base64 外发造成信息泄露
 _local_image_roots: list[Path] = []
 
 
@@ -51,11 +50,10 @@ def face(face_id: int | str) -> Segment:
 
 
 def image(file: str | bytes, sub_type: int = 0) -> Segment:
-    """支持本地路径 / URL / base64 / bytes 的图片消息段
+    """支持本地路径 / URL / base64 / bytes 的图片消息段。
 
-    本地路径仅在 :func:`set_local_image_roots` 注册的白名单目录内才会被读取，
-    白名单外一律按原始字符串（URL/标识符）透传给协议端，防止任意文件读取。
-    sub_type 可选（0 普通图 / 1 表情图，OneBot v11 扩展），默认 0 保持兼容。
+    本地路径仅在白名单内读取，白名单外按原始字符串透传协议端，防任意文件读取。
+    sub_type：0 普通图 / 1 表情图（OneBot v11 扩展）。
     """
     if isinstance(file, bytes):
         file = "base64://" + base64.b64encode(file).decode()
@@ -63,9 +61,9 @@ def image(file: str | bytes, sub_type: int = 0) -> Segment:
         p = _resolve_under_roots(file)
         if p is not None:
             try:
-                # 限制本地图片文件大小，避免大文件导致内存耗尽
+                # 限制本地图片大小防内存耗尽
                 if p.stat().st_size > 10 * 1024 * 1024:  # 10MB
-                    file = str(file)  # 过大时回退为原始字符串（URL/标识符），避免 OOM
+                    file = str(file)  # 过大时回退为原始字符串
                 else:
                     file = "base64://" + base64.b64encode(p.read_bytes()).decode()
             except OSError:

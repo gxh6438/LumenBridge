@@ -3,14 +3,15 @@ from __future__ import annotations
 import http
 import ssl as ssl_module
 import urllib.parse
-from typing import Any, Callable, Literal
+from typing import Any, Awaitable, Callable, Literal
+
+import trio
 
 from ..http11 import Request, Response
-from ..typing import PathLike
 from .server import Server, ServerConnection, serve
 
 
-__all__ = ["route", "unix_route", "Router"]
+__all__ = ["route", "Router"]
 
 
 try:
@@ -19,33 +20,28 @@ try:
 
 except ImportError:
 
-    def route(
+    async def route(
         url_map: Map,
         *args: Any,
         server_name: str | None = None,
         ssl: ssl_module.SSLContext | Literal[True] | None = None,
         create_router: type[Router] | None = None,
+        task_status: trio.TaskStatus[Server] = trio.TASK_STATUS_IGNORED,
         **kwargs: Any,
-    ) -> Server:
+    ) -> None:
         raise ImportError("route() requires werkzeug")
-
-    def unix_route(
-        url_map: Map,
-        path: PathLike | None = None,
-        **kwargs: Any,
-    ) -> Server:
-        raise ImportError("unix_route() requires werkzeug")
 
 else:
 
-    def route(
+    async def route(
         url_map: Map,
         *args: Any,
         server_name: str | None = None,
         ssl: ssl_module.SSLContext | Literal[True] | None = None,
         create_router: type[Router] | None = None,
+        task_status: trio.TaskStatus[Server] = trio.TASK_STATUS_IGNORED,
         **kwargs: Any,
-    ) -> Server:
+    ) -> None:
         """
         Create a WebSocket server dispatching connections to different handlers.
 
@@ -58,7 +54,7 @@ else:
         .. _werkzeug: https://werkzeug.palletsprojects.com/
 
         :func:`route` accepts the same arguments as
-        :func:`~websockets.sync.server.serve`, except as described below.
+        :func:`~websockets.trio.server.serve`, except as described below.
 
         The first argument is a :class:`werkzeug.routing.Map` that maps URL patterns
         to connection handlers. In addition to the connection, handlers receive
@@ -66,11 +62,10 @@ else:
 
         Here's an example::
 
-
-            from websockets.sync.router import route
+            from websockets.trio.router import route
             from werkzeug.routing import Map, Rule
 
-            def channel_handler(websocket, channel_id):
+            async def channel_handler(websocket, channel_id):
                 ...
 
             url_map = Map([
@@ -78,8 +73,13 @@ else:
                 ...
             ])
 
-            with route(url_map, ...) as server:
-                server.serve_forever()
+            # set this event to exit the server
+            stop = trio.Event()
+
+            with trio.open_nursery() as nursery:
+                server = await nursery.start(route, url_map, ...)
+                async with server:
+                    await stop.wait()
 
         Refer to the documentation of :mod:`werkzeug.routing` for details.
 
@@ -105,6 +105,8 @@ else:
                 :obj:`True` if a reverse proxy terminates TLS connections.
             create_router: Factory for the :class:`Router` dispatching requests to
                 handlers. Set it to a wrapper or a subclass to customize routing.
+            task_status: For compatibility with :meth:`nursery.start
+                <trio.Nursery.start>`.
 
         """
         url_scheme = "ws" if ssl is None else "wss"
@@ -119,44 +121,35 @@ else:
         _process_request: (
             Callable[
                 [ServerConnection, Request],
-                Response | None,
+                Awaitable[Response | None] | Response | None,
             ]
             | None
         ) = kwargs.pop("process_request", None)
         if _process_request is None:
             process_request: Callable[
                 [ServerConnection, Request],
-                Response | None,
+                Awaitable[Response | None] | Response | None,
             ] = router.route_request
         else:
 
-            def process_request(
-                connection: ServerConnection, request: Request
+            async def process_request(
+                connection: ServerConnection,
+                request: Request,
             ) -> Response | None:
                 response = _process_request(connection, request)
+                if isinstance(response, Awaitable):
+                    response = await response
                 if response is not None:
                     return response
                 return router.route_request(connection, request)
 
-        return serve(router.handler, *args, process_request=process_request, **kwargs)
-
-    def unix_route(
-        url_map: Map,
-        path: PathLike | None = None,
-        **kwargs: Any,
-    ) -> Server:
-        """
-        Create a WebSocket Unix server dispatching connections to different handlers.
-
-        :func:`unix_route` combines the behaviors of :func:`route` and
-        :func:`~websockets.sync.server.unix_serve`.
-
-        Args:
-            url_map: Mapping of URL patterns to connection handlers.
-            path: File system path to the Unix socket.
-
-        """
-        return route(url_map, unix=True, path=path, **kwargs)
+        return await serve(
+            router.handler,
+            *args,
+            process_request=process_request,
+            task_status=task_status,
+            **kwargs,
+        )
 
 
 class Router:
@@ -209,6 +202,6 @@ class Router:
         connection.handler, connection.handler_kwargs = handler, kwargs
         return None
 
-    def handler(self, connection: ServerConnection) -> None:
+    async def handler(self, connection: ServerConnection) -> None:
         """Handle a connection."""
-        return connection.handler(connection, **connection.handler_kwargs)
+        return await connection.handler(connection, **connection.handler_kwargs)

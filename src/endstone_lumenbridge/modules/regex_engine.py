@@ -18,8 +18,7 @@ from ..i18n import t as _t
 if TYPE_CHECKING:
     from ..plugin import LumenBridgePlugin
 
-# 规则动作去抖：同一规则对同一事件指纹在窗口内只执行一次动作，
-# 防止上游事件重复（多链路上报 / 协议端重发）导致回复发送两次
+# 动作去抖：同一规则对同一事件指纹在窗口内只执行一次，防上游重复上报
 _ACTION_DEDUP_WINDOW = 5.0
 _ACTION_DEDUP_MAX = 512
 
@@ -89,8 +88,7 @@ DEFAULT_RULES: list[dict[str, Any]] = [
     },
 ]
 
-# 旧版内置欢迎动作（纯文本、无 @）：仅当存量 rules.json 仍是该原样默认时
-# 自动升级为 replyAtText 版本；被用户改过的规则绝不触碰
+# 旧版欢迎动作：仅当存量规则仍为该原样默认时自动升级为 replyAtText
 _LEGACY_WELCOME_ACTIONS = [
     {"type": "replyText", "params": "欢迎新成员！发送 绑定白名单<你的游戏ID> 即可进服游玩"},
 ]
@@ -100,13 +98,12 @@ _JS_FLAG_MAP = {"i": re.IGNORECASE, "m": re.MULTILINE, "s": re.DOTALL}
 # 内置命令：/get openid [@成员|QQ号]
 _OPENID_CMD_RE = re.compile(r"^/get\s+openid(?:\s+(.*))?$", re.IGNORECASE)
 
-# ReDoS 防护：规则 pattern 来自可被网页编辑的 rules.json，恶意或失误的
-# 灾难性回溯 pattern（嵌套量词 / 超大重复下界）会长时间阻塞匹配线程甚至主线程。
+# ReDoS 防护：pattern 来自可被网页编辑的 rules.json，灾难性回溯会阻塞主线程
 _MAX_PATTERN_LEN = 512        # pattern 最大长度
 _MAX_MATCH_TEXT_LEN = 2000    # 参与匹配的消息文本最大长度
-# 危险重复限定：{4位数及以上} 的有界重复（如 a{100000}）或嵌套量词（如 (a+)+）
+# 危险重复：{4位数及以上} 有界重复（如 a{100000}）
 _HUGE_REPEAT_RE = re.compile(r"\{\d{4,}")
-# 量词 + 组结束 + 量词，如 (a+)+ / (a*)?{2} / (?:a+)*
+# 嵌套量词：量词+组结束+量词，如 (a+)+
 _NESTED_QUANT_RE = re.compile(r"[+*}]\s*\)\s*[+*{]")
 
 
@@ -140,9 +137,7 @@ class RegexEngineModule:
         self.path = Path(plugin.data_folder) / "data" / "rules.json"
         self.rules: list[dict[str, Any]] = self._load_rules()
         self.custom_actions: dict[str, Callable[..., Any]] = {}
-        # 已编译 pattern 缓存：key = flags + pattern；非法 / 高风险 pattern
-        # 缓存为 None（负缓存）。玩家聊天事件在主线程匹配，逐条重复编译 +
-        # ReDoS 风险扫描会直接消耗 TPS；规则仅在 load/reload/save 时变化。
+        # pattern 编译缓存（非法 / 高风险缓存为 None 负缓存）：聊天在主线程匹配，避免逐条编译
         self._pattern_cache: dict[str, "re.Pattern[str] | None"] = {}
 
         self._action_dedup: OrderedDict[tuple[str, ...], float] = OrderedDict()
@@ -150,16 +145,14 @@ class RegexEngineModule:
 
         self.register_action("getXboxID", self._action_get_xbox_id)
 
-        # 无条件注册事件，enable 在 handler 内实时检查（handle_message /
-        # handle_event 开头均有开关判断）：/lumen reload 重载配置后立即生效
+        # 无条件注册事件，开关在 handler 内实时检查，/lumen reload 后立即生效
         self.bus.on("message.group.normal", self._on_group_message)
         self.bus.on("notice.group_increase", self._on_group_increase)
         self.bus.on("notice.group_decrease", self._on_group_decrease)
 
     @property
     def conf(self) -> dict[str, Any]:
-        """引擎配置（实时读取：config_manager.load() 会整体替换 data
-        dict，缓存旧引用会导致 /lumen reload 后配置永不生效）。"""
+        """引擎配置（实时读取，缓存旧引用会导致 /lumen reload 后不生效）。"""
         return self.plugin.config_manager.regex_engine
 
     @staticmethod
@@ -213,8 +206,7 @@ class RegexEngineModule:
             try:
                 data = json.loads(self.path.read_text(encoding="utf-8"))
                 if isinstance(data, list):
-                    # 过滤非 dict 元素（手改文件 / API 提交畸形数组）：
-                    # 畸形元素会让热路径的 rule.get() 抛 AttributeError
+                    # 过滤非 dict 元素，防热路径 rule.get() 抛 AttributeError
                     cleaned = [r for r in data if isinstance(r, dict)]
                     if len(cleaned) != len(data):
                         self.logger.warning(_t("regex_engine.log.rules_invalid_entries"))
@@ -224,8 +216,7 @@ class RegexEngineModule:
                         self.logger.info(_t("regex_engine.log.welcome_upgraded"))
                     return migrated
             except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-                # 损坏时先把原文件备份为 .corrupt 再回退默认：
-                # 直接覆写会让用户全部自定义规则永久丢失
+                # 损坏时先备份 .corrupt 再回退默认，避免用户规则被覆写丢失
                 try:
                     shutil.copy2(self.path, self.path.with_name(self.path.name + ".corrupt"))
                 except OSError:
@@ -236,11 +227,7 @@ class RegexEngineModule:
 
     @staticmethod
     def _migrate_legacy_welcome(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """存量 rules.json 的旧版欢迎规则（纯文本）→ replyAtText（真实 @）。
-
-        仅当 rule_welcome 的 actions 与旧内置默认完全一致（用户未改过）才
-        升级；任何自定义内容保持原样。返回原列表（无变化）或新列表。
-        """
+        """旧版纯文本欢迎规则仅在未被用户改动时升级为 replyAtText。"""
         for rule in rules:
             if (
                 isinstance(rule, dict)
@@ -265,8 +252,7 @@ class RegexEngineModule:
 
     def save_rules(self, rules: list[dict[str, Any]]) -> None:
         """保存规则库并立即热加载（供 WebUI 调用）"""
-        # 过滤非 dict 元素：畸形元素会让热路径 rule.get() 在 try 外抛
-        # AttributeError，导致后续所有规则被跳过
+        # 过滤非 dict 元素，防热路径 rule.get() 抛 AttributeError
         rules = [r for r in rules if isinstance(r, dict)]
         self._write_rules_atomic(rules)
         self.rules = rules
@@ -274,10 +260,7 @@ class RegexEngineModule:
         self.logger.info(_t("regex_engine.log.rules_saved", count=len(rules)))
 
     def _compile_cached(self, pattern: str, flags: str, rule_name: Any) -> "re.Pattern[str] | None":
-        """带缓存编译规则 pattern；非法 / 超长 / 高风险 pattern 返回 None。
-
-        命中缓存时零编译成本（含负缓存），异常日志也只打印一次而不是每条消息刷屏。
-        """
+        """带缓存编译 pattern；非法 / 超长 / 高风险返回 None（负缓存，日志只打一次）。"""
         # getattr 兜底：测试桩经 __new__ 构造时不走 __init__
         cache = getattr(self, "_pattern_cache", None)
         if cache is None:
@@ -304,11 +287,9 @@ class RegexEngineModule:
     def _action_get_xbox_id(
         self, params: list[str], pack: dict[str, Any], context: dict[str, Any]
     ) -> dict[str, Any]:
-        """内置动作：按 QQ 号/openid 查询绑定的 XboxID，结果写入 $xbox 变量。
+        """内置动作：按事件包所属域查询绑定的 XboxID，写入 $xbox 变量。
 
-        域感知：官方域事件包的 user_id / at 段 id 为 openid，绑定存于
-        official 域；个人号域为 QQ 号，存于 qq 域。按事件包所属域路由
-        查询，否则官 bot 下永远查不到绑定（表现为"未绑定"误报）。
+        官方域 user_id / at 段为 openid（official 域），个人号域为 QQ 号（qq 域）。
         """
         qq = params[0] if params else str(pack.get("user_id", ""))
         domain = "official" if str(pack.get("domain", "")) == "official" else "qq"
@@ -320,7 +301,7 @@ class RegexEngineModule:
     def _get_at(message: Any) -> str | None:
         if isinstance(message, list):
             for seg in message:
-                # 协议端畸形消息段（字符串 / null / data 非字典）跳过，防止 .get 抛异常
+                # 跳过协议端畸形消息段，防 .get 抛异常
                 if isinstance(seg, dict) and seg.get("type") == "at":
                     data = seg.get("data")
                     return str(data.get("qq", "")) if isinstance(data, dict) else ""
@@ -340,9 +321,8 @@ class RegexEngineModule:
     def _handle_get_openid(self, pack: dict[str, Any], msg_text: str) -> bool:
         """内置命令 /get openid：查询群 / 成员 openid，便于抄录进适配器配置。
 
-        - 无参数：返回本群 ID 与发送者 ID；
-        - @成员：返回成员 openid（个人号域为 QQ 号）；
-        - QQ 号：官方域不支持（平台不提供 QQ 号↔openid 映射），个人号域即用户 ID。
+        无参数返回本群与发送者 ID；@成员返回成员 openid（个人号域为 QQ 号）；
+        官方域不支持 QQ 号查询（平台不提供 QQ 号↔openid 映射）。
         """
         match = _OPENID_CMD_RE.match(msg_text.strip())
         if not match:
@@ -417,7 +397,7 @@ class RegexEngineModule:
                 # 宽松字符串比较：兼容 QQ 官方域的 openid 管理员
                 if str(pack.get("user_id", "")) in self.plugin.config_manager.admin_keys:
                     roles.append("admin")
-                    # 向后兼容：旧配置可能使用 "sparkadmin"
+                    # 兼容旧配置的 "sparkadmin"
                     roles.append("sparkadmin")
                 ok = value in roles if operator == "==" else (
                     value not in roles if operator == "!=" else False
@@ -440,8 +420,7 @@ class RegexEngineModule:
             elif operator == "includes":
                 ok = str(value) in actual
             elif operator == "matches":
-                # ReDoS 防护：与规则 pattern 同款限制——超长 / 高风险 pattern 直接
-                # 判不匹配；匹配文本截断；re.error 同样返回 False
+                # ReDoS 防护：超长 / 高风险 pattern 判不匹配，文本截断
                 pattern_val = str(value)
                 if len(pattern_val) > _MAX_PATTERN_LEN or _is_risky_pattern(pattern_val):
                     ok = False
@@ -482,8 +461,7 @@ class RegexEngineModule:
                     self.adapter.send_group_msg(group_id, content)
 
                 elif action_type == "replyAtText":
-                    # 真实 @ 事件主体（如进群成员）再发文本：官方域经
-                    # extract_payload 渲染为 <@openid>，个人号域发原生 at 段
+                    # 真实 @ 事件主体再发文本：官方域渲染 <@openid>，个人号域发原生 at 段
                     content = self._parse_variables(params, pack, context)
                     target = pack.get("user_id")
                     if target is not None and str(target):
@@ -515,14 +493,14 @@ class RegexEngineModule:
                     context["result"] = self._run_command_capture(cmd)
 
                 elif action_type == "callPluginCommand":
-                    parts = str(params).split(",")
-                    command = parts[0].strip()
+                    # 先切分再逐段替换，防替换值内含逗号被再次拆散
+                    parts = [p.strip() for p in str(params).split(",")]
+                    command = parts[0]
                     handler = self.custom_actions.get(command)
                     if handler is None:
                         self.logger.error(_t("regex_engine.log.action_not_found", command=command))
                         continue
-                    parsed = self._parse_variables(params, pack, context)
-                    command_params = [p.strip() for p in parsed.split(",")[1:]]
+                    command_params = [self._parse_variables(p, pack, context) for p in parts[1:]]
                     ret = handler(command_params, pack, context)
                     if isinstance(ret, dict):
                         context.update(ret)
@@ -550,8 +528,7 @@ class RegexEngineModule:
             except Exception:
                 pass
 
-        # 某些 BDS/Endstone 组合缺少服务端语言资源，translate 仍会返回原键。
-        # 对用户实际遇到的 list 两段输出提供稳定且与语言无关的兜底。
+        # 部分 BDS/Endstone 缺少语言资源时 translate 返回原键，提供稳定兜底
         if translated and translated not in {key, str(message)} and not translated.startswith("commands."):
             return translated
         if key == "commands.players.list":
@@ -609,10 +586,8 @@ class RegexEngineModule:
                 done.set()
 
         try:
-            # 防自死锁：事件类规则（进服/发言等）在主线程触发，若再把 run 调度
-            # 回主线程并阻塞等待，任务永远无法执行（主线程正被本调用占用），
-            # 只能等超时。主线程上直接同步执行。
-            # getattr 兼容测试桩等未实现该方法的插件替身对象。
+            # 防自死锁：主线程触发时须同步执行，调度回主线程再阻塞等待会永久卡死
+            # getattr 兼容未实现该方法的测试桩
             _on_main = getattr(self.plugin, "is_on_main_thread", None)
             if callable(_on_main) and _on_main():
                 run()
@@ -633,8 +608,7 @@ class RegexEngineModule:
             return clean_errors
 
         command_name = cmd.split(None, 1)[0].casefold()
-        # BDS 的 stop 会立即进入关服流程，dispatch_command 在部分版本返回 False，
-        # 但没有异常或错误输出时命令已经成功提交，不能向 QQ 误报“执行失败”。
+        # BDS 的 stop 部分版本返回 False 但命令已提交，无异常时不误报失败
         if command_name == "stop":
             return clean_outputs or _t("regex_engine.reply.stop_executed")
         if clean_outputs:
@@ -675,8 +649,7 @@ class RegexEngineModule:
                 continue
             try:
                 pattern = (rule.get("pattern") or "").strip()
-                # 空 pattern 在 re.compile("") 时会匹配任意位置，
-                # 导致所有消息都被命中，因此显式跳过空 pattern 的规则
+                # 空 pattern 会匹配任意消息，显式跳过
                 if not pattern:
                     continue
                 # ReDoS 防护：超长 / 高风险 pattern 直接跳过（缓存后零重复扫描）
@@ -706,9 +679,7 @@ class RegexEngineModule:
         if not self.conf.get("enable", True):
             return
         if not pack.get("sender"):
-            # 注意不能原地写入共享 pack：同一事件包会被多个 handler 消费
-            # （如 whitelist 的退群昵称解析依赖 sender 缺失时回退查询群名片），
-            # 注入假 sender 会污染其他 handler 的判断。浅拷贝后注入。
+            # 共享 pack 被多个 handler 消费，不能原地注入假 sender，浅拷贝后注入
             pack = {
                 **pack,
                 "sender": {
@@ -731,8 +702,7 @@ class RegexEngineModule:
                     target = str(pack.get("raw_message", ""))
                 else:
                     target = str(pack.get("user_id", ""))
-                # ReDoS 防护：截断 + 高风险 pattern 跳过（事件规则在主线程执行，
-                # 灾难性回溯会直接冻结服务器）；编译走缓存避免逐消息重复编译
+                # ReDoS 防护：截断 + 高风险跳过（主线程执行，回溯会冻结服务器）
                 if len(target) > _MAX_MATCH_TEXT_LEN:
                     target = target[:_MAX_MATCH_TEXT_LEN]
                 if pattern:
@@ -772,11 +742,8 @@ class RegexEngineModule:
     def _mc_event_target_group(self) -> Any:
         """MC 事件规则的回复目标群。
 
-        main_group 只汇总个人号域数字群号（connections.all_groups 仅遍历
-        websocket 适配器）；纯官方机器人部署下为 0，回复发往群 0 会被
-        hub 按数字路由到个人号域后静默丢弃。此时回退到已连接适配器的
-        广播目标（配置群或官方侧动态发现的群 openid），与 chat_sync
-        的广播口径一致。
+        main_group 为 0（纯官方机器人部署）时发群 0 会被静默丢弃，
+        回退到已连接适配器的广播目标（与 chat_sync 口径一致）。
         """
         main = self.plugin.config_manager.main_group
         if main:
@@ -797,8 +764,7 @@ class RegexEngineModule:
         return main
 
     def _mock_pack(self, player_name: str) -> dict[str, Any]:
-        # time 参与 _pack_fingerprint 指纹：缺失时同一玩家 5 秒内（去重窗口）
-        # 重复的相同发言会被误判为上游重复上报而吞掉第二次的动作
+        # time 参与去重指纹，缺失时同玩家重复发言会被误判为重复上报吞掉
         return {
             "user_id": player_name,
             "group_id": self._mc_event_target_group(),

@@ -35,12 +35,9 @@ def version_tuple(value: Any) -> tuple[int, ...]:
 def version_cmp(a: Any, b: Any) -> int:
     """比较两个版本字符串，返回 -1/0/1（宽松元组口径）。
 
-    直接按 :func:`version_tuple` 的元组比较：段数多者视为更大，
-    即 (1, 0, 0) > (1, 0)、(1, 2, 0) != (1, 2)。这是依赖约束
-    （requires）语义——"要求 1.2 而实际装 1.2.0" 视为更具体/更新。
-
-    ⚠ 与 marketplace._is_newer 的"补 0 对齐"口径（1.2 与 1.2.0
-    视为相等，避免框架更新误报）是两套不同语义，不要混用。
+    按 :func:`version_tuple` 元组比较，段数多者更大：(1, 0, 0) > (1, 0)。
+    ⚠ 与 marketplace._is_newer 的"补 0 对齐"口径（1.2 == 1.2.0）是
+    两套不同语义，不要混用。
     """
     ta, tb = version_tuple(a), version_tuple(b)
     return (ta > tb) - (ta < tb)
@@ -111,8 +108,7 @@ def parse_requirement(spec: Any) -> PluginRequirement | None:
         # "name>=" 这类写了比较符却没给版本：视为非法
         return None
     if version and not op:
-        # "has space" 会被误拆成 name="has" + version="space"：
-        # 无比较符却带版本 = 非法（版本必须跟在比较符后）
+        # 无比较符却带版本 = 非法（防 "has space" 被误拆为 name+version）
         return None
     return PluginRequirement(name=name, op=op, version=version, raw=spec.strip())
 

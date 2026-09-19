@@ -1,10 +1,8 @@
 """QQ 官方机器人扫码绑定（q.qq.com lite 绑定接口 + 零依赖 AES-256-GCM 解密）。
 
-流程（与 QQ 开放平台网页端 / AstrBot 扫码登录一致）：本地生成 32 字节
-bind_key 创建绑定任务 → 用户 QQ 扫 ``connect.html?task_id=...`` 二维码授权 →
-轮询 ``/lite/poll_bind_result``，status=2 时返回 ``bot_appid`` 与
-``bot_encrypt_secret``（AES-256-GCM 密文，密钥即 bind_key）→ 解密得
-AppSecret 写入适配器配置。AES-256-GCM 纯 Python 实现，避免 pycryptodome 依赖。
+本地生成 bind_key 创建绑定任务 → 用户扫码授权 → 轮询 ``/lite/poll_bind_result``
+拿到 ``bot_encrypt_secret``（AES-256-GCM 密文，密钥即 bind_key）→ 解密得
+AppSecret。纯 Python 实现，避免 pycryptodome 依赖。
 """
 
 from __future__ import annotations

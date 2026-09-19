@@ -78,7 +78,7 @@ LumenBridge 的核心是一个**多适配器并行引擎**。每个适配器实�
 ### 环境要求
 
 - Endstone 0.11+（Minecraft 基岩版专用服务器）
-- Python 3.10+（Endstone 内置）
+- Python 3.11+（Endstone 内置）
 - 一个 OneBot v11 协议端（NapCat / Lagrange / LLOneBot / go-cqhttp）或 QQ 官方机器人凭据
 
 ### 安装
@@ -155,7 +155,7 @@ def on_group_message(pack, reply):
 | --- | --- |
 | 版本 | 1.0.0 |
 | 许可证 | MIT |
-| 语言 | Python 3.10+ |
+| 语言 | Python 3.11+ |
 | 框架 | Endstone 0.11+ |
 | 协议 | OneBot v11 / QQ 开放平台 API |
 | 外部依赖 | 零（websockets 已内置） |

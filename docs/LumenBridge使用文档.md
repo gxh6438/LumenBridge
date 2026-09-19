@@ -46,7 +46,7 @@ LumenBridge 的运行环境非常轻量，只需要满足以下条件即可：
 | 项目 | 要求 | 说明 |
 |------|------|------|
 | Endstone | 0.11 及以上 | Minecraft 基岩版专用服务器插件框架 |
-| Python | 3.10 及以上 | Endstone 内置，通常无需单独安装 |
+| Python | 3.11 及以上 | Endstone 内置，通常无需单独安装 |
 | 协议端 | 任选其一 | NapCat / Lagrange / LLOneBot / go-cqhttp，或 QQ 官方机器人凭据 |
 
 不需要安装任何额外的 Python 包。插件用到的 `websockets` 库已经打包在 whl 文件内部，不会与你服务器上已有的包产生冲突。如果你的网络环境需要代理，LumenBridge 在访问插件市场、检查更新和安装 pip 依赖时会自动尊重系统代理变量。

@@ -48,9 +48,7 @@ class ServerMetricsCollector:
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return
-            # 每代线程绑定独立的停止事件：stop() 的 join 超时后旧线程仍在
-            # 采样，若沿用共享事件，下一次 start() 的 clear() 会让旧线程
-            # 永远等不到停止信号，与新线程并存常驻（线程泄漏）
+            # 每代线程绑定独立停止事件：共享事件被新 start() clear 后旧线程永不停止（泄漏）
             stop_event = threading.Event()
             self._stop_event = stop_event
             # 立即做一次采样（可能 CPU% 仍为 0，因为需要两帧）
@@ -114,8 +112,7 @@ class ServerMetricsCollector:
                 self._reason = str(e)
 
     def _sample_linux(self) -> None:
-        # 整个采样纳入 self._lock：_prev_cpu/_prev_time 的读写
-        # 与 start/stop/snapshot 并发时保持一致（RLock 可重入）
+        # 采样全程持锁：_prev_cpu/_prev_time 读写与 start/stop/snapshot 并发一致（RLock 可重入）
         with self._lock:
             cpu_busy, cpu_total = self._read_proc_cpu()
             mem_total, mem_available = self._read_proc_mem()

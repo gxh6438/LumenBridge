@@ -51,9 +51,7 @@ class ChatSyncModule:
     def _sync_config(self, pack: dict[str, Any] | None = None) -> dict[str, Any]:
         """取来源适配器（无来源时取主适配器）的群服互通配置。
 
-        读取走 get_view 免深拷贝：本方法在每条群消息上调用，
-        deepcopy 整张适配器卡片是纯浪费；配置只在 update()/create()
-        整体替换，引用读取安全。
+        走 get_view 免深拷贝：每条群消息都调用，配置只在整体替换时变化。
         """
         connections = getattr(self.plugin, "connections", None)
         if connections is not None:
@@ -207,10 +205,8 @@ class ChatSyncModule:
                 # AstrBot 适配器：群号在其插件端（UMO）配置，这里发虚拟群 0
                 adapter.send_group_msg(0, line)
                 return
-            # 无配置群列表的适配器（如 QQ 官方）：询问其广播目标。
-            # QQ 官方无群列表 API，broadcast_groups 返回动态发现的群
-            #（「未填群 openid = 全局转发」）；无任何目标时跳过，
-            # 绝不发往不存在的虚拟群 0（官方侧即 HTTP 400）
+            # 无配置群列表的适配器（如 QQ 官方）：询问其广播目标
+            #（动态发现的群）；绝不发往虚拟群 0（官方侧即 HTTP 400）
             broadcast = getattr(adapter, "broadcast_groups", None)
             discovered = list(broadcast()) if callable(broadcast) else []
             if discovered:

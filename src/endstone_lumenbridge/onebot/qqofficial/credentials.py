@@ -58,8 +58,8 @@ class CredentialsStore:
     def take_passive(self, target: str) -> tuple[str, int] | None:
         """从池中取出被动凭据 (msg_id, msg_seq)；无可用凭据返回 None。
 
-        优先取未用过（uses=0）的凭据以摊平限额；否则取最新的（Gensokyo
-        懒池语义）；全部用尽或过期返回 None（调用方降级主动发送）。
+        优先取未用过的（uses=0）摊平限额，否则取最新的；用尽或过期
+        返回 None（调用方降级主动发送）。
         """
         now = time.time()
         with self._lock:
@@ -82,8 +82,7 @@ class CredentialsStore:
     def purge_passive(self, target: str, msg_id: str) -> None:
         """服务端判定 msg_id 过期（40034005）时移除池中该凭据。
 
-        本地窗口与官方过期判定存在偏差：不清理则后续消息会反复取到
-        已失效凭据，每条都白白消耗一轮重试。
+        本地窗口与官方判定有偏差，不清理会反复取到失效凭据空耗重试。
         """
         if not target or not msg_id:
             return
@@ -98,12 +97,10 @@ class CredentialsStore:
                 self.passive.pop(target, None)
 
     def sync_passive_seq(self, target: str, msg_id: str, seq: int) -> None:
-        """发送成功后回写实际消耗的 msg_seq。
+        """发送成功后回写实际消耗的 msg_seq（仅前进不后退）。
 
-        post_message 重试期间 body 内 seq 已递增（规避官方去重），
-        池计数若不跟进，下次取出的 seq 会与官方已消费的序号重复，
-        该回复被官方按 (msg_id, msg_seq) 去重静默丢弃。
-        仅前进不后退：并发补发路径完成顺序可能与取出顺序不同。
+        重试期间 body 内 seq 已递增，池计数不跟进则下次发出的 seq 与
+        官方已消费的重复，回复被 (msg_id, msg_seq) 去重静默丢弃。
         """
         if not target or not msg_id:
             return
@@ -139,18 +136,15 @@ class CredentialsStore:
     def purge_event_id(self, target: str) -> None:
         """官方判定 event_id 无效（40034025）时移除缓存。
 
-        不清理则窗口内后续每条发往该目标的消息都会先白白消耗一轮
-        重试（必失败）再降级主动通道（群聊必被拒），消息连锁丢失。
+        不清理则窗口内每条消息都先空耗一轮必败重试再降级，连锁丢失。
         """
         if target:
             self.event_ids.pop(target, None)
 
     def purge_target(self, target: str) -> None:
-        """机器人被移出群时清空该目标的全部凭据。
+        """机器人被移出群时清空该目标的全部凭据（被动池/event_id/补发栈）。
 
-        被移出后被动 msg_id 池 / event_id / 主动补发栈全部失效：
-        不清理则窗口内每次发送都要先经历一轮必败重试才降级，补发
-        栈更会在后续 flush 中反复碰壁堆积。
+        不清理则窗口内每次发送都先必败重试才降级，补发栈反复堆积。
         """
         if not target:
             return
@@ -182,10 +176,8 @@ class CredentialsStore:
             return item
 
     def unshift_active(self, item: ActiveItem) -> bool:
-        """条目回栈首（push_active 是尾部追加）。
-
-        flush_active_stack 凭据耗尽时取出的队首消息必须回队首，
-        追加到尾部会让最旧的消息排到最后，补发顺序错乱。
+        """条目回栈首（push_active 是尾部追加）：取出的队首消息不回队首，
+        会让最旧消息排到最后，补发顺序错乱。
         """
         target = item[1]
         with self._lock:

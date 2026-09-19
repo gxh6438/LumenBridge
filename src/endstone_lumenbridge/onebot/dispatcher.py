@@ -42,10 +42,9 @@ class EventDispatcher:
         return primary() if callable(primary) else self.adapter
 
     def _source_of(self, pack: dict[str, Any]) -> Any:
-        """按事件包内的来源适配器 id 从 hub 回查适配器实例。
+        """按事件包内的 _lumen_adapter_id 从 hub 回查适配器实例。
 
-        onebot.pack 事件保持单参 (pack) 以兼容子插件监听约定（见子插件开发文档），
-        来源信息通过 ``_lumen_adapter_id`` 内部字段传递。
+        onebot.pack 保持单参 (pack) 以兼容子插件监听约定。
         """
         adapter_id = str(pack.get("_lumen_adapter_id", "") or "")
         getter = getattr(self.adapter, "get", None)
@@ -79,10 +78,8 @@ class EventDispatcher:
     def _event_fingerprint(pack: dict[str, Any]) -> tuple[str, ...]:
         """notice / request 事件指纹。
 
-        不含适配器 id：同一协议端事件经多条链路（如同一 NapCat 同时挂在
-        正向与反向两个适配器上）重复上报时指纹一致，可跨适配器去重；
-        time / target_id / message_id 等字段参与指纹，避免正常连续事件
-        （如同一秒撤回两条不同消息）被误判为重复。
+        不含适配器 id（同一协议端多链路重复上报可跨适配器去重）；
+        time / target_id / message_id 等参与指纹防误判。
         """
         file_info = pack.get("file")
         if isinstance(file_info, dict):
@@ -135,13 +132,11 @@ class EventDispatcher:
         if post_type in ("notice", "request") and self._is_duplicate_event(pack):
             return
 
-        # 来源适配器 id 由各适配器在派发前注入（下划线前缀表示 LumenBridge 内部字段），
-        # 供 chat_sync / whitelist / regex / 子插件按来源适配器取配置
+        # 来源适配器 id 由各适配器派发前注入，供下游按来源适配器取配置
         source = self._source_of(pack)
 
-        # 多群上下文：派发前注入来源群号，使子插件 env.get("main_group") 返回当前来源群。
-        # set_current_group 放在 try 内：若其抛错也必须走 finally 清理，避免
-        # 线程局部残留污染后续事件
+        # 多群上下文：注入来源群号供子插件 env 感知；set_current_group 放
+        # try 内确保 finally 清理线程局部，避免残留污染后续事件
         gid = pack.get("group_id")
         has_ctx = gid is not None and self.env_pool is not None
         try:

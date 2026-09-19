@@ -17,12 +17,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # connection / admin_qq / main_group / sync 由适配器卡片单独配置（见 connections.ConnectionManager）
     "debug": False,
 
-    # 聊天转发行为：
+    # 聊天转发：
     # - forward_cancelled: 被(其他插件/addon)取消的聊天是否仍转发到 QQ
-    #   auto   = 默认，时间戳回溯判定：取消但消息经广播重发展示 → 转发；
-    #            取消且无展示证据（禁言/屏蔽词/范围聊天）→ 不转发
-    #   always = 始终转发（兼容无广播信号的重发型聊天插件，代价是禁言
-    #            插件拦截的消息也会转发）
+    #   auto   = 默认，取消但消息经广播重发展示 → 转发；无展示证据（禁言/屏蔽词）→ 不转发
+    #   always = 始终转发（兼容无广播信号的重发型插件，代价是禁言消息也会转发）
     #   never  = 取消即不转发（最严格）
     "chat": {
         "forward_cancelled": "auto",
@@ -82,8 +80,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enable": True,
         "api_url": "https://market.mxcraft.vip",  # 只填站点根地址，自动补全 /api/v1/updates/lumenbridge
         "timeout": 30,
-        # 发现新版本时自动下载校验并暂存（不自动生效——热重载会重载服务器内
-        # 全部插件，须由管理员执行 /lumen update framework -y 在命令上下文确认触发）
+        # 发现新版本自动下载校验并暂存，不自动生效（热重载影响全服插件，须 /lumen update 确认触发）
         "auto_update": True,
     },
 
@@ -179,8 +176,7 @@ def _validate_effective_config(config: dict[str, Any]) -> None:
             parsed_url = urllib.parse.urlparse(value)
             if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
                 raise ConfigValidationError(f"{path} 必须是有效的 http:// 或 https:// 地址")
-    # 密码仅在 webui 启用时必填：用户关闭 webui 时清空密码不应导致
-    # 整份配置校验失败回退默认值（那会把 enable 改回 true 并覆写用户文件）
+    # 密码仅在 webui 启用时必填：关闭 webui 清空密码不应致校验失败回退默认（会覆写用户文件）
     if config["webui"]["enable"] and not _is_nonempty_string(config["webui"]["password"]):
         raise ConfigValidationError("webui.password 不能为空（webui 启用时）")
     for path, value in (("webui.secret", config["webui"]["secret"]),):
@@ -189,11 +185,8 @@ def _validate_effective_config(config: dict[str, Any]) -> None:
 
 
 def _strip_deprecated_pip_fields(config: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-    """移除已废弃字段：pip.allow_all / allow_list、旧版连接键与
-    marketplace.report_api_key（点赞/举报已改为完全匿名会话，无需密钥）。
-
-    旧配置或旧浏览器标签页仍可能在完整表单提交中携带这些键；其余未知键仍严格拒绝。
-    连接键由 connections.json 接管，这里仅剥离不校验。
+    """移除已废弃字段：pip.allow_all/allow_list、旧连接键、marketplace.report_api_key
+    （匿名会话无需密钥）。旧表单提交仍可能携带；其余未知键仍严格拒绝，连接键仅剥离不校验。
     """
     sanitized = copy.deepcopy(config)
     changed = False
@@ -226,8 +219,7 @@ def extract_legacy_connection(raw: dict[str, Any]) -> dict[str, Any]:
 def deep_merge(base: dict, override: dict) -> tuple[dict, bool]:
     """递归合并配置，返回 (合并结果, 是否有键被补全)。
 
-    缺失键补全与嵌套 dict 均用 deepcopy：result 浅拷贝 override 时嵌套
-    对象仍是输入引用，调用方后续修改 patch / _raw 会直接污染 self.data。
+    补全与嵌套 dict 均 deepcopy，防止 override 的内部引用污染 self.data。
     """
     patched = False
     result = copy.deepcopy(override)
@@ -272,8 +264,7 @@ class ConfigManager:
                     raw = json.loads(self.path.read_text(encoding="utf-8"))
                 except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
                     self.logger.error(_t("plugin.config_error", error=e))
-                    # 手改笔误（如尾逗号）不应导致整份配置被默认值覆写：
-                    # 备份坏文件供修复；reload 时（内存已有配置）保留现值直接返回
+                    # 手改笔误不应导致整份配置被默认值覆写：备份坏文件；reload 时保留内存现值
                     try:
                         shutil.copy2(self.path, self.path.with_suffix(".json.corrupt"))
                     except OSError:
@@ -288,8 +279,7 @@ class ConfigManager:
             self.legacy_connection = extract_legacy_connection(raw)
             self._raw, migrated = _strip_deprecated_pip_fields(raw)
             self.data, patched = deep_merge(DEFAULT_CONFIG, self._raw)
-            # 合并后校验跨字段约束（与 apply_patch 同源）：deep_merge 只补键不查值，
-            # 手改配置的越界/非法值会原样流入运行时。校验失败时回退默认配置并落盘修复。
+            # 合并后校验跨字段约束（deep_merge 只补键不查值）；失败时回退默认配置并落盘修复
             try:
                 _validate_patch_shape(self.data, DEFAULT_CONFIG)
                 _validate_effective_config(self.data)
@@ -413,10 +403,9 @@ class ConfigManager:
 
     @property
     def admin_keys(self) -> frozenset[str]:
-        """管理员标识宽松并集（含 QQ 官方域 openid 字符串），供跨域权限判定。
+        """管理员标识宽松并集（含官方域 openid），供跨域权限判定。
 
-        返回缓存 frozenset：正则引擎的条件判定在每条消息上做成员检查，
-        旧实现每次持锁遍历全部适配器并重新解析 CSV。
+        返回缓存 frozenset，避免每条消息持锁遍历+重新解析 CSV。
         """
         if self._connections is not None:
             return self._connections.admin_key_set()
@@ -446,8 +435,7 @@ class ConfigManager:
     def check_command_permission(self, sender: Any, subcommand: str) -> tuple[bool, str]:
         """检查命令发送者是否有权执行某子命令，返回 (是否允许, 拒绝原因 i18n key 或空)。
 
-        控制台识别用 isinstance(ConsoleCommandSender)（Endstone 0.11 原生类型），
-        最稳健——玩家即使取名 "CONSOLE" 也不属于该类型。
+        控制台识别用 isinstance（原生类型），玩家取名 "CONSOLE" 也不会误判。
         """
         from endstone.command import ConsoleCommandSender  # type: ignore
 

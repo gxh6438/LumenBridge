@@ -435,6 +435,7 @@
         "reply": {
             "already_bound": "You have already bound whitelist: {xbox}",
             "invalid_format": "Please enter a valid XboxID. Format: {keyword}<your_game_id>",
+            "invalid_name": "Player names may only contain letters, digits, spaces, underscores, hyphens and dots (1-32 chars)",
             "xbox_taken": "This XboxID is already bound by someone else",
             "operation_in_progress": "Whitelist operation for this account or player is in progress, please try again later",
             "bind_failed_server": "Binding failed, server could not add whitelist: {detail}",
@@ -727,6 +728,7 @@
         "disconnected": "WebSocket disconnected, will retry connection #{attempt} in {delay:.1f}s",
         "connection_error": "WebSocket connection error: {error}",
         "reverse_started": "Reverse WebSocket server started at ws://{host}:{port}",
+        "reverse_insecure_warning": "Security warning: reverse WebSocket is listening on {host}:{port} without an access token. Any client that can reach this port may inject forged events (possibly triggering admin commands). Configure access_token or bind to an internal address",
         "reverse_client_connected": "Reverse WebSocket accepted connection from bot [{self_id}]",
         "reverse_client_disconnected": "Reverse WebSocket client disconnected",
         "reverse_auth_failed": "Reverse WS client did not provide correct Access Token, connection rejected",

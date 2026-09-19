@@ -22,8 +22,7 @@ if TYPE_CHECKING:
 
 CommandResult = dict[str, Any]
 
-# BDS 白名单命令输出特征：新版本 BDS 直接输出本地化 key（如 commands.allowlist.add.failed，
-# 含义为"玩家已在白名单中"），旧版本 / 已装语言包时输出对应文本。两类都要识别。
+# BDS 白名单命令输出特征：新版本输出本地化 key，旧版本 / 已装语言包输出文本，两类都要识别。
 _ADD_DUPLICATE_MARKERS = (
     "commands.allowlist.add.failed",
     "already in allow list",
@@ -62,10 +61,12 @@ _REMOVE_SUCCESS_MARKERS = (
     "已从白名单",
     "已從白名單",
 )
-# pending 操作超时：正常命令 6s 内完成；超过该时限仍残留的 pending 视为
-# 回调丢失（关服/禁用窗口期 run_on_main 任务被静默丢弃），自动过期防止
-# 用户被"操作进行中"永久锁死
+# pending 超时自愈：回调丢失（run_on_main 任务被丢弃）时防止用户被"操作进行中"永久锁死
 _PENDING_TIMEOUT = 60.0
+
+# Xbox 玩家名合法字符集：字母、数字、空格、下划线、连字符、点号，1-32 位。
+# 名称拼入 whitelist 命令，入口处拒绝非法字符防破坏命令语法
+_XBOX_NAME_RE = re.compile(r"^[A-Za-z0-9_. -]{1,32}$")
 
 
 class WhitelistModule:
@@ -87,15 +88,13 @@ class WhitelistModule:
         self.bindings: list[dict[str, Any]] = self._load(self.path)
         self.bindings_official: list[dict[str, Any]] = self._load(self.path_official)
 
-        # 无条件注册事件，enable / remove_on_leave 在 handler 内实时检查：
-        # /lumen reload 重载配置后开关立即生效，无需重新挂载监听
+        # 无条件注册事件，开关在 handler 内实时检查，/lumen reload 后立即生效
         self.bus.on("message.group.normal", self._on_group_message)
         self.bus.on("notice.group_decrease", self._on_group_decrease)
 
     @property
     def conf(self) -> dict[str, Any]:
-        """白名单配置（实时读取：config_manager.load() 会整体替换 data
-        dict，缓存旧引用会导致 /lumen reload 后配置永不生效）。"""
+        """白名单配置（实时读取，缓存旧引用会导致 /lumen reload 后不生效）。"""
         return self.plugin.config_manager.whitelist
 
     @staticmethod
@@ -117,9 +116,7 @@ class WhitelistModule:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-            # 损坏时先把原文件备份为 .corrupt 再返回空：白名单是用户数据
-            # 价值最高的文件，下次 add_binding 落盘会直接覆写原文件，
-            # 不备份则全部绑定永久丢失（与 regex_engine 同款防护）
+            # 损坏时先备份 .corrupt 再返回空，防下次落盘覆写导致绑定永久丢失
             try:
                 shutil.copy2(path, path.with_name(path.name + ".corrupt"))
             except OSError:
@@ -203,7 +200,7 @@ class WhitelistModule:
     def add_binding(self, qq: int | str, xbox: str, domain: str = "qq") -> bool:
         qid = str(qq)
         name = self._normalize_xbox(xbox)
-        if not qid or not name:
+        if not qid or not _XBOX_NAME_RE.match(name):
             return False
         with self._data_lock:
             path, bindings = self._store(domain)
@@ -218,8 +215,7 @@ class WhitelistModule:
             try:
                 self._save_list_locked(path, bindings)
             except OSError as exc:
-                # 写盘失败回滚内存态：否则内存里已有绑定而磁盘没有，
-                # 重启后绑定"凭空消失"，运行期间查询/解绑也与磁盘不一致
+                # 写盘失败回滚内存态，保持内存与磁盘一致
                 bindings.remove(entry)
                 self.logger.error(_t("whitelist.log.save_failed", path=path, exc=exc))
                 return False
@@ -256,8 +252,7 @@ class WhitelistModule:
         xbox_key = self._normalize_xbox(xbox).casefold()
         now = time.monotonic()
         with self._data_lock:
-            # 超时自愈：回调丢失（run_on_main 任务在关服/禁用窗口被丢弃）时，
-            # 残留 pending 会让该用户此后所有请求永远收到"操作进行中"
+            # 超时自愈：回调丢失时残留 pending 会让用户所有请求永远"操作进行中"
             expired_qq = [k for k, t in self._pending_qq.items() if now - t > _PENDING_TIMEOUT]
             for k in expired_qq:
                 self._pending_qq.pop(k, None)
@@ -456,12 +451,10 @@ class WhitelistModule:
         if not isinstance(sender, dict):
             sender = {}
         user_id = sender.get("user_id") or pack.get("user_id")
-        # 畸形包（user_id=None）直接忽略：str(None)="None" 会写入
-        # qid="None" 脏数据，污染后续按 QQ 号查询的绑定
+        # 畸形包（user_id=None）忽略，防写入 qid="None" 脏数据
         if user_id is None or str(user_id) == "None":
             return
-        # 关键词为空字符串时 startswith("") 恒为 True、所有消息都会进入绑定分支，
-        # 统一回退默认关键词
+        # 空关键词 startswith("") 恒为 True，回退默认关键词
         bind_kw = str(self.conf.get("bind_keyword") or "绑定白名单")
         unbind_kw = str(self.conf.get("unbind_keyword") or "解绑白名单")
 
@@ -473,6 +466,9 @@ class WhitelistModule:
             xbox = self._normalize_xbox(raw[len(bind_kw):])
             if not xbox:
                 reply(_t("whitelist.reply.invalid_format", keyword=bind_kw), True)
+                return
+            if not _XBOX_NAME_RE.match(xbox):
+                reply(_t("whitelist.reply.invalid_name"), True)
                 return
             if self.xbox_exists(xbox):
                 reply(_t("whitelist.reply.xbox_taken"), True)
@@ -539,12 +535,7 @@ class WhitelistModule:
                 complete_unbind({"success": True, "output": ""})
 
     def _resolve_member_name(self, pack: dict[str, Any], fallback: str, then: Any) -> None:
-        """解析群成员显示名：QQ 昵称（个人号域可查）→ 白名单名兜底。
-
-        官方域 user_id 是 member_openid，官方无按 openid 反查昵称的接口，
-        直接用白名单名。个人号域经 get_stranger_info 异步查询（超时/失败
-        回调 None，同样兜底），回调保证触发（adapter.call_api 语义）。
-        """
+        """解析群成员显示名：个人号域异步查 QQ 昵称（失败兜底），官方域无反查接口直接用兜底值。"""
         sender = pack.get("sender")
         if not isinstance(sender, dict):
             sender = {}

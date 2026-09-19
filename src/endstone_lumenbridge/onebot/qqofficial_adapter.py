@@ -149,15 +149,14 @@ class QQOfficialAdapter:
         self.app_id = str(app_id or "").strip()
         self.app_secret = str(app_secret or "").strip()
         self.sandbox = bool(sandbox)
-        # 后台静默日志开关（默认开启）：True 时抑制连接/断连/重连、凭据降级
-        # 与补发提示等运行类日志（防刷屏）；发送失败等异常日志不受影响
+        # 后台静默日志开关：抑制连接/重连等运行类日志（防刷屏），异常日志不受影响
         self.suppress_connection_log = bool(suppress_connection_log)
-        # 连接间隔（毫秒）：两次网关连接尝试之间的最小等待时间；0 表示按指数退避自动重连
+        # 连接间隔（毫秒）：两次连接尝试的最小间隔；0 表示仅按指数退避
         try:
             self.connect_interval = max(0, int(connect_interval))
         except (TypeError, ValueError):
             self.connect_interval = DEFAULT_CONNECT_INTERVAL
-        # 附加事件订阅位（按需叠加，见 constants intent 表）；非法值回落 0
+        # 附加事件订阅位（叠加默认 Intents 之外的事件）；非法值回落 0
         try:
             self.extra_intents = max(0, int(extra_intents))
         except (TypeError, ValueError):
@@ -169,9 +168,7 @@ class QQOfficialAdapter:
         self.adapter_type = "qqofficial"
         # 群标识列表：QQ 官方为 group_openid 字符串
         self.groups: list[str] = [str(g) for g in (groups or [])]
-        # 动态学习的群 openid（官方无群列表 API，从收到的群事件中发现）：
-        # openid → 最近活跃时间。配置 groups 为空时广播发往这些群
-        #（「未填写群 openid → 对所有群生效」的全局转发语义）
+        # 动态发现的群 openid（官方无群列表 API）；groups 为空时广播发往这些群
         self._discovered_groups: dict[str, float] = {}
         self.config_snapshot: dict[str, Any] | None = None
 
@@ -180,10 +177,8 @@ class QQOfficialAdapter:
         self._running = False
         self._main_future: Any = None
 
-        # 入站事件派发队列：事件总线处理器链（正则命令 executeCommand
-        # 最长阻塞 command_timeout）绝不能在 WS 事件循环线程内同步执行——
-        # 心跳会停跳，ACK 看门狗判定半开连接并触发重连风暴
-        # （与 OneBotAdapter._dispatch_worker 同一设计动机）
+        # 派发队列：总线处理器链可能长时间阻塞，不能在 WS 事件循环线程内
+        # 同步执行（心跳停跳会触发重连风暴）
         self._dispatch_queue: queue.Queue | None = None
         self._dispatch_thread: threading.Thread | None = None
 
@@ -197,21 +192,18 @@ class QQOfficialAdapter:
         self._last_ack_at: float = 0.0
         self._access_token: str = ""
         self._token_expires: float = 0.0
-        # asyncio.Lock 需绑定运行中的事件循环：__init__ 早于事件循环创建，
-        # 改为延迟创建（_main 开头与使用处 None 防御）
+        # asyncio.Lock 需绑定运行中的事件循环，延迟创建
         self._token_lock: asyncio.Lock | None = None
         # READY 的机器人资料（供 get_login_info 使用）
         self._bot_user: dict[str, Any] = {}
 
-        # 入群申请缓存：join_request_id(flag) → (group_openid, member_openid)。
-        # 官方审批接口需三者齐备，OneBot set_group_add_request 只回传 flag，
-        # 事件到达时先记下映射。上限防爆内存（超出丢最旧）。
+        # 入群申请缓存 flag → (group_openid, member_openid)：OneBot 只回传 flag，
+        # 官方审批接口需三者齐备；超出上限丢最旧
         self._join_requests: dict[str, tuple[str, str]] = {}
         # 消息 id → (kind, target)：撤回接口需 group_openid 反查（OneBot delete_msg 只带 message_id）
         self._msg_scopes: dict[str, tuple[str, str]] = {}
-        # GROUP_MEMBER intent（1<<24）自适应降级：官方文档双版本（总表 1<<24 /
-        # 部分事件页 1<<25），默认双订阅；若机器人无 1<<24 权限被网关拒连，
-        # 连续 Identify 失败达阈值后自动摘除该位重连（见 _main / _identify_or_resume）
+        # GROUP_MEMBER intent 自适应降级：官方文档位号两版不一（1<<24 / 1<<25），
+        # 无权限被拒连达阈值后自动摘除该位
         self._group_member_intent = True
         self._identify_failures = 0
 
@@ -303,10 +295,7 @@ class QQOfficialAdapter:
         self.translator._emit_friend_change(data, notice_type)
 
     def _retry_params(self) -> tuple[int, float, float]:
-        """发送重试参数 (max, 文本间隔, 富媒体间隔)。
-
-        运行时读模块级常量，测试 monkeypatch 本模块后立即生效。
-        """
+        """发送重试参数 (max, 文本间隔, 富媒体间隔)；读模块级常量便于测试 monkeypatch。"""
         return _SEND_RETRY_MAX, _SEND_RETRY_DELAY_TEXT, _SEND_RETRY_DELAY_MEDIA
 
     # ------------------------------------------------------------ 生命周期
@@ -385,15 +374,10 @@ class QQOfficialAdapter:
         self.logger.info(_t("adapter.stopped"))
 
     def _emit_pack(self, pack: dict[str, Any]) -> None:
-        """入站事件包入派发队列（WS 事件循环线程调用，必须非阻塞）。
-
-        队满时丢最旧保最新（与 OneBotAdapter 同策略）：下游阻塞时宁可
-        丢弃旧事件也不能阻塞事件循环——心跳停跳会触发重连风暴。
-        """
+        """入站事件包入派发队列（WS 线程调用必须非阻塞）；队满丢最旧防阻塞事件循环。"""
         q = self._dispatch_queue
         if q is None:
-            # stop() 后残留调用（translator 尾部未完成的协程）直接透传，
-            # 保持语义不丢事件
+            # stop() 后残留调用直接透传，不丢事件
             try:
                 self.bus.emit("onebot.pack", pack)
             except Exception:
@@ -412,11 +396,7 @@ class QQOfficialAdapter:
                 pass
 
     def _dispatch_worker(self) -> None:
-        """串行消费入站事件派发队列（FIFO 保序）。
-
-        退出条件双保险：收到哨兵 或 _running 已置 False（stop() 中
-        哨兵在队满时可能被 put_nowait 丢弃，靠 _running 轮询兜底退出）。
-        """
+        """串行消费派发队列（FIFO 保序）；哨兵或 _running=False 退出（队满时哨兵可能被丢弃）。"""
         q = self._dispatch_queue
         if q is None:
             return
@@ -482,11 +462,8 @@ class QQOfficialAdapter:
                         self.bus.emit("bot.offline", self)
                     except Exception:
                         pass
-            # 全新 Identify 在收到 READY 前即断开视为一次失败（权限不足
-            # 被网关拒连等），连续达阈值后摘除 GROUP_MEMBER 位避免死循环。
-            # 仅统计 WS 已建立后的失败（was_online）：网关地址获取阶段的
-            # 网络错误（DNS 未就绪等）与 Identify 权限无关，混入计数会在
-            # 启动期两次网络抖动后永久摘除订阅位（无恢复路径）
+            # 全新 Identify 未 READY 即断（WS 已建立）计一次失败，达阈值摘除
+            # GROUP_MEMBER 位；网关地址阶段的网络错误与权限无关，不计入
             if self._running and was_fresh_identify and not ready_before and was_online:
                 ready_now = bool(self._session_id)
                 if ready_now:
@@ -503,8 +480,7 @@ class QQOfficialAdapter:
                         )
             if not self._running:
                 break
-            # 会话健康存活超过 60s 后的断开视为独立新故障，重置退避计数，
-            # 避免服务端例行重连（op=7）反复拉长重连间隔
+            # 会话存活超 60s 后断开视为新故障，重置退避（避免例行重连拉长间隔）
             if time.monotonic() - session_started >= 60.0:
                 attempt = 0
             attempt += 1
@@ -512,12 +488,10 @@ class QQOfficialAdapter:
                 RECONNECT_MAX_DELAY, RECONNECT_BASE_DELAY ** min(attempt, 5) + random.uniform(0, 2)
             )
             if self._session_id:
-                # Resume 快速重连：官方要求断开后"短时间内"重连补发事件，
-                # 会话 TTL 很短；此时不适用 connect_interval 下限，尽快恢复
+                # Resume 快速重连：会话 TTL 很短，不受 connect_interval 下限约束
                 delay = min(backoff, 5.0)
             else:
-                # 全新 Identify：连接间隔配置（毫秒）作为重连等待下限，
-                # 防止鉴权失败/无会话时高频建连打爆网关；0 表示仅按指数退避
+                # 全新 Identify：connect_interval 为重连下限，防高频建连
                 configured = self.connect_interval / 1000.0
                 delay = max(backoff, configured) if configured > 0 else backoff
             if not self.suppress_connection_log:
@@ -554,8 +528,7 @@ class QQOfficialAdapter:
             self._access_token = token
             # 提前 2 分钟过期，避免边界失效
             self._token_expires = now + max(60, expires - 120)
-            # token 例行刷新属运行类日志：静默模式下不打印（约每小时
-            # 刷新一次，防刷屏）；排障时关闭后台静默日志即可看到
+            # token 例行刷新属运行类日志，静默模式下不打印
             if not self.suppress_connection_log:
                 self.logger.debug(_t("qqofficial.token_refreshed", seconds=expires))
             return self._access_token
@@ -634,8 +607,7 @@ class QQOfficialAdapter:
                         return reason
                 except Exception:
                     self.logger.exception(_t("qqofficial.dispatch_error"))
-            # 连接被服务端关闭：按关闭码判断会话是否已失效，失效则重置
-            # 会话状态让外层重连走全新 Identify（否则会带着死会话无限 Resume）
+            # 按关闭码判断会话失效：失效则重置状态走全新 Identify，避免无限 Resume
             if self._running:
                 code = getattr(ws, "close_code", None)
                 if isinstance(code, int) and (
@@ -676,7 +648,7 @@ class QQOfficialAdapter:
                 self.logger.warning(_t("qqofficial.server_reconnect"))
             return SESSION_RECONNECT
         if op == OP_INVALID_SESSION:
-            # 会话无效：重置后由外层重连走全新 Identify
+            # 会话无效：重置后走全新 Identify
             if not self.suppress_connection_log:
                 self.logger.warning(_t("qqofficial.invalid_session"))
             self._session_id = ""
@@ -686,13 +658,10 @@ class QQOfficialAdapter:
         if op == OP_DISPATCH:
             seq = msg.get("s")
             if isinstance(seq, int) and seq > 0 and seq <= self._last_seq:
-                # Resume 补发重放去重：序号 <= 已处理最大序号的事件
-                # 说明网关重放了断线前已派发过的消息，直接丢弃防重复下发
+                # Resume 重放去重：序号 <= 已处理最大序号的是断线前的重放，丢弃
                 return None
             await self._on_dispatch(msg)
-            # 派发成功后才推进序号：先推进再派发时，若 _on_dispatch 抛异常
-            # （被外层捕获仅记日志），该事件序号已越过，Resume 补投也会被
-            # 上面的去重条件丢弃——事件永久丢失。后推进则 Resume 能补投
+            # 派发成功后才推进序号：先推进则派发异常时该事件被去重永久丢失
             if isinstance(seq, int) and seq > 0:
                 self._last_seq = seq
             return None
@@ -729,13 +698,11 @@ class QQOfficialAdapter:
             while True:
                 # 官方文档：首次连接未收到事件前心跳 d 传 null，此后携带最新 s
                 payload = {"op": OP_HEARTBEAT, "d": self._last_seq or None}
-                # websockets>=13 新 API 用 state 判断连接，旧 legacy API 才有
-                # closed 属性；单用 getattr(..., "closed", True) 在新版本下恒为
-                # True，心跳任务会立即退出导致网关因无心跳踢掉连接。
+                # websockets>=13 用 state 判断连接，旧 API 才有 closed；单用
+                # closed 在新版恒为 True，心跳会立即退出被网关踢掉
                 if self._ws is None or not self.is_connected:
                     return
-                # ACK 看门狗：超过 2 个心跳周期未收到 op 11，说明链路已死
-                # （服务端不再 ACK 的半开连接），主动断开触发 Resume 快速重连
+                # ACK 看门狗：超 2 个周期未收到 op 11 视为半开连接，主动断开触发 Resume
                 if time.monotonic() - self._last_ack_at > interval * 2 + 10:
                     if not self.suppress_connection_log:
                         self.logger.warning(_t("qqofficial.heartbeat_stale"))
@@ -745,8 +712,7 @@ class QQOfficialAdapter:
                         pass
                     return
                 await self._ws.send(json.dumps(payload))
-                # 按 80% 周期发送心跳：为事件循环偶发阻塞留余量，避免
-                # 心跳迟到触发服务端断连
+                # 按 80% 周期发送，为事件循环偶发阻塞留余量
                 await asyncio.sleep(interval * 0.8)
         except asyncio.CancelledError:
             return
@@ -763,8 +729,7 @@ class QQOfficialAdapter:
                 "qq": 0,
                 "nickname": str(user.get("username") or ""),
             }
-        # OneBot v11 元事件对齐：连接建立后上报 lifecycle.connect，
-        # 子插件经 meta_event.connect 订阅在官方/个人号适配器间行为一致
+        # OneBot v11 对齐：连接建立后上报 lifecycle.connect 元事件
         self._emit_pack(
             {
                 "self_id": self.app_id,
@@ -777,8 +742,7 @@ class QQOfficialAdapter:
             }
         )
         self.bus.emit("bot.online", self)
-        # 登录成功属连接类运行日志：静默模式下不打印（与 connecting /
-        # connected / resumed 及插件侧 bot_connected 同一抑制口径）
+        # 登录成功属连接类运行日志，静默模式下不打印
         if not self.suppress_connection_log:
             self.logger.info(
                 _t("qqofficial.ready", name=self._bot_user.get("nickname") or self.app_id)
@@ -811,10 +775,8 @@ class QQOfficialAdapter:
     def forget_group(self, group_openid: Any) -> None:
         """机器人被移出群：清理动态发现记录与该群全部回复凭据。
 
-        移群后被动 msg_id / event_id / 补发栈全部失效，不清理则窗口内
-        每条发往该群的消息都要先经历必败重试；发现记录不清理则
-        broadcast / get_group_list 会继续把死群当互通群。配置的 groups
-        属用户配置不在此清理（重新入群时 GROUP_ADD_ROBOT 会重新学习）。
+        移群后被动凭据全部失效，不清理则窗口内每条消息都要先经历必败
+        重试；配置的 groups 属用户配置不清理（重新入群时会重新学习）。
         """
         key = str(group_openid or "").strip()
         if not key:
@@ -854,11 +816,8 @@ class QQOfficialAdapter:
     ) -> None:
         """撤回消息：OneBot 语义 → 官方 DELETE /v2/groups/{g}/messages/{id}。
 
-        - 仅群聊消息可撤回：机器人自己发的限 2 分钟内；
-          机器人是群管理员时可撤普通群员的消息（message_id 取自收到的消息事件）；
-        - C2C / 未知 id：官方无接口或无记录，告警并跳过；
-        - 结果经 callback 回传 {"ok": True} / {"ok": False, "error": ...}，
-          供调用方感知真实成败。
+        仅群聊可撤回（自发限 2 分钟内，管理员可撤群员的）；结果经
+        callback 回传 {"ok": ...} 供调用方感知成败。
         """
         key = str(message_id or "")
         scope = self._msg_scopes.get(key)
@@ -904,10 +863,8 @@ class QQOfficialAdapter:
     ) -> None:
         """处理加群请求：OneBot 语义 → 官方审批接口。
 
-        POST /v2/groups/{group_openid}/approval_join_request/{member_openid}
-        body: {op: approve|decline, join_request_id, reject_reason?}
-        （须机器人是群管理员；flag 为事件下发的 join_request_id）
-        结果经 callback 回传 {"ok": True} / {"ok": False, "error": ...}。
+        POST /v2/groups/{g}/approval_join_request/{m}，body {op, join_request_id,
+        reject_reason?}；须群管理员，flag 即事件下发的 join_request_id。
         """
         key = str(flag or "")
         target = self._join_requests.get(key)
@@ -976,10 +933,7 @@ class QQOfficialAdapter:
     def get_group_info(
         self, group_id: Any, callback: Callable[[Any], None] | None = None
     ) -> None:
-        """群信息本地兜底：配置中的 openid 视为已互通群。
-
-        未配置任何群 openid 时默认对所有群生效（与 group_allowed 规则一致）。
-        """
+        """群信息本地兜底：配置中的 openid 视为已互通群；未配置时对所有群生效。"""
         key = str(group_id)
         known = {str(g) for g in self.groups}
         info = (
@@ -1042,11 +996,10 @@ class QQOfficialAdapter:
         duration: int,
         callback: Callable[[Any], None] | None = None,
     ) -> None:
-        """群禁言（OneBot v11 标准动作）→ 官方 POST /v2/groups/{g}/restrict_chat_setting。
+        """群禁言 → 官方 POST /v2/groups/{g}/restrict_chat_setting。
 
-        - duration 单位秒：0 = 解除禁言（op=del），>0 = 禁言至 now+duration（op=add）；
-        - 官方限制：须群管理员，最长 30 天，仅能禁言普通成员（群主/管理员/机器人不可）；
-        - duration 超过 30 天时截断为 30 天并提示。
+        duration 秒（0=解除，>0=禁言至 now+duration）；须群管理员、最长
+        30 天、仅能禁言普通成员，超限截断为 30 天。
         """
         group_openid = str(group_id or "")
         member_openid = str(user_id or "")
@@ -1311,8 +1264,7 @@ class QQOfficialAdapter:
     def __getattr__(self, name: str) -> Any:
         """未显式实现的 OneBot 方法统一降级：末参为回调时以 None 通知失败。
 
-        QQ 官方协议没有对应能力（禁言 / 撤回 / 群管理等），降级避免
-        AttributeError；写操作按 warning 记录，避免静默失败无感知。
+        官方协议无对应能力，降级避免 AttributeError；写操作记 warning 防静默失败。
         """
         if name.startswith("_"):
             raise AttributeError(name)

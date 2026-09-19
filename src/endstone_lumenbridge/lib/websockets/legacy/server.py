@@ -10,9 +10,8 @@ import socket
 import warnings
 from collections.abc import Awaitable, Generator, Iterable, Sequence
 from types import TracebackType
-from typing import Any, Callable, Union, cast
+from typing import Any, Callable, Self, cast
 
-from ..asyncio.compatibility import asyncio_timeout
 from ..datastructures import Headers, HeadersLike, MultipleValuesError
 from ..exceptions import (
     InvalidHandshake,
@@ -48,8 +47,7 @@ __all__ = [
 ]
 
 
-# Change to HeadersLike | ... when dropping Python < 3.10.
-HeadersLikeOrCallable = Union[HeadersLike, Callable[[str, Headers], HeadersLike]]
+HeadersLikeOrCallable = HeadersLike | Callable[[str, Headers], HeadersLike]
 
 HTTPResponse = tuple[StatusLike, HeadersLike, bytes]
 
@@ -158,7 +156,7 @@ class WebSocketServerProtocol(WebSocketCommonProtocol):
         """
         try:
             try:
-                async with asyncio_timeout(self.open_timeout):
+                async with asyncio.timeout(self.open_timeout):
                     await self.handshake(
                         origins=self.origins,
                         available_extensions=self.available_extensions,
@@ -706,7 +704,8 @@ class WebSocketServer:
             self.logger.info("server listening on %s", name)
 
         # Initialized here because we need a reference to the event loop.
-        # This should be moved back to __init__ when dropping Python < 3.10.
+        # This could be moved back to __init__ now that Python < 3.10 isn't
+        # supported anymore, but I'm not taking that risk in legacy code.
         self.closed_waiter = server.get_loop().create_future()
 
     def register(self, protocol: WebSocketServerProtocol) -> None:
@@ -759,11 +758,6 @@ class WebSocketServer:
 
         # Stop accepting new connections.
         self.server.close()
-
-        # Wait until all accepted connections reach connection_made() and call
-        # register(). See https://github.com/python/cpython/issues/79033 for
-        # details. This workaround can be removed when dropping Python < 3.11.
-        await asyncio.sleep(0)
 
         if close_connections:
             # Close OPEN connections with close code 1001. After server.close(),
@@ -867,7 +861,7 @@ class WebSocketServer:
         """
         return self.server.sockets
 
-    async def __aenter__(self) -> WebSocketServer:  # pragma: no cover
+    async def __aenter__(self) -> Self:  # pragma: no cover
         return self
 
     async def __aexit__(
@@ -1123,10 +1117,6 @@ class Serve:
         server = await self._create_server()
         self.ws_server.wrap(server)
         return self.ws_server
-
-    # yield from serve(...) - remove when dropping Python < 3.10
-
-    __iter__ = __await__
 
 
 serve = Serve

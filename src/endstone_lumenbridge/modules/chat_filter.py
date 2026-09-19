@@ -1,22 +1,15 @@
 """聊天屏蔽词过滤模块：双向转发敏感词过滤（打码 / 拦截）。
 
-存储布局（独立子目录，见 migrate_storage.py 分类规范）::
+存储布局：data/chat_filter/words.json（词条与配置，原子写）、
+data/chat_filter/wordbanks/（*.txt 词库，每行一词，# 注释，WebUI 导入）。
 
-    data/chat_filter/words.json     词条与配置（原子写）
-    data/chat_filter/wordbanks/     词库目录：*.txt（每行一词，# 注释）
-                                    自动发现，WebUI 一键导入
-
-匹配策略：
-- 普通词条经全角→半角 + 大小写归一化后 re.escape 拼接为单条合并正则，
-  万级词条单次匹配 O(len(text))，避免逐词 str.find 的 O(n*m)；
-- 正则词条单独逐条匹配（数量少，通常个位数）；
-- 模式：mask（命中替换 ***，消息继续转发）/ block（整条丢弃）；
-- 方向：game_to_qq / qq_to_game 独立开关；
-- 豁免：玩家名 / QQ 号命中时跳过过滤。
+匹配策略：普通词条经全角→半角 + 大小写归一化后拼接为分片合并正则
+（万级词条 O(len(text))，避免逐词 str.find 的 O(n*m)）；正则词条逐条
+匹配。模式 mask（打码转发）/ block（整条丢弃）；方向独立开关；
+玩家名 / QQ 号豁免。
 
 线程模型：词条只在 WebUI 保存时变化（HTTP 线程），匹配在事件线程/
-主线程执行；编译后的 pattern 以不可变元组整体替换（原子引用置换），
-读侧无锁。
+主线程执行；编译产物以不可变元组整体替换（原子引用置换），读侧无锁。
 """
 
 from __future__ import annotations
@@ -35,8 +28,7 @@ if TYPE_CHECKING:
 
 # 合并正则分片上限：超长单正则某些引擎回溯退化，分片保持稳定延迟
 _MERGED_CHUNK = 400
-# 单个正则词条编译超时保护（ReDoS）：仅允许安全子集的简单启发式，
-# 与 regex_engine 相比这里词条由管理员维护，风险面小，仍做长度上限
+# 单个正则词条长度上限（ReDoS 防护，词条由管理员维护风险面小）
 _MAX_REGEX_LEN = 128
 # 全角数字/字母/标点 → 半角（含全角空格）
 _FULLWIDTH_MAP = {i: i - 0xFEE0 for i in range(0xFF01, 0xFF5F)}
@@ -65,11 +57,10 @@ def normalize_text(text: str) -> str:
 
 
 def _normalize_map(text: str) -> tuple[str, list[int]]:
-    """逐字符归一化文本，并记录每个归一化字符源自原文的索引。
+    """逐字符归一化文本并记录原文索引映射。
 
-    str.lower() 对个别字符（如 'İ' U+0130）会展开为多字符，归一化结果
-    与原文不再等长，无法按下标直接回切原文区间；本函数在归一化同时
-    构建索引映射，供把归一化文本上的命中区间映射回原文。
+    str.lower() 可能展开多字符（如 'İ'）导致与原文不等长，
+    命中区间需经索引映射回原文。
     """
     chars: list[str] = []
     starts: list[int] = []
@@ -120,7 +111,7 @@ class ChatFilterModule:
                 self._save_locked()
         except (OSError, json.JSONDecodeError) as e:
             self.logger.warning(_t("chatfilter.load_failed_log", error=e))
-            # 损坏文件备份后重置（参考 command_palette 处理）
+            # 损坏文件备份后重置
             try:
                 if self._words_path.exists():
                     self._words_path.replace(self._words_path.with_suffix(".json.corrupt"))
@@ -165,8 +156,6 @@ class ChatFilterModule:
                 if len(word) > _MAX_REGEX_LEN:
                     continue
                 # ReDoS 防护：复用 regex_engine 的风险 pattern 启发式
-                # （嵌套量词 / 超大重复下界），词条虽由管理员维护，
-                # 失误的灾难性回溯 pattern 仍会阻塞匹配线程
                 if _is_risky_pattern(word):
                     self.logger.warning(_t("chatfilter.regex_invalid", word=word, error="risky pattern"))
                     continue
@@ -175,11 +164,9 @@ class ChatFilterModule:
                 except re.error as e:
                     self.logger.warning(_t("chatfilter.regex_invalid", word=word, error=e))
             else:
-                # 普通词条按逐字符归一化形式编译/匹配（全角/大小写变形词
-                # 一并命中，且与 _normalize_map 的文本归一化保持一致）
+                # 按归一化形式编译/匹配，全角/大小写变形词一并命中
                 plains.append(_normalize_map(word)[0])
-        # 长词优先：交替分支按出现顺序尝试，短词在前会遮蔽长词
-        # （“敏感|敏感词”只能命中前者），降序保证打码覆盖最完整
+        # 长词优先：短词在前会遮蔽长词（“敏感|敏感词”只命中前者）
         plains.sort(key=len, reverse=True)
         # 合并正则分片：每片 _MERGED_CHUNK 个词条
         merged: list[Any] = []
@@ -233,11 +220,8 @@ class ChatFilterModule:
         if cfg.get("mode", "mask") == "block":
             return "", True
         mask = str(cfg.get("mask_text", "*") or "*")
-        # 打码：收集所有命中区间后合并去重叠，一次性重建文本。
-        # 普通词条的命中区间经 starts 映射回原文（归一化可能变长，
-        # 不能按下标直切）；正则词条直接在原文上匹配，复用预编译
-        # pattern。区间合并避免了“先替换出的掩码又被后续词条命中”
-        # 的顺序依赖，也让万级词条只需常数次全文扫描。
+        # 收集所有命中区间合并去重叠后一次性重建：普通词条区间经 starts
+        # 映射回原文（归一化可能变长）；合并避免掩码被后续词条再命中。
         intervals: list[tuple[int, int]] = []
         for pat in merged:
             for m in pat.finditer(norm_text):

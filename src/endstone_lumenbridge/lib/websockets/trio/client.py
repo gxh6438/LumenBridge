@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
-import socket
 import ssl as ssl_module
 import traceback
 import urllib.parse
 from collections.abc import AsyncIterator, Generator, Sequence
 from types import TracebackType
-from typing import Any, Callable, Literal, cast
+from typing import Any, Callable, Literal
+
+import trio
 
 from ..client import ClientProtocol, backoff, process_exception
 from ..datastructures import Headers, HeadersLike
@@ -30,6 +30,7 @@ from ..streams import StreamReader
 from ..typing import LoggerLike, Origin, PathLike, Subprotocol
 from ..uri import WebSocketURI, parse_uri
 from .connection import Connection
+from .utils import race_events
 
 
 __all__ = ["connect", "unix_connect", "ClientConnection"]
@@ -39,7 +40,7 @@ MAX_REDIRECTS = int(os.environ.get("WEBSOCKETS_MAX_REDIRECTS", "10"))
 
 class ClientConnection(Connection):
     """
-    :mod:`asyncio` implementation of a WebSocket client connection.
+    :mod:`trio` implementation of a WebSocket client connection.
 
     :class:`ClientConnection` provides :meth:`recv` and :meth:`send` coroutines
     for receiving and sending messages.
@@ -49,39 +50,43 @@ class ClientConnection(Connection):
         async for message in websocket:
             await process(message)
 
-    The iterator exits normally when the connection is closed with code
+    The iterator exits normally when the connection is closed with close code
     1000 (OK) or 1001 (going away) or without a close code. It raises a
     :exc:`~websockets.exceptions.ConnectionClosedError` when the connection is
     closed with any other code.
 
-    The ``ping_interval``, ``ping_timeout``, ``close_timeout``, ``max_queue``,
-    and ``write_limit`` arguments have the same meaning as in :func:`connect`.
+    The ``ping_interval``, ``ping_timeout``, ``close_timeout``, and
+    ``max_queue`` arguments have the same meaning as in :func:`connect`.
 
     Args:
+        nursery: Trio nursery.
+        stream: Trio stream connected to a WebSocket server.
         protocol: Sans-I/O connection.
 
     """
 
     def __init__(
         self,
+        nursery: trio.Nursery,
+        stream: trio.abc.Stream,
         protocol: ClientProtocol,
         *,
         ping_interval: float | None = 20,
         ping_timeout: float | None = 20,
         close_timeout: float | None = 10,
         max_queue: int | None | tuple[int | None, int | None] = 16,
-        write_limit: int | tuple[int, int | None] = 2**15,
     ) -> None:
         self.protocol: ClientProtocol
         super().__init__(
+            nursery,
+            stream,
             protocol,
             ping_interval=ping_interval,
             ping_timeout=ping_timeout,
             close_timeout=close_timeout,
             max_queue=max_queue,
-            write_limit=write_limit,
         )
-        self.response_rcvd: asyncio.Future[None] = self.loop.create_future()
+        self.response_rcvd = trio.Event()
 
     async def handshake(
         self,
@@ -100,10 +105,7 @@ class ClientConnection(Connection):
         async with self.send_context(expected_state=CONNECTING):
             self.protocol.send_request(self.request)
 
-        await asyncio.wait(
-            [self.response_rcvd, self.connection_lost_waiter],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
+        await race_events(self.response_rcvd, self.stream_closed)
 
         # self.protocol.handshake_exc is set when the connection is lost before
         # receiving a response, when the response cannot be parsed, or when the
@@ -121,7 +123,7 @@ class ClientConnection(Connection):
         if self.response is None:
             assert isinstance(event, Response)
             self.response = event
-            self.response_rcvd.set_result(None)
+            self.response_rcvd.set()
         # Later events - frames.
         else:
             super().process_event(event)
@@ -136,7 +138,7 @@ class connect:
     yielding a :class:`ClientConnection`, which can then receive and send
     messages::
 
-        from websockets.asyncio.client import connect
+        from websockets.trio.client import connect
 
         async with connect(...) as websocket:
             ...
@@ -158,15 +160,18 @@ class connect:
 
     The connection is closed automatically after each iteration of the loop.
 
-    :func:`connect` can be awaited directly::
-
-        websocket = await connect(...)
-
-    In that case, you're responsible for closing the connection with
-    :meth:`ClientConnection.close` when no longer needed.
+    :func:`connect` cannot be awaited directly. This is because it runs a task
+    to manage the connection and Trio doesn't support spawning tasks without a
+    context that ensures completion.
 
     Args:
         uri: URI of the WebSocket server.
+        stream: Preexisting TCP stream. ``stream`` overrides the host and port
+            from ``uri``. You may call :func:`~trio.open_tcp_stream` to create a
+            suitable TCP stream.
+        ssl: Configuration for enabling TLS on the connection.
+        server_hostname: Host name for the TLS handshake. ``server_hostname``
+            overrides the host name from ``uri``.
         origin: Value of the ``Origin`` header, for servers that require it.
         extensions: List of supported extensions, in order in which they
             should be negotiated and run.
@@ -184,6 +189,9 @@ class connect:
             to :obj:`None` to disable the proxy or to the address of a proxy
             to override the system configuration. See the :doc:`proxy docs
             <../../topics/proxies>` for details.
+        proxy_ssl: Configuration for enabling TLS on the proxy connection.
+        proxy_server_hostname: Host name for the TLS handshake with the proxy.
+            ``proxy_server_hostname`` overrides the host name from ``proxy``.
         process_exception: When reconnecting automatically, tell whether an
             error is transient or fatal. The default behavior is defined by
             :func:`~websockets.client.process_exception`. Refer to its
@@ -207,10 +215,6 @@ class connect:
             // 4``. You may pass a ``(high, low)`` tuple to set the high-water
             and low-water marks. If you want to disable flow control entirely,
             you may set it to ``None``, although that's a bad idea.
-        write_limit: High-water mark of write buffer in bytes. It is passed to
-            :meth:`~asyncio.WriteTransport.set_write_buffer_limits`. It defaults
-            to 32 KiB. You may pass a ``(high, low)`` tuple to set the
-            high-water and low-water marks.
         logger: Logger for this client.
             It defaults to ``logging.getLogger("websockets.client")``.
             See the :doc:`logging guide <../../topics/logging>` for details.
@@ -218,39 +222,11 @@ class connect:
             the connection. Set it to a wrapper or a subclass to customize
             connection handling.
 
-    Any other keyword arguments are passed to the event loop's
-    :meth:`~asyncio.loop.create_connection` method.
-
-    For example:
-
-    * You can set ``sock`` to provide a preexisting TCP socket. You may call
-      :func:`socket.create_connection` (not to be confused with the event loop's
-      :meth:`~asyncio.loop.create_connection` method) to create a suitable
-      client socket and customize it.
-
-    * You can set ``ssl`` to a :class:`~ssl.SSLContext` to enforce TLS settings.
-      When connecting to a ``wss://`` URI, if ``ssl`` isn't provided, a TLS
-      context is created with :func:`~ssl.create_default_context`.
-
-    * You can set ``server_hostname`` to override the host name from ``uri`` in
-      the TLS handshake.
-
-    * You can configure ``ssl_handshake_timeout`` and ``ssl_shutdown_timeout``.
-
-    * You can set ``host`` and ``port`` to connect to a different host and port
-      from those found in ``uri``. This only changes the destination of the TCP
-      connection. The host name from ``uri`` is still used in the TLS handshake
-      for secure connections and in the ``Host`` header.
-
-    When using a proxy:
-
-    * Prefix keyword arguments with ``proxy_`` for configuring TLS between the
-      client and an HTTPS proxy: ``proxy_ssl``, ``proxy_server_hostname``,
-      ``proxy_ssl_handshake_timeout``, and ``proxy_ssl_shutdown_timeout``.
-    * Use the standard keyword arguments for configuring TLS between the proxy
-      and the WebSocket server: ``ssl``, ``server_hostname``,
-      ``ssl_handshake_timeout``, and ``ssl_shutdown_timeout``.
-    * Other keyword arguments are used only for connecting to the proxy.
+    Any other keyword arguments are passed to :func:`~trio.open_tcp_stream`.
+    For example, you can set ``host`` and ``port`` to connect to a different
+    host and port from those found in ``uri``. This only changes the destination
+    of the TCP connection. The host name from ``uri`` is still used in the TLS
+    handshake for secure connections and in the ``Host`` header.
 
     Raises:
         InvalidURI: If ``uri`` isn't a valid WebSocket URI.
@@ -261,10 +237,17 @@ class connect:
 
     """
 
+    # Arguments of type SSLContext don't render correctly in the documentation
+    # because of https://github.com/sphinx-doc/sphinx/issues/13838.
+
     def __init__(
         self,
         uri: str,
         *,
+        # TCP/TLS
+        stream: trio.abc.Stream | None = None,
+        ssl: ssl_module.SSLContext | None = None,
+        server_hostname: str | None = None,
         # WebSocket
         origin: Origin | None = None,
         extensions: Sequence[ClientExtensionFactory] | None = None,
@@ -274,6 +257,8 @@ class connect:
         additional_headers: HeadersLike | None = None,
         user_agent_header: str | None = USER_AGENT,
         proxy: str | Literal[True] | None = True,
+        proxy_ssl: ssl_module.SSLContext | None = None,
+        proxy_server_hostname: str | None = None,
         process_exception: Callable[[Exception], Exception | None] = process_exception,
         # Timeouts
         open_timeout: float | None = 10,
@@ -284,17 +269,16 @@ class connect:
         # Limits
         max_size: int | None | tuple[int | None, int | None] = 2**20,
         max_queue: int | None | tuple[int | None, int | None] = 16,
-        write_limit: int | tuple[int, int | None] = 2**15,
         # Logging
         logger: LoggerLike | None = None,
-        # Escape hatches for advanced customization
+        # Escape hatch for advanced customization
         create_connection: type[ClientConnection] | None = None,
-        # Other keyword arguments are passed to loop.create_connection
+        # Other keyword arguments are passed to trio.open_tcp_stream
         **kwargs: Any,
     ) -> None:
         self.uri = uri
         self.ws_uri = parse_uri(uri)
-        if not self.ws_uri.secure and kwargs.get("ssl") is not None:
+        if not self.ws_uri.secure and ssl is not None:
             raise ValueError("ssl argument is incompatible with a ws:// URI")
 
         if subprotocols is not None:
@@ -311,139 +295,144 @@ class connect:
         if create_connection is None:
             create_connection = ClientConnection
 
+        self.stream = stream
+        self.ssl = ssl
+        self.server_hostname = server_hostname
         self.additional_headers = additional_headers
         self.user_agent_header = user_agent_header
         self.proxy = proxy
+        self.proxy_ssl = proxy_ssl
+        self.proxy_server_hostname = proxy_server_hostname
         self.process_exception = process_exception
         self.open_timeout = open_timeout
         self.reconnect_delays = reconnect_delays
         self.logger = logger
-        self.create_connection_kwargs = kwargs
+        self.create_connection = create_connection
+        self.open_tcp_stream_kwargs = kwargs
+        self.protocol_kwargs = dict(
+            origin=origin,
+            extensions=extensions,
+            subprotocols=subprotocols,
+            max_size=max_size,
+            logger=logger,
+        )
+        self.connection_kwargs = dict(
+            ping_interval=ping_interval,
+            ping_timeout=ping_timeout,
+            close_timeout=close_timeout,
+            max_queue=max_queue,
+        )
 
-        def factory(uri: WebSocketURI) -> ClientConnection:
-            # This is a protocol in the Sans-I/O implementation of websockets.
-            protocol = ClientProtocol(
-                uri,
-                origin=origin,
-                extensions=extensions,
-                subprotocols=subprotocols,
-                max_size=max_size,
-                logger=logger,
-            )
-            # This is a connection in websockets and a protocol in asyncio.
-            # create_connection defaults to ClientConnection.
-            connection = create_connection(
-                protocol,
-                ping_interval=ping_interval,
-                ping_timeout=ping_timeout,
-                close_timeout=close_timeout,
-                max_queue=max_queue,
-                write_limit=write_limit,
-            )
-            return connection
-
-        self.factory = factory
-
-    async def open_tcp_connection(self) -> ClientConnection:
+    async def open_tcp_stream(self) -> trio.abc.Stream:
         """Open a TCP or Unix connection to the server, possibly through a proxy."""
-        loop = asyncio.get_running_loop()
-        kwargs = self.create_connection_kwargs.copy()
+        kwargs = self.open_tcp_stream_kwargs.copy()
+        unix = kwargs.pop("unix", False)
 
         proxy = self.proxy
-        if kwargs.get("unix", False):
-            proxy = None
-        if kwargs.get("sock") is not None:
+        if unix:
             proxy = None
         if proxy is True:
             proxy = get_proxy(self.ws_uri)
 
-        def factory() -> ClientConnection:
-            return self.factory(self.ws_uri)
+        if unix:
+            return await trio.open_unix_socket(kwargs.pop("path"))
 
-        if self.ws_uri.secure:
-            kwargs.setdefault("ssl", True)
-            if kwargs.get("ssl") is None:
-                raise ValueError("ssl=None is incompatible with a wss:// URI")
-            kwargs.setdefault("server_hostname", self.ws_uri.host)
-
-        if kwargs.pop("unix", False):
-            _, connection = await loop.create_unix_connection(factory, **kwargs)
-            return connection
-
-        if proxy is not None:
+        elif proxy is not None:
             proxy_parsed = parse_proxy(proxy)
 
             if proxy_parsed.scheme[:5] == "socks":
-                # Connect to the server through the SOCKS proxy.
-                sock = await connect_socks_proxy(
+                return await connect_socks_proxy(
                     proxy_parsed,
                     self.ws_uri,
-                    # python_socks uses local_addr like asyncio.
-                    local_addr=kwargs.pop("local_addr", None),
+                    # websockets is consistent with trio while python_socks is
+                    # consistent across implementations.
+                    local_addr=kwargs.pop("local_address", None),
                 )
-                # Initialize WebSocket connection via the proxy.
-                _, connection = await loop.create_connection(
-                    factory,
-                    sock=sock,
-                    **kwargs,
-                )
-                return connection
 
             elif proxy_parsed.scheme[:4] == "http":
-                # Split keyword arguments between the proxy and the server.
-                all_kwargs, proxy_kwargs, kwargs = kwargs, {}, {}
-                for key, value in all_kwargs.items():
-                    if key.startswith("ssl") or key == "server_hostname":
-                        kwargs[key] = value
-                    elif key.startswith("proxy_"):
-                        proxy_kwargs[key[6:]] = value
-                    else:
-                        proxy_kwargs[key] = value
-                # Validate the proxy_ssl argument.
-                if proxy_parsed.scheme == "https":
-                    proxy_kwargs.setdefault("ssl", True)
-                    if proxy_kwargs.get("ssl") is None:
-                        raise ValueError(
-                            "proxy_ssl=None is incompatible with an https:// proxy"
-                        )
-                else:
-                    if proxy_kwargs.get("ssl") is not None:
-                        raise ValueError(
-                            "proxy_ssl argument is incompatible with an http:// proxy"
-                        )
-                # Connect to the server through the HTTP proxy.
-                transport = await connect_http_proxy(
+                if proxy_parsed.scheme != "https" and self.proxy_ssl is not None:
+                    raise ValueError(
+                        "proxy_ssl argument is incompatible with an http:// proxy"
+                    )
+                return await connect_http_proxy(
                     proxy_parsed,
                     self.ws_uri,
                     user_agent_header=self.user_agent_header,
-                    **proxy_kwargs,
+                    ssl=self.proxy_ssl,
+                    server_hostname=self.proxy_server_hostname,
+                    **kwargs,
                 )
-                # Initialize WebSocket connection via the proxy.
-                connection = factory()
-                transport.set_protocol(connection)
-                ssl = kwargs.pop("ssl", None)
-                if ssl is True:
-                    ssl = ssl_module.create_default_context()
-                if ssl is not None:
-                    new_transport = await loop.start_tls(
-                        transport, connection, ssl, **kwargs
-                    )
-                    assert new_transport is not None  # help mypy
-                    transport = new_transport
-                connection.connection_made(transport)
-                return connection
 
             else:
                 raise AssertionError("parse_proxy returned unsupported proxy")
 
         else:  # proxy is None
-            # Connect to the server directly.
-            if kwargs.get("sock") is None:
-                kwargs.setdefault("host", self.ws_uri.host)
-                kwargs.setdefault("port", self.ws_uri.port)
-            # Initialize WebSocket connection.
-            _, connection = await loop.create_connection(factory, **kwargs)
-            return connection
+            kwargs.setdefault("host", self.ws_uri.host)
+            kwargs.setdefault("port", self.ws_uri.port)
+            return await trio.open_tcp_stream(**kwargs)
+
+    async def enable_tls(self, stream: trio.abc.Stream) -> trio.abc.Stream:
+        """Enable TLS on the connection."""
+        if self.ssl is None:
+            ssl = ssl_module.create_default_context()
+        else:
+            ssl = self.ssl
+        if self.server_hostname is None:
+            server_hostname = self.ws_uri.host
+        else:
+            server_hostname = self.server_hostname
+        ssl_stream = trio.SSLStream(
+            stream,
+            ssl,
+            server_hostname=server_hostname,
+            https_compatible=True,
+        )
+        await ssl_stream.do_handshake()
+        return ssl_stream
+
+    async def open_connection(self, nursery: trio.Nursery) -> ClientConnection:
+        """Create a WebSocket connection."""
+        if self.stream is None:
+            stream = await self.open_tcp_stream()
+        else:
+            stream = self.stream
+
+        try:
+            if self.ws_uri.secure:
+                stream = await self.enable_tls(stream)
+
+            protocol = ClientProtocol(
+                self.ws_uri,
+                **self.protocol_kwargs,  # type: ignore
+            )
+
+            # self.create_connection defaults to ClientConnection.
+            connection = self.create_connection(
+                nursery,
+                stream,
+                protocol,
+                **self.connection_kwargs,  # type: ignore
+            )
+
+            await connection.handshake(
+                self.additional_headers,
+                self.user_agent_header,
+            )
+
+        except trio.Cancelled:
+            await trio.aclose_forcefully(stream)
+            # The nursery running this coroutine was canceled.
+            # The next checkpoint raises trio.Cancelled.
+            # aclose_forcefully() never returns.
+            raise AssertionError("nursery should be canceled")
+        except Exception:
+            # Always close the connection even though keep-alive is the default
+            # in HTTP/1.1 because the current implementation ties opening the
+            # TCP/TLS connection with initializing the WebSocket protocol.
+            await trio.aclose_forcefully(stream)
+            raise
+
+        return connection
 
     def process_redirect(self, exc: Exception) -> Exception | str:
         """
@@ -471,10 +460,10 @@ class connect:
         new_uri = urllib.parse.urljoin(self.uri, exc.response.headers["Location"])
         new_ws_uri = parse_uri(new_uri)
 
-        # If connect() received a socket, it is closed and cannot be reused.
-        if self.create_connection_kwargs.get("sock") is not None:
+        # If connect() received a stream, it is closed and cannot be reused.
+        if self.stream is not None:
             return ValueError(
-                f"cannot follow redirect to {new_uri} with a preexisting socket"
+                f"cannot follow redirect to {new_uri} with a preexisting stream"
             )
 
         # TLS downgrade is forbidden.
@@ -488,7 +477,7 @@ class connect:
             or old_ws_uri.port != new_ws_uri.port
         ):
             # Cross-origin redirects on Unix sockets don't quite make sense.
-            if self.create_connection_kwargs.get("unix", False):
+            if self.open_tcp_stream_kwargs.get("unix", False):
                 return ValueError(
                     f"cannot follow cross-origin redirect to {new_uri} "
                     f"with a Unix socket"
@@ -496,8 +485,8 @@ class connect:
 
             # Cross-origin redirects when host and port are overridden are ill-defined.
             if (
-                self.create_connection_kwargs.get("host") is not None
-                or self.create_connection_kwargs.get("port") is not None
+                self.open_tcp_stream_kwargs.get("host") is not None
+                or self.open_tcp_stream_kwargs.get("port") is not None
             ):
                 return ValueError(
                     f"cannot follow cross-origin redirect to {new_uri} "
@@ -517,28 +506,17 @@ class connect:
 
         return new_uri
 
-    async def connect(self) -> ClientConnection:
+    async def connect(self, nursery: trio.Nursery) -> ClientConnection:
         try:
-            async with asyncio.timeout(self.open_timeout):
+            with (
+                trio.CancelScope()
+                if self.open_timeout is None
+                else trio.fail_after(self.open_timeout)
+            ):
                 for _ in range(MAX_REDIRECTS):
-                    connection = await self.open_tcp_connection()
                     try:
-                        await connection.handshake(
-                            self.additional_headers,
-                            self.user_agent_header,
-                        )
-                    except asyncio.CancelledError:
-                        connection.transport.abort()
-                        raise
+                        connection = await self.open_connection(nursery)
                     except Exception as exc:
-                        # Always close the connection even though keep-alive is
-                        # the default in HTTP/1.1 because create_connection ties
-                        # opening the network connection with initializing the
-                        # protocol. In the current design of connect(), there is
-                        # no easy way to reuse the network connection that works
-                        # in every case nor to reinitialize the protocol.
-                        connection.transport.abort()
-
                         exc_or_uri = self.process_redirect(exc)
                         if isinstance(exc_or_uri, Exception):
                             # Response isn't a valid redirect; raise the exception.
@@ -558,23 +536,23 @@ class connect:
                 else:
                     raise SecurityError(f"more than {MAX_REDIRECTS} redirects")
 
-        except TimeoutError as exc:
+        except trio.TooSlowError as exc:
             # Re-raise exception with an informative error message.
             raise TimeoutError("timed out during opening handshake") from exc
 
-    # ... = await connect(...)
-
-    def __await__(self) -> Generator[Any, None, ClientConnection]:
-        # Create a suitable iterator by calling __await__ on a coroutine.
-        return self.connect().__await__()
+    # Do not define __await__ for ... = await nursery.start(connect, ...)
+    # because it doesn't look idiomatic in Trio.
 
     # async with connect(...) as ...: ...
 
     async def __aenter__(self) -> ClientConnection:
-        if hasattr(self, "connection"):
-            raise RuntimeError("connect() isn't reentrant")
-        self.connection = await self
-        return self.connection
+        await self.__aenter_nursery__()
+        try:
+            self.connection = await self.connect(self.nursery)
+            return self.connection
+        except BaseException as exc:
+            await self.__aexit_nursery__(type(exc), exc, exc.__traceback__)
+            raise AssertionError("expected __aexit_nursery__ to re-raise the exception")
 
     async def __aexit__(
         self,
@@ -583,9 +561,42 @@ class connect:
         traceback: TracebackType | None,
     ) -> None:
         try:
-            await self.connection.close()
+            try:
+                await self.connection.aclose()
+            finally:
+                del self.connection
         finally:
-            del self.connection
+            await self.__aexit_nursery__(exc_type, exc_value, traceback)
+
+    async def __aenter_nursery__(self) -> None:
+        if hasattr(self, "nursery_manager"):
+            raise RuntimeError("connect() isn't reentrant")
+        self.nursery_manager = trio.open_nursery()
+        self.nursery = await self.nursery_manager.__aenter__()
+
+    async def __aexit_nursery__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        # We need a nursery to start the recv_events and keepalive coroutines.
+        # They aren't expected to raise exceptions; instead they catch and log
+        # all unexpected errors. To keep the nursery an implementation detail,
+        # unwrap exceptions raised by user code — per the second option here:
+        # https://trio.readthedocs.io/en/stable/reference-core.html#designing-for-multiple-errors
+        try:
+            await self.nursery_manager.__aexit__(exc_type, exc_value, traceback)
+        except BaseException as exc:
+            assert isinstance(exc, BaseExceptionGroup)
+            try:
+                trio._util.raise_single_exception_from_group(exc)
+            except trio._util.MultipleExceptionError:
+                raise AssertionError(
+                    "unexpected multiple exceptions; please file a bug report"
+                ) from exc
+        finally:
+            del self.nursery_manager
 
     # async for ... in connect(...):
 
@@ -622,7 +633,7 @@ class connect:
                     delay,
                     traceback.format_exception_only(exc)[0].strip(),
                 )
-                await asyncio.sleep(delay)
+                await trio.sleep(delay)
 
             else:
                 # The connection succeeded. Reset backoff.
@@ -650,17 +661,24 @@ def unix_connect(
             ``wss://localhost/``.
 
     """
+    stream = kwargs.get("stream")
+    if path is None and stream is None:
+        raise ValueError("missing path argument")
+    elif path is not None and stream is not None:
+        raise ValueError("path is incompatible with stream")
+
     if uri is None:
         if kwargs.get("ssl") is None:
             uri = "ws://localhost/"
         else:
             uri = "wss://localhost/"
+
     return connect(uri=uri, unix=True, path=path, **kwargs)
 
 
 try:
     from python_socks import ProxyType
-    from python_socks.async_.asyncio import Proxy as SocksProxy
+    from python_socks.async_.trio import Proxy as SocksProxy
 
 except ImportError:
 
@@ -668,7 +686,7 @@ except ImportError:
         proxy: Proxy,
         ws_uri: WebSocketURI,
         **kwargs: Any,
-    ) -> socket.socket:
+    ) -> trio.abc.Stream:
         raise ImportError("connecting through a SOCKS proxy requires python-socks")
 
 else:
@@ -690,7 +708,7 @@ else:
         proxy: Proxy,
         ws_uri: WebSocketURI,
         **kwargs: Any,
-    ) -> socket.socket:
+    ) -> trio.abc.Stream:
         """Connect via a SOCKS proxy and return the socket."""
         socks_proxy = SocksProxy(
             SOCKS_PROXY_TYPES[proxy.scheme],
@@ -701,72 +719,45 @@ else:
             SOCKS_PROXY_RDNS[proxy.scheme],
         )
         # connect() is documented to raise OSError.
-        # socks_proxy.connect() doesn't raise TimeoutError; it gets canceled.
+        # socks_proxy.connect() re-raises trio.TooSlowError as ProxyTimeoutError.
         # Wrap other exceptions in ProxyError, a subclass of InvalidHandshake.
         try:
-            return await socks_proxy.connect(ws_uri.host, ws_uri.port, **kwargs)
+            return trio.SocketStream(
+                await socks_proxy.connect(ws_uri.host, ws_uri.port, **kwargs)
+            )
         except OSError:
             raise
         except Exception as exc:
             raise ProxyError("failed to connect to SOCKS proxy") from exc
 
 
-class HTTPProxyConnection(asyncio.Protocol):
-    def __init__(
-        self,
-        ws_uri: WebSocketURI,
-        proxy: Proxy,
-        user_agent_header: str | None = None,
-    ):
-        self.ws_uri = ws_uri
-        self.proxy = proxy
-        self.user_agent_header = user_agent_header
-
-        self.reader = StreamReader()
-        self.parser = Response.parse(
-            self.reader.read_line,
-            self.reader.read_exact,
-            self.reader.read_to_eof,
-            proxy=True,
-        )
-
-        loop = asyncio.get_running_loop()
-        self.response: asyncio.Future[Response] = loop.create_future()
-
-    def run_parser(self) -> None:
-        try:
-            next(self.parser)
-        except StopIteration as exc:
-            response = exc.value
-            if 200 <= response.status_code < 300:
-                self.response.set_result(response)
+async def read_connect_response(stream: trio.abc.Stream) -> Response:
+    reader = StreamReader()
+    parser = Response.parse(
+        reader.read_line,
+        reader.read_exact,
+        reader.read_to_eof,
+        proxy=True,
+    )
+    try:
+        while True:
+            data = await stream.receive_some(4096)
+            if data:
+                reader.feed_data(data)
             else:
-                self.response.set_exception(InvalidProxyStatus(response))
-        except Exception as exc:
-            proxy_exc = InvalidProxyMessage(
-                "did not receive a valid HTTP response from proxy"
-            )
-            proxy_exc.__cause__ = exc
-            self.response.set_exception(proxy_exc)
-
-    def connection_made(self, transport: asyncio.BaseTransport) -> None:
-        transport = cast(asyncio.Transport, transport)
-        self.transport = transport
-        self.transport.write(
-            prepare_connect_request(self.proxy, self.ws_uri, self.user_agent_header)
-        )
-
-    def data_received(self, data: bytes) -> None:
-        self.reader.feed_data(data)
-        self.run_parser()
-
-    def eof_received(self) -> None:
-        self.reader.feed_eof()
-        self.run_parser()
-
-    def connection_lost(self, exc: Exception | None) -> None:
-        self.reader.feed_eof()
-        self.run_parser()
+                reader.feed_eof()
+            next(parser)
+    except StopIteration as exc:
+        assert isinstance(exc.value, Response)  # help mypy
+        response = exc.value
+        if 200 <= response.status_code < 300:
+            return response
+        else:
+            raise InvalidProxyStatus(response)
+    except Exception as exc:
+        raise InvalidProxyMessage(
+            "did not receive a valid HTTP response from proxy"
+        ) from exc
 
 
 async def connect_http_proxy(
@@ -774,20 +765,36 @@ async def connect_http_proxy(
     ws_uri: WebSocketURI,
     *,
     user_agent_header: str | None = None,
+    ssl: ssl_module.SSLContext | None = None,
+    server_hostname: str | None = None,
     **kwargs: Any,
-) -> asyncio.Transport:
-    transport, protocol = await asyncio.get_running_loop().create_connection(
-        lambda: HTTPProxyConnection(ws_uri, proxy, user_agent_header),
-        proxy.host,
-        proxy.port,
-        **kwargs,
-    )
+) -> trio.abc.Stream:
+    stream: trio.abc.Stream
+    stream = await trio.open_tcp_stream(proxy.host, proxy.port, **kwargs)
 
     try:
-        # This raises exceptions if the connection to the proxy fails.
-        await protocol.response
-    except (asyncio.CancelledError, Exception):
-        transport.abort()
+        # Initialize TLS wrapper and perform TLS handshake
+        if proxy.scheme == "https":
+            if ssl is None:
+                ssl = ssl_module.create_default_context()
+            if server_hostname is None:
+                server_hostname = proxy.host
+            ssl_stream = trio.SSLStream(
+                stream,
+                ssl,
+                server_hostname=server_hostname,
+                https_compatible=True,
+            )
+            await ssl_stream.do_handshake()
+            stream = ssl_stream
+
+        # Send CONNECT request to the proxy and read response.
+        request = prepare_connect_request(proxy, ws_uri, user_agent_header)
+        await stream.send_all(request)
+        await read_connect_response(stream)
+
+    except (trio.Cancelled, Exception):
+        await trio.aclose_forcefully(stream)
         raise
 
-    return transport
+    return stream
