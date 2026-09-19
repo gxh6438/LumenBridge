@@ -821,15 +821,20 @@ def get_stats(request):
 `lumen.web.registerPage(title, relative_path, tab=False, icon="")` 注册一个 WebUI 页面，`relative_path` 指向子插件目录内的 HTML 文件。页面 URL 形如 `/plugin-views/<插件目录名>/<relative_path>`。
 
 - `tab=False`（默认）：页面出现在移动端「其它」面板与桌面侧栏；
-- `tab=True`：页面在移动端注册为底栏 tab（位于「其它」之前，底栏可横向滚动，激活的 tab 自动滚动居中）；`icon` 为 tab 上的纯文本图标（emoji 或字符，如 `"📊"`，缺省用默认图标）。
+- `tab=True`：页面在移动端注册为底栏 tab（位于「其它」之前，底栏可横向滚动，激活的 tab 自动滚动居中）。
+- `icon` 为页面图标，按以下优先级匹配（三端一致：桌面侧栏 / 移动端底栏 tab / 「其它」面板）：
+  - **内置图标名** → 渲染与主面板同风格的 SVG。共 34 个：`model`（晶片）、`bot`（机器人）、`chat`（气泡）、`shield`（盾牌）、`spark`（星光）、`gear`（齿轮）、`chart`（折线图）、`home`（房子）、`user`（单人）、`users`（多人）、`server`（服务器）、`database`（数据库）、`map`（地图）、`box`（箱子）、`gift`（礼包）、`trophy`（奖杯）、`crown`（皇冠）、`coin`（金币）、`fire`（火焰）、`zap`（闪电）、`heart`（心）、`star`（星）、`bell`（铃铛）、`clock`（时钟）、`calendar`（日历）、`music`（音符）、`image`（图片）、`search`（放大镜）、`link`（链接）、`lock`（锁）、`book`（书本）、`code`（代码）、`terminal`（终端）、`globe`（地球）。
+  - **emoji 或其它非 ASCII 字符** → 按字符渲染（系统 emoji 字体，建议单个 emoji，如 `"🎮"`；各平台 emoji 观感略有差异）。
+  - **其它值或缺省** → 默认四方块 SVG 图标。
 - 桌面端侧栏无论 `tab` 取值都会展示该页面。
 
 ```python
 def on_load(ctx):
     global lumen
     lumen = ctx
-    lumen.web.registerPage("我的插件面板", "panel.html")          # 进「其它」面板
-    lumen.web.registerPage("数据中心", "stats.html", True, "📊")  # 注册为底栏 tab
+    lumen.web.registerPage("我的插件面板", "panel.html")               # 进「其它」面板
+    lumen.web.registerPage("数据中心", "stats.html", True, "chart")   # 注册为底栏 tab，用折线图图标
+    lumen.web.registerPage("小游戏", "game.html", True, "🎮")        # 注册为底栏 tab，用 emoji 图标
 ```
 
 如果 WebUI 尚未初始化（加载顺序问题），注册请求会被暂存，WebUI 就绪后自动补注册，子插件无需关心时序。

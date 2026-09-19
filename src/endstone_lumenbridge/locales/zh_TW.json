@@ -435,6 +435,7 @@
         "reply": {
             "already_bound": "你已綁定白名單：{xbox}",
             "invalid_format": "請輸入正確的XboxID，格式：{keyword}<你的遊戲ID>",
+            "invalid_name": "玩家名只能包含字母、數字、空格、底線、連字號和點號（長度 1-32）",
             "xbox_taken": "該XboxID已被其他人綁定",
             "operation_in_progress": "該帳號或玩家名的白名單操作正在進行，請稍後再試",
             "bind_failed_server": "綁定失敗，伺服器未能加入白名單：{detail}",
@@ -727,6 +728,7 @@
         "disconnected": "WebSocket 已斷開, 將在 {delay:.1f} 秒後嘗試第 {attempt} 次重連",
         "connection_error": "WebSocket 連線異常: {error}",
         "reverse_started": "反向 WebSocket 伺服器已在 ws://{host}:{port} 開啟",
+        "reverse_insecure_warning": "安全警告：反向 WebSocket 正在 {host}:{port} 上無鑑權監聽，任何可達該埠的客戶端均可注入偽造事件（可能觸發管理員命令）。建議設定 access_token 或僅監聽內網位址",
         "reverse_client_connected": "反向 WebSocket 已接受來自機器人 [{self_id}] 的連線",
         "reverse_client_disconnected": "反向 WebSocket 客戶端已斷開連線",
         "reverse_auth_failed": "反向 WS 客戶端未提供正確的 Access Token，連線被拒絕",

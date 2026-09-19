@@ -1,15 +1,13 @@
 """群内管理员命令：@ 批量添加管理员。
 
-命令：``/添加管理员 @甲 @乙 @丙``（繁体 ``/添加管理員``、英文
-``/addadmin`` 变体同样接受，不区分大小写）。仅现有管理员可用；
-消息中被 @ 的用户写入**来源适配器**的管理员列表（自动去重）：
-QQ 个人号域写入 QQ 号，QQ 官方域写入成员 openid（@ 提及由官方
-翻译层统一转成 OneBot at 段，两端解析路径一致）。
+命令：``/添加管理员 @甲 @乙 @丙``（繁体 / 英文变体同样接受，不区分
+大小写）。仅现有管理员可用；被 @ 的用户写入**来源适配器**的管理员列表
+（自动去重）：个人号域写入 QQ 号，官方域写入成员 openid（@ 提及由官方
+翻译层统一转成 OneBot at 段）。
 
-权限边界：发送者必须已在该适配器管理员列表中——普通群员无法
-自我提权；管理员上限（100）与合法性由 ConnectionManager 校验，
-超限时回执错误。写入即时生效（update 自动失效管理员键缓存），
-无需重载连接。
+权限边界：发送者必须已是该适配器管理员——普通群员无法自我提权；
+上限与合法性由 ConnectionManager 校验。写入即时生效（update 自动失效
+管理员键缓存），无需重载连接。
 """
 
 from __future__ import annotations
@@ -48,9 +46,7 @@ def _message_text(pack: dict[str, Any]) -> str:
 def extract_at_ids(pack: dict[str, Any]) -> list[str]:
     """提取消息中被 @ 的用户标识（QQ 号 / openid），保序去重。
 
-    优先走 message 段列表（OneBot v11 与 QQ 官方翻译层统一产出
-    ``{"type": "at", "data": {"qq": id}}``）；无段列表时回退解析
-    raw_message 的 @ CQ 码。排除“全体成员”（all）与机器人自身。
+    优先走 message 段列表，回退解析 @ CQ 码；排除“全体成员”与机器人自身。
     """
     self_id = str(pack.get("self_id") or "")
     found: list[str] = []
@@ -77,9 +73,8 @@ class AdminCommandModule:
         self.plugin = plugin
         self.logger = getattr(plugin, "_tee_logger", None) or plugin.logger
         self.bus = plugin.bus
-        # 与群绑定指令同层监听：命令只应来自已互通的群，但群过滤
-        # （group_allowed）对“未配置任何群列表”的适配器放行任意群，
-        # 权限由发送者是否为该适配器管理员兜底，此处不再叠加群过滤
+        # 不叠加群过滤：group_allowed 对未配置群列表的适配器放行任意群，
+        # 权限由发送者是否为该适配器管理员兜底
         self.bus.on("message.group.normal", self._on_group_message)
 
     def _on_group_message(self, pack: dict[str, Any], reply: Any) -> None:

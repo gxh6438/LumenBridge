@@ -39,15 +39,12 @@
    容器静态居中即偏下 7px；左右对称的 42px padding 让 text-align:center
    的文字（含占位符）在视觉上真正居中，不被右侧眼睛按钮挤偏 */
 .login-pw-field { margin-bottom: 14px; }
-/* 字体回归页面默认：等宽字体（.secret-field 供配置页密钥展示）的掩码圆点
-   U+25CF 在行框内按 x-height 定位，视觉中心比行框中心高约 3px，看起来
-   整体偏上；系统 UI 字体的圆点居中良好。letter-spacing 对掩码无意义，一并去除 */
-.login-pw-field input { margin-bottom: 0; padding-left: 42px; font-family: inherit; letter-spacing: normal; }
-/* 掩码态垂直补偿：Chromium 的 password disc 按字体基线在 x-height 区域绘制，
-   视觉中心比输入框中心高 4px（实测，且与字体无关）。上下 padding 对称增减
-   （10/10 → 14/6）内容盒下移 4px 圆点即居中，总高度不变。选择器按
-   type=password 生效：眼睛切换为明文后回落默认 padding，明文本身居中良好 */
-.login-pw-field input[type="password"] { padding-top: 14px; padding-bottom: 6px; }
+/* 掩码/明文两种状态必须使用完全相同的 padding 与字体（系统 UI 字体的掩码
+   圆点居中良好）。严禁出现按 input[type=password] 区分的样式——眼睛切换
+   type 时任何 padding/字体差异都会让占位符与文字整体上下跳动。
+   选择器叠加 .secret-field 提高特异性：否则同特异性的 .secret-field input
+   等宽字体规则（位于本文件后段）会按源码顺序胜出，inherit 意图落空 */
+.secret-field.login-pw-field input { margin-bottom: 0; padding-left: 42px; font-family: inherit; letter-spacing: normal; }
 .login-err { color: var(--red); font-size: 13px; min-height: 18px; margin-top: 12px; }
 
 #app-view { display: none; }
@@ -98,6 +95,8 @@
   transition: background .16s, color .16s, transform .12s;
 }
 .nav-item svg { width: 19px; height: 19px; flex-shrink: 0; }
+/* 子插件 emoji/字符图标：显式设 font-size，不随横屏窄高度态 font-size:0 塌陷 */
+.nav-item .icon-text { font-size: 19px; line-height: 20px; height: 20px; font-weight: 500; flex-shrink: 0; }
 .nav-item:hover { background: var(--accent-soft); color: var(--text); }
 .nav-item:active { transform: scale(.97); }
 .nav-item.active { background: var(--accent); color: #fff; box-shadow: 0 6px 16px rgba(10,132,255,.3); }
@@ -149,8 +148,7 @@
   transition: color .15s, transform .15s;
 }
 .tab-item svg { width: 20px; height: 20px; }
-/* 子插件自定义 tab 的文本图标（emoji/字符）：与 SVG 图标同占位 */
-.tab-item .tab-icon-text { font-size: 17px; line-height: 20px; height: 20px; font-weight: 500; }
+.tab-item .icon-text { font-size: 17px; line-height: 20px; height: 20px; font-weight: 500; }
 .tab-item.active { color: var(--accent); }
 .tab-item:active { transform: scale(.88); }
 
@@ -162,7 +160,7 @@
   html { font-size: 15px; }
 }
 /* 横屏手机（竖向高度 ≤540px 且横向更宽）：底部 tabbar 换成 64px 窄图标侧边栏，
-   把紧张的垂直空间还给内容；导航文字与语言切换收起，仅留图标。
+   把紧张的垂直空间还给内容；导航文字收起仅留图标，语言切换收起文字改迷你短码按钮。
    本块必须位于 max-width:860px 规则之后，以便覆盖其 sidebar/tabbar 显隐。 */
 @media (orientation: landscape) and (max-height: 540px) and (max-width: 1100px) {
   .layout { padding: 12px 12px 20px; gap: 14px; }
@@ -174,11 +172,22 @@
   .logo { padding: 0 0 14px; justify-content: center; gap: 0; }
   .logo > span:last-child { display: none; }
   .logo .mark { width: 34px; height: 34px; border-radius: 10px; }
-  /* 子插件自定义导航项的标题是纯文本节点（无 span 包裹），font-size:0 可一并隐藏 */
+  /* 子插件自定义导航项的标题是纯文本节点（无 span 包裹），font-size:0 可一并隐藏；
+     emoji 字符图标 span.icon-text 例外保留（其自身显式 font-size 不受 0 继承影响） */
   .nav-item { padding: 10px 0; justify-content: center; gap: 0; margin-bottom: 2px; font-size: 0; }
-  .nav-item span { display: none; }
+  .nav-item span:not(.icon-text) { display: none; }
   .nav-item svg { width: 20px; height: 20px; }
-  .lang-switcher { display: none; }
+  .nav-item .icon-text { font-size: 20px; }
+  /* 语言切换：64px 窄侧栏放不下 2×2 全文字按钮，改单列迷你短码按钮（AUTO/简/EN/繁）。
+     基础 .lang-switcher/.lang-btn 规则位于本文件后段（同特异性后来者居上，曾把
+     display:none 覆盖成 grid 导致按钮溢出），须用 .layout .sidebar 前缀提高特异性 */
+  .layout .sidebar .lang-switcher { display: grid; grid-template-columns: 1fr; gap: 4px; margin: 10px 2px 2px; }
+  .layout .sidebar .lang-btn { padding: 5px 0; border-radius: 8px; font-size: 0; }
+  .layout .sidebar .lang-btn::after { font-size: 10.5px; font-weight: 650; letter-spacing: .5px; }
+  .layout .sidebar .lang-btn:nth-child(1)::after { content: "AUTO"; }
+  .layout .sidebar .lang-btn:nth-child(2)::after { content: "简"; }
+  .layout .sidebar .lang-btn:nth-child(3)::after { content: "EN"; }
+  .layout .sidebar .lang-btn:nth-child(4)::after { content: "繁"; }
   .page-title { font-size: 20px; }
   .page-sub { margin-bottom: 12px; }
   .section { margin-top: 16px; }
@@ -875,6 +884,7 @@ textarea.file-editor {
 }
 .more-sheet .more-item:active { transform: scale(.97); background: var(--accent-soft); }
 .more-sheet .more-item svg { width: 19px; height: 19px; flex-shrink: 0; color: var(--accent); }
+.more-sheet .more-item .icon-text { font-size: 17px; line-height: 20px; height: 20px; flex-shrink: 0; color: var(--accent); }
 .more-sheet .more-empty { color: var(--muted); font-size: 13px; text-align: center; padding: 16px; }
 .more-sheet .sheet-divider { height: 1px; background: var(--divider); margin: 14px 4px; }
 
@@ -1567,8 +1577,16 @@ textarea.file-editor {
   display: grid; place-items: center; transition: color .15s ease, background .15s ease;
 }
 .secret-eye:hover { color: var(--accent); background: var(--accent-soft); }
-.secret-eye svg { width: 17px; height: 17px; }
 .secret-eye[data-shown="1"] { color: var(--accent); }
+/* 双图标常驻堆叠同一网格格位，按 data-shown 交叉淡入缩放——切换只改属性
+   不重建 DOM，避免瞬间替换的生硬感 */
+.secret-eye svg { width: 17px; height: 17px; grid-area: 1 / 1; transition: opacity .16s ease, transform .16s ease; }
+.secret-eye .ico-eye-off { opacity: 0; transform: scale(.55); }
+.secret-eye[data-shown="1"] .ico-eye { opacity: 0; transform: scale(.55); }
+.secret-eye[data-shown="1"] .ico-eye-off { opacity: 1; transform: scale(1); }
+@media (prefers-reduced-motion: reduce) {
+  .secret-eye svg { transition: none; }
+}
 
 /* QQ 官方：扫码登录入口 */
 .ae-qr-row { display: flex; align-items: center; gap: 10px; margin: 2px 0 12px; flex-wrap: wrap; }

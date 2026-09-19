@@ -21,12 +21,10 @@ def setup_lib_path() -> None:
 
 
 def _is_websockets_compatible(module: Any) -> bool:
-    """检测已导入的 websockets 是否满足 onebot 适配器的 API 需求。
+    """检测已导入的 websockets 是否满足适配器需求。
 
-    onebot/adapter.py 与 qqofficial_adapter.py 使用新式 asyncio 接口：
-    websockets.connect(..., additional_headers=...) 与 websockets.serve(...)，
-    其中 additional_headers 参数要求 websockets >= 14；更旧版本（legacy 客户端
-    extra_headers 时代）会在建立连接时抛 TypeError。
+    onebot/qqofficial 适配器使用新式接口（additional_headers 参数要求 >= 14）；
+    更旧版本建连时会抛 TypeError。
     """
     if not (
         callable(getattr(module, "connect", None))
@@ -39,28 +37,20 @@ def _is_websockets_compatible(module: Any) -> bool:
     except ValueError:
         # 版本号无法解析（如开发版）；所需 API 齐全则视为可用
         return True
-    # 单段版本号（如 "14"）补齐为 (14, 0)：元组比较中 (14,) < (14, 0)，
-    # 不补齐会把恰好 14 的整版本误判为不兼容
+    # 单段版本号（如 "14"）补齐为 (14, 0)：否则 (14,) < (14, 0) 会误判不兼容
     parts += (0,) * (2 - len(parts))
     return parts >= (14, 0)
 
 
 def import_websockets() -> Any:
-    """导入 websockets：优先复用进程中已加载且合格的版本（不破坏其他插件）。
+    """导入 websockets（成功返回模块，失败抛 ImportError）。
 
-    行为约定（成功返回模块，失败抛 ImportError）：
-
-    1. sys.modules 已有合格 websockets（版本 >= 14，或已由他方提供且 API
-       齐全）→ 直接复用，不再注入任何路径；
-    2. 否则把内置 lib/ 追加到 sys.path 尾部后再导入——磁盘上已安装的合格
-       版本位于更前的搜索路径会优先命中，内嵌版本仅兜底；
-    3. 不 purge sys.modules 中的 websockets*（全量清理会破坏进程内其他
-       已依赖该版本的插件）；若最终命中的是过旧版本，仅告警提示连接
-       时可能因缺少 additional_headers 报错，按现状返回该模块。
+    1. sys.modules 已有合格版本（>= 14 或 API 齐全）→ 直接复用，不动 sys.path；
+    2. 否则 append 内置 lib/ 后导入：磁盘合格版本优先命中，内嵌仅兜底；
+    3. 不 purge sys.modules 的 websockets*（避免破坏其他插件）；过旧仅告警并按现状返回。
     """
     cached = sys.modules.get("websockets")
     if cached is not None and _is_websockets_compatible(cached):
-        # 已由本插件或他方加载且合格：直接复用，不动 sys.path
         return cached
     setup_lib_path()
     try:

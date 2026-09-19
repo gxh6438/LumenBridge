@@ -136,9 +136,8 @@ class ConfigFormBuilder:
         self._on_register(self)
 
     def to_schema(self) -> dict[str, Any]:
-        """返回 schema 深拷贝：外部（含注册表）修改 schema 不回写构建器，反之亦然。
+        """返回 schema 深拷贝：外部修改不回写构建器，反之亦然。
 
-        必须用 deepcopy：select 的 options 是 dict 列表，浅拷贝（dict(item)）
-        仍与构建器共享内层引用，外部改动会污染后续签发的所有表单。
+        必须 deepcopy：浅拷贝仍与构建器共享 options 内层引用。
         """
         return {"name": self.name, "items": copy.deepcopy(self.items)}

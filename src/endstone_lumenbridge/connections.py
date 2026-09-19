@@ -72,9 +72,7 @@ DEFAULT_ADAPTERS: list[dict[str, Any]] = [
         "app_id": "",
         "app_secret": "",
         "sandbox": False,
-        # 后台静默日志开关（默认开启）：开启时不打印连接/断连/重连、凭据
-        # 降级与补发提示等运行类日志（防刷屏）；关闭后打印全部日志便于排障。
-        # 仅官方域适配器有此开关（ws/astrbot 无高频运行提示类日志）
+        # 静默连接/断连/凭据降级等高频运行日志（防刷屏，默认开）；关闭后打印全部便于排障
         "suppress_connection_log": True,
         # 连接间隔（毫秒）：两次网关连接尝试之间的最小等待时间，0 表示按指数退避自动重连
         "connect_interval": 60000,
@@ -91,8 +89,7 @@ DEFAULT_ADAPTERS: list[dict[str, Any]] = [
 ]
 
 
-# 全类型空白模板（含 AstrBot：默认卡片不展示，但“添加适配器”仍可手动创建）
-# 构建时深拷贝，避免模板与 DEFAULT_ADAPTERS 共享内部 dict 引用（改一处动全部）
+# 全类型空白模板（含 AstrBot，默认不展示但可手动创建）；深拷贝避免与 DEFAULT_ADAPTERS 共享内部引用
 ADAPTER_TEMPLATES: dict[str, dict[str, Any]] = {
     a["type"]: copy.deepcopy(a) for a in DEFAULT_ADAPTERS
 }
@@ -161,8 +158,7 @@ def _validate_adapter(adapter: dict[str, Any]) -> None:
             or not 0 <= float(interval) <= 86400000:
         raise ConnectionValidationError("adapter.connect_interval 必须是 0 至 86400000 之间的毫秒数")
 
-    # qqofficial 专属字段：附加事件订阅位（按位或叠加到默认 Intents）
-    # 官方 Intents 域上限为 1<<30，非法位（超出 30 位的值）会导致网关拒连
+    # qqofficial 专属：附加事件订阅位（按位或叠加到默认 Intents；非法位会导致网关拒连）
     intents = _get("extra_intents", 0)
     if isinstance(intents, bool) or not isinstance(intents, int) \
             or not 0 <= intents <= (1 << 31) - 1:
@@ -175,9 +171,7 @@ def _validate_adapter(adapter: dict[str, Any]) -> None:
     if type(_get("enabled", False)) is not bool:
         raise ConnectionValidationError("adapter.enabled 必须是布尔值")
 
-    # WebSocket 连接五项（ws_type/target/listen_host/listen_port/access_token）
-    # 仅适用于 websocket / astrbot 类型：官方机器人走网关鉴权（AppID/Secret），
-    # 卡片不含这些字段（存量卡片里的多余键在 load 归一化时剔除）
+    # WebSocket 五项仅 ws/astrbot 适用（qqofficial 走网关鉴权，多余键 load 时剔除）
     adapter_type = str(_get("type", ""))
     if adapter_type in ("websocket", "astrbot"):
         ws = _get("ws_type", 0)
@@ -217,7 +211,6 @@ def _validate_adapter(adapter: dict[str, Any]) -> None:
         if len(items) > 100:
             raise ConnectionValidationError(f"adapter.{key} 最多包含 100 个号码")
         if qq_official:
-            # 官方域：group_openid / 用户 openid 均为字符串标识
             for item in items:
                 if isinstance(item, bool) or not re.fullmatch(
                     r"[0-9A-Za-z_-]{4,64}", str(item).strip()
@@ -268,8 +261,7 @@ def _merge_adapter(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any
     return result
 
 
-# 适配器卡片按类型分文件存于 connections/ 目录：websocket / qqofficial / astrbot
-# 各一个 JSON（{"version": 1, "adapters": [...]}），互不混杂
+# 适配器卡片按类型分文件存于 connections/ 目录（{"version": 1, "adapters": [...]}）
 ADAPTER_FILES: dict[str, str] = {
     "websocket": "websocket.json",
     "qqofficial": "qqofficial.json",
@@ -307,11 +299,8 @@ class ConnectionManager:
         # 当前是否处于“旧单文件回退”模式（写盘时据此改名旧文件）
         self._legacy_layout = False
         self._lock = threading.RLock()
-        # 群/管理员标识并集缓存（frozenset，成员判定 O(1)）：
-        # group_allowed / admin 判定在每条消息热路径上调用，
-        # 不缓存则每条消息都要持锁遍历全部适配器并重复解析 CSV。
-        # CRUD（load/create/update/delete）时失效；读取端的竞态
-        # 最坏情况只是多算一次，结果仍正确。
+        # 群/管理员并集缓存：消息热路径 O(1) 判定（不缓存则每条消息持锁遍历+解析 CSV）；
+        # CRUD 时失效；读取端竞态最坏多算一次，结果仍正确
         self._group_keys_cache: frozenset[str] | None = None
         self._admin_keys_cache: frozenset[str] | None = None
         self.load(legacy=legacy)
@@ -344,7 +333,6 @@ class ConnectionManager:
             # (来源文件, 卡片) 对：剔除卡片时按来源备份对应文件
             sourced: list[tuple[Path | None, Any]] = []
             if fresh and self.path.is_file():
-                # 旧版单文件存储：回退读取保证升级后连接不中断，写盘即切新结构
                 self._legacy_layout = True
                 sourced.extend((self.path, item) for item in self._read_items(self.path))
                 self.logger.warning(_t("connections.legacy_layout_hint"))
@@ -365,10 +353,11 @@ class ConnectionManager:
                 dropped_sources: set[Path] = set()
                 for source, item in sourced:
                     if not isinstance(item, dict) or item.get("type") not in ADAPTER_TYPES:
-                        dropped_sources.add(source) if source else None
+                        if source is not None:
+                            dropped_sources.add(source)
                         continue
                     merged = _merge_adapter(self._blank(item.get("type", "websocket")), item)
-                    # qqofficial 卡片剔除 ws 五项（旧版默认卡片残留，官方域无此概念）
+                    # qqofficial 卡片剔除 ws 五项（官方域无此概念）
                     if merged.get("type") == "qqofficial":
                         for key in _WS_ONLY_FIELDS:
                             merged.pop(key, None)
@@ -408,8 +397,7 @@ class ConnectionManager:
                 adapters = normalized or copy.deepcopy(DEFAULT_ADAPTERS)
             self.adapters = adapters
             self._invalidate_key_caches()
-            # 内容有变化才落盘：/lumen reload 等高频路径不再产生无谓写盘；
-            # 旧单文件模式内容必然变化（剔除 ws 字段等归一化），借此自动切换新结构
+            # 内容有变化才落盘（reload 高频路径避免无谓写盘）；旧单文件借此自动切换新结构
             if fresh or original_adapters != self.adapters:
                 self._write_locked()
 
@@ -464,8 +452,7 @@ class ConnectionManager:
             result["access_token"] = str(conn.get("access_token", "") or "")
             result["bot_qq"] = _to_int(conn.get("bot_qq", 0) or 0, 0)
         if legacy.get("admin_qq"):
-            # 旧配置可能为 int / csv 字符串 / 列表；list(str) 会把 csv 拆成
-            # 单字符列表导致管理员全部失效，统一走 parse_groups 归一化
+            # 旧配置可能为 int/csv/列表；list(str) 会把 csv 拆成单字符，统一走 parse_groups
             result["admin_qq"] = ConnectionManager.parse_groups(legacy["admin_qq"])
         if legacy.get("main_group") not in (None, "", 0):
             # 归一化为列表，与新卡片保存格式一致（parse_groups 亦兼容 int/csv）
@@ -534,11 +521,9 @@ class ConnectionManager:
         return None
 
     def get_view(self, adapter_id: str) -> dict[str, Any] | None:
-        """按 id 返回适配器内部字典的只读引用（不拷贝）。
+        """按 id 返回适配器内部字典的只读引用（不拷贝，供消息热路径）。
 
-        供消息热路径读取 sync 配置 / 群列表等：update()/create() 均以
-        整字典替换而非原地修改，持有旧引用的读取方只会看到一致的
-        旧快照，不会读到半更新状态。需要修改必须走 update()。
+        update()/create() 均整字典替换而非原地修改，旧引用只见一致快照；修改必须走 update()。
         """
         with self._lock:
             for adapter in self.adapters:
@@ -554,8 +539,7 @@ class ConnectionManager:
         if adapter_type not in ADAPTER_TYPES:
             raise ConnectionValidationError("adapter.type 只能为 websocket、astrbot 或 qqofficial")
         created = self._blank(adapter_type)
-        # 「添加适配器」创建的卡片默认启用：开关默认打开，未配置完成前
-        # hub 因 is_configured() 不通过不会实际建连（初始默认卡片不受影响）
+        # 新建卡片默认启用：未配置完成前 hub 因 is_configured() 不通过不会实际建连
         created["enabled"] = True
         with self._lock:
             same = [a for a in self.adapters if a.get("type") == adapter_type]
@@ -581,8 +565,7 @@ class ConnectionManager:
             raise ConnectionValidationError("adapter 必须是对象")
         patch = {k: v for k, v in patch.items() if k not in ("id", "type")}
         with self._lock:
-            # enumerate 按 id 定位：list.index 按 == 匹配整个字典，
-            # 两张内容相同的卡片会定位到错误索引
+            # 按 id 定位而非 list.index：后者按 == 匹配整个字典，同内容卡片会错位
             current: dict[str, Any] | None = None
             current_index = -1
             for index, adapter in enumerate(self.adapters):
@@ -624,11 +607,7 @@ class ConnectionManager:
         return patch
 
     def _ensure_unique_name(self, adapter: dict[str, Any], *, exclude: str | None) -> None:
-        """卡片名去重：重名自动追加序号（保持展示唯一）。
-
-        追加序号前先把基名截断，确保结果不超过 _validate_adapter 的 64 字符上限，
-        否则写盘的超长名会在下次启动校验时被当作非法卡片剔除。
-        """
+        """卡片名去重：重名自动追加序号；基名先截断以不超 64 字符校验上限。"""
         names = {
             str(a.get("name"))
             for a in self.adapters
@@ -677,10 +656,9 @@ class ConnectionManager:
             return [a for a in self.adapters if a.get("type") == "astrbot"]
 
     def primary_websocket(self) -> dict[str, Any] | None:
-        """主 WebSocket 适配器（深拷贝）：第一个启用且配置完整的，否则第一个。
+        """主 WebSocket 适配器（第一个启用且配置完整的，否则第一个）。
 
-        返回深拷贝防止调用方改写返回值直接污染内部 adapters 列表；
-        需要持久化修改请走 update()。
+        深拷贝防止污染内部列表；持久化修改请走 update()。
         """
         candidates = self.websocket_adapters
         if not candidates:
@@ -694,8 +672,7 @@ class ConnectionManager:
     def is_configured(adapter: dict[str, Any]) -> bool:
         """适配器是否已填写有效连接信息。
 
-        websocket / astrbot 判定一致：正向(ws_type=0) 需填目标地址，
-        反向(ws_type=1) 需填监听端口；qqofficial 需填 AppID 与 AppSecret。
+        正向(ws_type=0) 需填 target，反向(ws_type=1) 需填监听端口；qqofficial 需 AppID/Secret。
         """
         if str(adapter.get("type", "")) == "qqofficial":
             return bool(
@@ -747,8 +724,7 @@ class ConnectionManager:
         if cached is not None:
             return cached
         with self._lock:
-            # 锁内双检 + 锁内写缓存：与 CRUD 的失效（同锁）串行化，
-            # 消除"计算完成后、写缓存前被并发 update 失效"的陈旧缓存窗口
+            # 锁内双检+写缓存：与 CRUD 失效（同锁）串行化，消除陈旧缓存窗口
             if self._group_keys_cache is not None:
                 return self._group_keys_cache
             keys: set[str] = set()

@@ -58,27 +58,23 @@ PRIORITY_ORDER = {"pre": 0, "main": 1, "post": 2}
 # 防路径穿越与非法字符：仅允许字母数字下划线连字符
 _NAME_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 
-# ZIP 炸弹防护：解压前按声明大小预检（entry 数 / 单文件 / 总解压体积）。
-# 市场下载另有压缩包大小上限，但高压缩比 ZIP 仍可在解压时耗尽磁盘与内存。
+# ZIP 炸弹防护：条目数/单文件/总解压体积上限
 _MAX_ZIP_ENTRIES = 2000
 _MAX_ZIP_FILE_BYTES = 64 * 1024 * 1024
-# 总解压上限 64MB：进一步压缩 ZIP 炸弹的破坏面
 _MAX_ZIP_TOTAL_BYTES = 64 * 1024 * 1024
 
 
 def _is_safe_name(name: str) -> bool:
     """校验子插件名合法性，禁止 . / \\ 等路径字符"""
-    # 恶意/畸形 lumen.json 可把 name 写成数字/列表等非字符串真值，
-    # 直接 match 会抛 TypeError
+    # 畸形清单可能给非字符串真值，直接 match 会抛 TypeError
     if not isinstance(name, str):
         return False
     return bool(name) and bool(_NAME_RE.match(name))
 
 
 def _read_manifest_dict(path: Path) -> dict[str, Any] | None:
-    """安全读取 lumen.json：返回 dict；内容损坏（非法 JSON / 非 UTF-8 /
-    合法 JSON 但非对象如 null/123/[]）时返回 None，绝不向上抛异常，
-    避免单个坏清单阻断 discover() 全部子插件加载。
+    """安全读取 lumen.json：返回 dict；损坏（非法 JSON/非 UTF-8/非对象）时
+    返回 None，绝不抛异常，避免单个坏清单阻断全部子插件加载。
     """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -97,9 +93,7 @@ def _ensure_under(folder: Path, base: Path) -> bool:
 
 
 def _write_manifest_atomic(path: Path, manifest: dict[str, Any]) -> None:
-    """tmp 文件 + os.replace 原子写 lumen.json，防进程中断留下半个清单文件
-    （截断 JSON 下次启动会被当作"损坏清单"跳过加载）。
-    """
+    """tmp + os.replace 原子写 lumen.json，防进程中断留下截断的损坏清单。"""
     temp = path.with_name(path.name + ".tmp")
     temp.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=4), encoding="utf-8"
@@ -126,8 +120,7 @@ class SubPlugin:
     def __init__(self, folder: Path, manifest: dict[str, Any]) -> None:
         self.folder = folder
         self.manifest = manifest
-        # 低危：name 可能被恶意/畸形 lumen.json 写成数字/列表/含路径字符的字符串，
-        # 非法时回退目录名，保证后续以 name 为键的字典操作与文件路径安全
+        # 畸形 name 非法时回退目录名，保证字典键与文件路径安全
         raw_name = manifest.get("name")
         self.name: str = raw_name if _is_safe_name(raw_name) else folder.name
         self.module: Any = None
@@ -154,7 +147,7 @@ class SubPluginManager:
     def discover(self) -> list[SubPlugin]:
         """扫描子插件目录，补全缺失的 lumen.json"""
         found: list[SubPlugin] = []
-        # 容错：plugins_dir 被外部删除时 iterdir 抛 FileNotFoundError，不应阻断插件启用
+        # plugins_dir 被外部删除时不阻断插件启用
         try:
             iterdir = sorted(self.plugins_dir.iterdir())
         except OSError:
@@ -171,22 +164,20 @@ class SubPluginManager:
             if manifest_path.is_file():
                 mdata = _read_manifest_dict(manifest_path)
                 if mdata is None:
-                    # M28：清单文件存在但损坏（非法 JSON / 非 UTF-8 / 非对象）→
-                    # 记 error 并跳过该子插件，绝不回退默认 load=True 继续执行其代码
+                    # 清单损坏 → 跳过该子插件，绝不回退默认 load=True 执行其代码
                     self.logger.error(_t("subplugin_runtime.log.manifest_failed", name=folder.name, manifest=MANIFEST_NAME))
                     continue
                 manifest.update(mdata)
             else:
                 manifest["name"] = folder.name
-                # 低危：原子写（tmp + os.replace），防中断留下半个清单文件
+                # 原子写防中断留下半个清单
                 _write_manifest_atomic(manifest_path, manifest)
                 self.logger.info(_t("subplugin_runtime.log.manifest_generated", name=folder.name, manifest=MANIFEST_NAME))
 
             found.append(SubPlugin(folder, manifest))
 
         def _priority_of(sp: SubPlugin) -> int:
-            # M27：priority 为 list/dict 等不可哈希值时 dict.get 会抛 TypeError，
-            # 仅字符串才查优先级表，其余（含缺失）回退 1（main 段）
+            # priority 非字符串（含缺失）回退 1（main 段），防 TypeError
             raw = sp.manifest.get("priority")
             return PRIORITY_ORDER.get(raw, 1) if isinstance(raw, str) else 1
 
@@ -195,7 +186,7 @@ class SubPluginManager:
 
     def load_all(self) -> None:
         with self._lock:
-            # 清理历史遗留的字节码缓存（含已禁用子插件的），保持子插件目录整洁
+            # 清理历史遗留的字节码缓存（含已禁用子插件）
             self._purge_pycache(self.plugins_dir)
             # 拓扑排序：被依赖的子插件先加载，避免 requires 检查误报
             for sp in self._order_by_requirements(self.discover()):
@@ -221,11 +212,10 @@ class SubPluginManager:
         self.logger.info(_t("subplugin_runtime.log.load_complete", count=count))
 
     def _purge_pycache(self, folder: Path) -> None:
-        """递归清理目录下所有 ``__pycache__`` 字节码缓存。
+        """递归清理 ``__pycache__`` 字节码缓存。
 
-        缓存是解释器自动生成的临时文件，对源码热重载分发的子插件无用；
-        且 pyc 时间戳校验粒度可能只有 1 秒，热重载覆盖源码后旧缓存有被
-        错误复用的风险。策略：加载前清旧缓存、加载中禁写新缓存。
+        pyc 时间戳校验粒度可能只有 1 秒，热重载覆盖源码后旧缓存有被错误
+        复用的风险；策略：加载前清旧缓存、加载中禁写新缓存。
         """
         try:
             for pycache in folder.rglob("__pycache__"):
@@ -234,8 +224,7 @@ class SubPluginManager:
             pass
 
     def _load_one(self, sp: SubPlugin) -> bool:
-        # 同名冲突防护：另一目录已占用该名时拒绝加载——否则新记录覆盖
-        # 旧记录后，旧目录的模块成为孤儿（事件回调持续触发且永无卸载入口）
+        # 同名冲突拒绝加载：否则旧目录模块成为孤儿（回调持续触发且无卸载入口）
         existing = self.subplugins.get(sp.name)
         if existing is not None and existing is not sp and existing.folder != sp.folder:
             self.logger.warning(
@@ -250,8 +239,7 @@ class SubPluginManager:
         context: LumenContext | None = None
         module_name = f"lumenbridge_sub_{sp.folder.name}"
         try:
-            # pip 安装新分发包后 importlib 可能仍缓存旧路径查找结果，且嵌入式
-            # Python 可能未把 site-packages 加入 sys.path；刷新缓存确保新依赖可被发现
+            # 刷新 importlib 缓存并确保 site-packages 在 sys.path，让新装依赖可被发现
             from ..pip_manager import PipManager
             PipManager.refresh_dependency_cache()
             deps_raw = sp.manifest.get("dependencies", [])
@@ -322,8 +310,7 @@ class SubPluginManager:
                 )
                 return False
 
-            # 插件级强制依赖（requires）：Endstone 插件缺失 → 提示安装；
-            # 子插件缺失/版本不符/未加载 → 拒绝加载（市场安装流程会自动装子插件依赖）
+            # requires：Endstone 插件缺失提示安装；子插件缺失/版本不符 → 拒绝加载
             req_error = self._check_plugin_requirements(sp)
             if req_error:
                 sp.loaded = False
@@ -353,8 +340,7 @@ class SubPluginManager:
                 )
             module = importlib.util.module_from_spec(spec)
             sys.modules[module_name] = module
-            # 子插件为源码热重载分发，不需要 pyc；禁写字节码避免在子插件
-            # 目录生成 __pycache__ 临时目录（加载完成后恢复原值）
+            # 禁写字节码：源码热重载分发不需要 pyc（加载完成后恢复原值）
             prev_dwb = sys.dont_write_bytecode
             sys.dont_write_bytecode = True
             try:
@@ -421,9 +407,7 @@ class SubPluginManager:
     def _installed_endstone_plugins(self) -> dict[str, str] | None:
         """当前服务器已加载的 Endstone 插件：名称(小写) → 版本。
 
-        server / plugin_manager 在测试桩或异常环境下可能不可用，
-        此时返回 None（与“确实没有任何插件”的空 dict 区分），
-        Endstone 依赖检查按“无法核实”处理（不阻断）。
+        server 不可用时返回 None（与空 dict 区分），依赖检查按“无法核实”处理。
         """
         try:
             manager = self.plugin.server.plugin_manager
@@ -461,8 +445,7 @@ class SubPluginManager:
 
         problems: list[str] = []
 
-        # Endstone 插件依赖：只能提示安装，无法自动处理。
-        # server 不可用（None）→ 无法核实，不阻断（避免测试桩/异常环境下误杀）
+        # Endstone 插件依赖只能提示安装；server 不可用（None）时不阻断
         if declaration.endstone:
             installed = self._installed_endstone_plugins()
             if installed is None:
@@ -515,9 +498,8 @@ class SubPluginManager:
     def _order_by_requirements(self, plugins: list[SubPlugin]) -> list[SubPlugin]:
         """按声明的子插件依赖做稳定拓扑排序（被依赖者先加载）。
 
-        priority 段内保持 discover() 的原顺序；仅对“依赖了本批次内其它
-        插件”的声明建立顺序约束。循环依赖时剩余插件按原顺序追加，
-        各自的加载检查会报“依赖未加载”，自然暴露环。
+        priority 段内保持原顺序；循环依赖时剩余插件按原顺序追加，
+        由各自的加载检查报错暴露环。
         """
         batch_names = {sp.name for sp in plugins}
         dep_names: dict[str, set[str]] = {}
@@ -593,9 +575,7 @@ class SubPluginManager:
                 except Exception as e:
                     self.logger.warning(_t("subplugin_runtime.log.cleanup_exception", name=name, error=e))
             sp.loaded = False
-            # H15：清掉 sys.modules 中的子插件模块及其全部子模块，
-            # 释放模块级对象引用；否则 compat 注册的命令包装、全局注册表里
-            # 持有的模块对象等绑定永不释放，热重载后新旧模块并存
+            # 清掉 sys.modules 中的模块及子模块，防热重载后新旧模块并存
             module_name = f"lumenbridge_sub_{sp.folder.name}"
             sys.modules.pop(module_name, None)
             for key in [k for k in sys.modules if k.startswith(module_name + ".")]:
@@ -657,8 +637,7 @@ class SubPluginManager:
                 # 二次校验：防符号链接等绕过
                 if not _ensure_under(folder, self.plugins_dir):
                     return False
-            # 先完成全部校验再卸载：清单损坏 / 入口缺失 / 已禁用时
-            # 直接返回，正在运行的实例不受影响（校验失败先卸载会让插件凭空消失）
+            # 先校验再卸载：校验失败直接返回，正在运行的实例不受影响
             if not folder.is_dir() or not (folder / ENTRY_NAME).is_file():
                 return False
             manifest = dict(DEFAULT_MANIFEST)
@@ -666,11 +645,11 @@ class SubPluginManager:
             if manifest_path.is_file():
                 mdata = _read_manifest_dict(manifest_path)
                 if mdata is None:
-                    # M28 口径：清单损坏拒绝重载，绝不回退默认 load=True
+                    # 清单损坏拒绝重载，绝不回退默认 load=True
                     self.logger.error(_t("subplugin_runtime.log.manifest_failed", name=folder.name, manifest=MANIFEST_NAME))
                     return False
                 manifest.update(mdata)
-            # H13：尊重 manifest 的 load:false 禁用开关，禁用的插件不允许经热重载强行加载
+            # 禁用（load:false）的插件不允许经热重载强行加载
             if not manifest.get("load", True):
                 self.logger.warning(f"[子插件] {name} 插件已被禁用，拒绝重载")
                 return False
@@ -703,19 +682,15 @@ class SubPluginManager:
             except OSError as e:
                 self.logger.error(_t("subplugin_runtime.log.manifest_save_failed", name=name, error=e))
                 return False
-            # M31：禁用不能只写标志——当前已加载的实例必须卸载，
-            # 否则 load=false 的插件仍持续运行（事件回调/定时任务照常触发）
-            # （_unload_one 可重入取锁；其移除记录后按 load_all 禁用分支口径补回，
-            #   供 WebUI 展示与后续重新启用）
+            # 禁用不能只写标志：已加载实例必须卸载，否则仍持续运行；
+            # 卸载后补回记录供 WebUI 展示与后续重新启用
             if not enable and sp is not None and sp.loaded:
                 self._unload_one(name)
                 sp.loaded = False
                 sp.error = ""
                 self.subplugins[name] = sp
             elif enable:
-                # 与禁用立即卸载对称：启用后立即尝试加载，否则开关打开后
-                # 插件仍不运行，需手动 reload 才生效（reload_one 内部重读
-                # 清单并做完整校验，加载失败会以 error 记录供 WebUI 展示）
+                # 启用后立即尝试加载，否则开关打开后插件仍不运行
                 self.reload_one(name)
         if enable:
             self.logger.info(_t("subplugin_runtime.log.toggle_enabled", name=name))
@@ -745,9 +720,8 @@ class SubPluginManager:
     def dependents_of(self, name: str) -> list[dict[str, Any]]:
         """列出依赖指定子插件的其它子插件（供卸载/禁用前反向依赖警告）。
 
-        返回 ``[{"name": 依赖者, "loaded": 是否已加载, "req": 约束原文}]``，
-        无依赖者时为空列表。读取的是当前记录的 manifest 声明，
-        不依赖依赖者是否加载成功。
+        返回 ``[{"name": 依赖者, "loaded": 是否已加载, "req": 约束原文}]``；
+        依据当前记录的 manifest 声明，与依赖者是否加载成功无关。
         """
         with self._lock:
             result: list[dict[str, Any]] = []
@@ -787,8 +761,7 @@ class SubPluginManager:
     def _unmet_min_version(self, manifest: dict[str, Any]) -> str:
         """检查 lumen.json 的 min_v：返回不满足的版本号（满足/未声明返回 ""）。
 
-        非字符串/畸形 min_v 一律视为未声明（宽松容错），避免畸形清单阻断加载。
-        段数不同补 0 对齐比较（1.2 与 1.2.0 相等）。
+        畸形 min_v 视为未声明（宽松容错）；补 0 对齐比较（1.2 与 1.2.0 相等）。
         """
         required = manifest.get("min_v")
         if not isinstance(required, str):
@@ -804,8 +777,7 @@ class SubPluginManager:
         """从 ZIP 安装（或升级）子插件，返回 (成功, 消息, 插件名)。
 
         ZIP 根目录可直接含 main.py 或包一层文件夹；同名插件需版本更高才覆盖。
-        ``fallback_name``：清单缺 name 时的兜底名（市场下载的临时文件名无
-        意义，由市场层传入现有本地名或 market_id，保持升级目录连续）。
+        ``fallback_name``：清单缺 name 时的兜底名（保持市场升级目录连续）。
         """
         zip_path = Path(zip_path)
         if not zip_path.is_file():
@@ -819,7 +791,7 @@ class SubPluginManager:
                 with zipfile.ZipFile(zip_path) as zf:
                     tmp_resolved = tmp_dir.resolve()
                     infos = zf.infolist()
-                    # ZIP 炸弹防护一：条目数与 ZIP 头声明大小预检（快速失败）
+                    # ZIP 炸弹防护：条目数与声明大小预检（快速失败）
                     if len(infos) > _MAX_ZIP_ENTRIES:
                         return False, _t("subplugin_runtime.log.install_zip_limit"), ""
                     declared_total = 0
@@ -832,11 +804,8 @@ class SubPluginManager:
                         # 声明体积也可能被伪造，超限即拒绝
                         if declared_total > _MAX_ZIP_TOTAL_BYTES:
                             return False, _t("subplugin_runtime.log.install_zip_limit"), ""
-                    # ZIP 炸弹防护二：流式解压并按实际写入字节累计。
-                    # info.file_size 来自 ZIP 头可被伪造，预检不足以防高压缩比
-                    # 炸弹；逐条目 64KB 块读写，超限立即中止，不再使用 extractall。
-                    # 已知限制（M30 备注）：解压在调用线程同步执行，超大 ZIP 会
-                    # 阻塞调用方（WebUI 已在后台线程调用；主线程调用方需自行注意）
+                    # ZIP 炸弹防护：流式解压按实际写入字节累计（声明大小可伪造），
+                    # 超限立即中止；解压同步执行，超大 ZIP 会阻塞调用线程
                     total_written = 0
                     for info in infos:
                         # 防路径穿越：用 relative_to 而非字符串前缀匹配
@@ -863,8 +832,7 @@ class SubPluginManager:
             except zipfile.BadZipFile:
                 return False, _t("subplugin_runtime.log.install_not_zip"), ""
             except RuntimeError:
-                # M29：加密 ZIP 在 zf.open/read 时抛 RuntimeError
-                #（"File ... is encrypted, password required"）等不受支持的情况
+                # 加密 ZIP 在 zf.open/read 时抛 RuntimeError
                 return False, "ZIP 已加密或不支持，无法安装", ""
             except OSError as e:
                 # 解压写盘失败（磁盘满/权限等）：中止安装而非向上抛裸异常
@@ -887,9 +855,8 @@ class SubPluginManager:
                 if mdata is None:
                     return False, _t("subplugin_runtime.log.install_manifest_failed", manifest=MANIFEST_NAME), ""
                 manifest.update(mdata)
-            # 名称解析链：清单 name → 调用方兜底名（市场升级时为现有本地名，
-            # 保持目录连续）→ ZIP 内层文件夹名 → zip 文件名。市场下载落地为
-            # lumen_market_xxx 临时文件，stem 无意义，必须排在兜底名之后
+            # 名称解析链：清单 name → 调用方兜底名（市场升级保持目录连续）→
+            # ZIP 内层文件夹名 → zip 文件名（市场临时文件 stem 无意义，排最后）
             raw_name = manifest.get("name")
             if _is_safe_name(raw_name):
                 name = raw_name
@@ -915,8 +882,7 @@ class SubPluginManager:
             dest = self.plugins_dir / name
             if not _ensure_under(dest, self.plugins_dir):
                 return False, _t("subplugin_runtime.log.install_path_traversal"), ""
-            # 检查与替换全程持锁（RLock 可重入）：升级与新装均防并发
-            # install/uninstall/reload 在 exists 检查-替换中间态抢入
+            # 检查与替换全程持锁（RLock 可重入），防并发 install/uninstall/reload 抢入中间态
             with self._lock:
                 if dest.exists():
                     old_manifest_path = dest / MANIFEST_NAME
@@ -926,20 +892,17 @@ class SubPluginManager:
                         if old_data is not None:
                             old_version = str(old_data.get("version", "0") or "0")
                     new_version = manifest.get("version", "0")
-                    # 低危：旧目录无清单（old=0）且新包 version 缺失/解析为 0 时，
-                    # 0 视为"未知版本"放行升级（允许覆盖安装），不再被 0<=0 卡死
+                    # 双方版本均为 0（未知）时视为放行升级，不被 0<=0 卡死
                     new_tuple = version_tuple(new_version)
                     if new_tuple != (0,) and version_cmp(new_version, old_version) <= 0:
                         return False, _t("subplugin_runtime.log.install_version_too_low", name=name, old=old_version, new=new_version), name
-                    # 升级：先卸载；递归备份用户数据（非 .py/.pyc，含嵌套目录，
-                    # 子插件常把数据写进 data/ 等子目录，仅顶层白名单会丢数据）
-                    # → 全量替换目录（清掉已删除/改名的旧代码）→ 回填数据文件
+                    # 升级：先卸载，递归备份用户数据（子插件常把数据写进子目录）→
+                    # 全量替换目录（清掉已删除/改名的旧代码）→ 回填数据文件
                     self._unload_one(name)
                     preserved: dict[str, Path] = {}
                     for old in dest.rglob("*"):
-                        # 代码文件不保留（新包自带）：.py/.pyc 之外还有原生
-                        # 扩展（.so/.pyd/.dll）——把旧二进制当用户数据回填
-                        # 会覆盖新包二进制，ABI 不匹配直接崩溃
+                        # 代码与原生扩展不保留：旧二进制回填会覆盖新包二进制，
+                        # ABI 不匹配直接崩溃
                         if old.is_file() and old.suffix.lower() not in {
                             ".py", ".pyc", ".pyo", ".so", ".pyd", ".dll",
                         }:
@@ -983,8 +946,7 @@ class SubPluginManager:
                         try:
                             shutil.copytree(root, dest)
                         except OSError as e:
-                            # 新代码写入失败（磁盘满/权限）：回填用户数据到半成品
-                            # 目录后按失败返回（finally 仍保留备份目录）
+                            # 写入失败：回填用户数据后按失败返回（保留备份目录）
                             _restore_preserved(dest)
                             return False, _t("subplugin_runtime.log.install_copy_failed", error=e), name
                         # 用户数据优先于新包自带同名文件
@@ -1008,15 +970,12 @@ class SubPluginManager:
                         return False, _t("subplugin_runtime.log.install_copy_failed", error=e), ""
                     action = _t("subplugin_runtime.log.install_action_install", version=manifest.get('version', '?'))
 
-                # 清单写入必须与目录替换同锁：锁外写入时并发 reload_all/
-                # discover 可在中间态抢先加载该目录（同名同 folder 重复加载、
-                # 监听器重复注册），并发 set_enabled 还会与固定 tmp 文件名
-                # （lumen.json.tmp）交错产出损坏清单
+                # 清单写入须与目录替换同锁：锁外写入会被并发 reload/discover
+                # 抢先加载，或与 set_enabled 的固定 tmp 文件交错产出损坏清单
                 try:
                     _write_manifest_atomic(dest / MANIFEST_NAME, manifest)
                 except OSError as e:
-                    # 代码已完整落盘仅清单写失败：返回失败让调用方感知，
-                    # 目录保留（下次启动 discover 会生成默认清单兜底加载）
+                    # 仅清单写失败：返回失败让调用方感知，目录保留供下次兜底加载
                     return False, _t("subplugin_runtime.log.manifest_save_failed", name=name, error=e), name
 
                 sp = SubPlugin(dest, manifest)

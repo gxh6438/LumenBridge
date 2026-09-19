@@ -26,7 +26,6 @@ let configEditorBound = false;
 let metricsTimer = null;
 let metricsGeneration = 0;
 const GAUGE_CIRC = 2 * Math.PI * 52; // 环形仪表盘周长（r=52）
-const MORE_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px;flex-shrink:0"><circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18"/></svg>';
 
 let pipTaskState = null;       // { taskId, done, success, subpluginName, status, msg, doneHandled, reloadShown }
 let pipPollTimer = null;
@@ -1053,11 +1052,11 @@ function renderConfigForm() {
         } else if (Array.isArray(val)) {
           ctrl = `<div class="ctrl"><input type="text" id="cf-${path}" value="${esc(val.join(", "))}" data-array="1"></div>`;
         } else if (typeof val === "string" && SENSITIVE_FIELD_KEYS.has(key)) {
-          // 敏感字段（webui.password 等）：密码框 + 本地明文切换眼睛
+          // 敏感字段（webui.password 等）：密码框 + 本地明文切换眼睛（点击经全局事件委托分发）
           ctrl = `<div class="ctrl"><div class="secret-field">
             <input type="password" id="cf-${path}" value="${esc(val)}" autocomplete="new-password" spellcheck="false">
-            <button type="button" class="secret-eye" data-shown="0" onclick="togglePwVisibility(this)"
-                    data-i18n-title="login.show_password" title="${esc(t("login.show_password"))}">${EYE_SHOW_SVG}</button>
+            <button type="button" class="secret-eye" data-shown="0" aria-pressed="false"
+                    data-i18n-title="login.show_password" title="${esc(t("login.show_password"))}">${EYE_SHOW_SVG}${EYE_HIDE_SVG}</button>
           </div></div>`;
         } else {
           ctrl = `<div class="ctrl"><input type="text" id="cf-${path}" value="${esc(val)}"></div>`;
@@ -2151,6 +2150,10 @@ document.addEventListener("click", (e) => {
   if (adapterQrBtn) { openQrBindModal(adapterQrBtn.dataset.id || ""); return; }
   const adapterDelBtn = e.target.closest(".adapter-delete-btn[data-id]");
   if (adapterDelBtn) { deleteAdapter(adapterDelBtn.dataset.id || ""); return; }
+  /* 本地明文切换眼睛（登录页/配置页密码框，无 data-input-id）：切换输入框 type */
+  const localEyeBtn = e.target.closest(".secret-eye:not([data-input-id])");
+  if (localEyeBtn) { togglePwVisibility(localEyeBtn); return; }
+  /* 适配器密钥眼睛（带 data-input-id）：明文经服务端 reveal 接口获取 */
   const secretEyeBtn = e.target.closest(".secret-eye[data-input-id]");
   if (secretEyeBtn) {
     toggleSecretReveal(secretEyeBtn,
@@ -3336,8 +3339,9 @@ async function saveEditingFile() {
 /* 子插件注册到底栏 tab 的自定义页面默认图标（registerPage 未传 icon 时使用） */
 const CUSTOM_TAB_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg>';
 
-/* 子插件 registerPage(icon=) 可用的命名 SVG 图标（与主面板 tab 同一套描边风格）；
-   icon 值命中表内名称则渲染 SVG，否则按纯文本字符/emoji 处理 */
+/* 子插件 registerPage(icon=) 可用的命名 SVG 图标（与主面板 tab 同一套描边风格）。
+   命名表查询用 hasOwnProperty：防 "constructor" 等原型链键名误命中。
+   子插件只能传名字查表、不能传 SVG 本身，避免向主面板注入任意标记 */
 const CUSTOM_TAB_ICONS = {
   model: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg>',
   bot: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 8V4M9 4h6"/><path d="M9 13v2M15 13v2"/></svg>',
@@ -3345,8 +3349,50 @@ const CUSTOM_TAB_ICONS = {
   shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
   spark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9L19 15z"/></svg>',
   gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
-  chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 15v-4M12 15V8M17 15v-6"/></svg>'
+  chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 15v-4M12 15V8M17 15v-6"/></svg>',
+  home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>',
+  user: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
+  users: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
+  server: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 6h.01M6 18h.01"/></svg>',
+  database: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>',
+  map: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M1 6v16l7-4 8 4 7-4V2l-7 4-8-4-7 4z"/><path d="M8 2v16M16 6v16"/></svg>',
+  box: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m3.3 7 8.7 5 8.7-5M12 22V12"/></svg>',
+  gift: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="8" width="18" height="4" rx="1"/><path d="M12 8v13"/><path d="M19 12v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7"/><path d="M7.5 8a2.5 2.5 0 0 1 0-5C11 3 12 8 12 8s1-5 4.5-5a2.5 2.5 0 0 1 0 5"/></svg>',
+  trophy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/></svg>',
+  crown: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m3 7 4 4 5-6 5 6 4-4v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
+  coin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 18V6"/></svg>',
+  fire: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>',
+  zap: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>',
+  heart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>',
+  star: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z"/></svg>',
+  bell: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>',
+  clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>',
+  calendar: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>',
+  music: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>',
+  image: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>',
+  search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>',
+  link: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>',
+  lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
+  book: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>',
+  code: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m16 18 6-6-6-6"/><path d="m8 6-6 6 6 6"/></svg>',
+  terminal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></svg>',
+  globe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>'
 };
+
+/** 子插件页面图标 HTML（侧栏 / 底栏 tab / 「其它」面板三处共用）：
+    1. 命中命名表 → 与主面板同风格的 SVG（子插件只能传名字查表，不能传 SVG 本身）；
+    2. 含 emoji / 非 ASCII 字符 → span.icon-text 按系统 emoji 字体渲染字符
+       （esc() 转义防注入；纯 ASCII 文本不落此分支，传错图标名时不会显示难看的错误文本）；
+    3. 其它（未传 / 纯 ASCII 未知值）→ 默认四方块 SVG。 */
+function customIconHtml(icon) {
+  if (icon && Object.prototype.hasOwnProperty.call(CUSTOM_TAB_ICONS, icon)) {
+    return CUSTOM_TAB_ICONS[icon];
+  }
+  if (icon && /[^\u0000-\u007F]/.test(icon)) {
+    return `<span class="icon-text">${esc(String(icon))}</span>`;
+  }
+  return CUSTOM_TAB_ICON_SVG;
+}
 
 async function loadCustomPages() {
   let pages = [];
@@ -3357,11 +3403,12 @@ async function loadCustomPages() {
 
   const nav_ = document.getElementById("custom-nav");
   if (nav_) {
-    // 桌面侧栏空间充足：无论注册到 tab 还是「其它」，全部展示
+    // 桌面侧栏空间充足：无论注册到 tab 还是「其它」，全部展示。
+    // 图标与底栏 tab / 「其它」面板同源（customIconHtml）：命名 SVG / 字符图标 / 默认 SVG
     nav_.innerHTML = pages.map((p) =>
       `<button class="nav-item custom-nav-btn" data-page="custom-${esc(p.id)}"
         data-custom-url="${esc(p.url)}" data-custom-title="${esc(p.title)}">
-        ${MORE_ICON_SVG}
+        ${customIconHtml(p.icon)}
         ${esc(p.title)}</button>`).join("");
   }
 
@@ -3382,14 +3429,8 @@ async function loadCustomPages() {
       btn.dataset.customUrl = p.url || "";
       btn.dataset.customTitle = p.title || "";
       btn.title = p.title || "";
-      // 命名图标 → 同风格 SVG；否则默认 SVG；显式传入的其它短文本按字符图标渲染
-      btn.innerHTML = CUSTOM_TAB_ICONS[p.icon] || CUSTOM_TAB_ICON_SVG;
-      if (p.icon && !CUSTOM_TAB_ICONS[p.icon]) {
-        const iconEl = document.createElement("span");
-        iconEl.className = "tab-icon-text";
-        iconEl.textContent = String(p.icon);
-        btn.querySelector("svg")?.replaceWith(iconEl);
-      }
+      // 图标渲染与桌面侧栏 / 「其它」面板同源（customIconHtml）
+      btn.innerHTML = customIconHtml(p.icon);
       const lbl = document.createElement("span");
       lbl.textContent = p.title || "";
       btn.appendChild(lbl);
@@ -3405,7 +3446,7 @@ async function loadCustomPages() {
       ? sheetPages.map((p) =>
           `<button class="more-item custom-more-btn" data-page="custom-${esc(p.id)}"
             data-custom-url="${esc(p.url)}" data-custom-title="${esc(p.title)}">
-            ${MORE_ICON_SVG}<span>${esc(p.title)}</span></button>`).join("")
+            ${customIconHtml(p.icon)}<span>${esc(p.title)}</span></button>`).join("")
       : "";
   }
   const moreCustom = document.getElementById("more-sheet-custom");
@@ -5397,8 +5438,16 @@ function adapterNameCancel() {
 
 /* ---------------- 密钥二次查看（眼睛按钮） ---------------- */
 
-const EYE_SHOW_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
-const EYE_HIDE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+/* 双图标常驻按钮内（.ico-eye / .ico-eye-off），CSS 按 data-shown 交叉过渡。
+   切换只改属性、不重建 DOM——innerHTML 瞬间替换图标会有生硬的闪变 */
+const EYE_SHOW_SVG = '<svg class="ico-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+const EYE_HIDE_SVG = '<svg class="ico-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+
+/** 同步眼睛按钮的展示状态属性（data-shown 驱动 CSS 图标过渡，aria-pressed 供读屏） */
+function setEyeState(btn, show) {
+  btn.dataset.shown = show ? "1" : "0";
+  btn.setAttribute("aria-pressed", show ? "true" : "false");
+}
 
 /** 本地明文切换（登录页/配置页密码框）：仅切换输入框自身可见性，不请求服务端 */
 function togglePwVisibility(btn) {
@@ -5407,22 +5456,31 @@ function togglePwVisibility(btn) {
   if (!input || !btn) return;
   const show = btn.dataset.shown !== "1";
   input.type = show ? "text" : "password";
-  btn.dataset.shown = show ? "1" : "0";
-  btn.innerHTML = show ? EYE_HIDE_SVG : EYE_SHOW_SVG;
+  setEyeState(btn, show);
   // 同步 data-i18n-title：语言切换时 applyI18n 能重挂正确的提示
   const titleKey = show ? "login.hide_password" : "login.show_password";
   btn.setAttribute("data-i18n-title", titleKey);
   btn.title = t(titleKey);
 }
 
+/* 眼睛按钮按下时不抢走输入框焦点：焦点环不消失、光标位置保留，click 照常触发 */
+document.addEventListener("mousedown", (e) => {
+  if (e.target.closest(".secret-eye")) e.preventDefault();
+});
+
+/* 登录页密码框：Enter 直接登录（不再用内联 onkeydown） */
+document.getElementById("login-password").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") login();
+});
+
 /** 密钥输入框：带明文/掩码切换的眼睛按钮（明文经 /api/connections/reveal 获取） */
 function secretFieldHtml(inputId, placeholder, maskedValue, adapterId, key) {
   return `<div class="secret-field">
   <input type="password" id="${esc(inputId)}" placeholder="${esc(placeholder)}" value="${esc(maskedValue)}"
          autocomplete="new-password" data-masked="${esc(maskedValue)}" spellcheck="false">
-  <button type="button" class="secret-eye" data-shown="0"
+  <button type="button" class="secret-eye" data-shown="0" aria-pressed="false"
           title="${esc(t("connections.reveal_secret"))}"
-          data-input-id="${esc(inputId)}" data-adapter-id="${esc(adapterId)}" data-key="${esc(key)}">${EYE_SHOW_SVG}</button>
+          data-input-id="${esc(inputId)}" data-adapter-id="${esc(adapterId)}" data-key="${esc(key)}">${EYE_SHOW_SVG}${EYE_HIDE_SVG}</button>
 </div>`;
 }
 
@@ -5433,8 +5491,7 @@ async function toggleSecretReveal(btn, inputId, adapterId, key) {
     // 切回掩码
     input.type = "password";
     input.value = input.dataset.masked || "";
-    btn.dataset.shown = "0";
-    btn.innerHTML = EYE_SHOW_SVG;
+    setEyeState(btn, false);
     btn.title = t("connections.reveal_secret");
     return;
   }
@@ -5443,8 +5500,7 @@ async function toggleSecretReveal(btn, inputId, adapterId, key) {
     input.type = "text";
     input.value = (res.data && res.data.value) || "";
     input.dataset.masked = input.dataset.masked || "";
-    btn.dataset.shown = "1";
-    btn.innerHTML = EYE_HIDE_SVG;
+    setEyeState(btn, true);
     btn.title = t("connections.hide_secret");
   } catch (e) {
     toast(e.message || t("connections.reveal_failed"), true);

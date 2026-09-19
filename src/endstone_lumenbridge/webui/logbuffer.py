@@ -71,10 +71,8 @@ class LogBuffer:
 class LoggerTee:
     """线程安全的 logger 包装器：转发到原 logger 的同时写入 LogBuffer
 
-    重要：Endstone 的 logger 底层经由 replxx 写 Windows 控制台，
-    从非主线程直接调用会与控制台输入线程产生竞争导致服务端崩溃
-    （replxx::Terminal::write8 异常）。因此后台线程的日志一律通过
-    scheduler 调度回游戏主线程后再输出；LogBuffer 本身线程安全，直接写入。
+    Endstone logger 底层经 replxx 写 Windows 控制台，非主线程直接调用会与
+    输入线程竞争导致崩溃；后台线程日志经 scheduler 调回主线程再输出。
     """
 
     def __init__(
@@ -98,8 +96,7 @@ class LoggerTee:
 
         def write() -> None:
             try:
-                # 默认参数不能提前求值：底层 logger 缺 info 属性时
-                # getattr 的第三参会先抛 AttributeError，把本可成功的转发也吞掉
+                # getattr 带默认值兜底：logger 缺目标属性时不抛错，保住转发
                 fn = getattr(self._logger, forward, None)
                 if not callable(fn):
                     fn = getattr(self._logger, "info", None)
@@ -129,8 +126,7 @@ class LoggerTee:
         self._emit("debug", msg)
 
     def exception(self, msg: Any) -> None:
-        # 在调用现场捕获堆栈：转发到主线程后 sys.exc_info() 已丢失，
-        # 不捕获的话异常日志与 error 级别无异，排障信息全部丢失
+        # 调用现场捕获堆栈：转发到主线程后 sys.exc_info() 已丢失
         import traceback
 
         text = str(msg)

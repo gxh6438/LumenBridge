@@ -27,9 +27,7 @@ PROTECTED_PACKAGES = {
     "endstone-lumenbridge", "endstone_lumenbridge",
 }
 
-# pip 包名（归一化小写）与 Python import 名不一致的常见包映射，用于 check_dependency 检测。
-# 查找侧用 _normalize()（连字符→下划线），键必须同样归一化，否则带连字符的包
-# （python-dotenv / opencv-python / scikit-learn 等）永远查不到映射，快速路径失效。
+# pip 包名与 import 名不一致的常见映射；键须与 _normalize() 同样归一化（连字符→下划线）才能命中。
 PACKAGE_IMPORT_MAP: dict[str, str] = {
     key.replace("-", "_"): value
     for key, value in {
@@ -64,7 +62,7 @@ def _normalize(name: str) -> str:
     return name.strip().lower().replace("-", "_")
 
 
-# H17：版本约束运算符（=== 按 == 处理）
+# 版本约束运算符（=== 按 == 处理）
 _VERSION_OP_RE = re.compile(r"(===|==|~=|>=|<=|!=|>|<)\s*([A-Za-z0-9.*+!_\-]+)")
 
 
@@ -95,14 +93,11 @@ def _strip_trailing_zeros(key: tuple[tuple[int, str], ...]) -> tuple[tuple[int, 
 
 
 def _version_satisfies(installed: str, constraint: str) -> bool:
-    """H17：手写版本约束校验，支持 >= > <= < == != ~= 及逗号组合（如 ">=2.0,<3"）。
+    """手写版本约束校验，支持 >= > <= < == != ~= 及逗号组合（如 ">=2.0,<3"）。
 
-    - 版本按 . 和 - 拆段比较（纯手写元组比较，不依赖 packaging——嵌入式
-      环境可能没有该库）；
-    - ``~=`` 等价于 ``>=x.y`` 且 ``==x.*``（PEP 440 兼容发行版语义）；
-    - ``==x.*`` / ``!=x.*`` 按前缀匹配；
-    - 解析不了的运算符/片段保守放行（返回满足）并记 debug，
-      宁可放过也不因校验器缺陷误报"依赖缺失"。
+    纯元组比较不依赖 packaging（嵌入式环境可能没有）；``~=`` 等价于 ``>=x.y``
+    且 ``==x.*``；``==x.*`` / ``!=x.*`` 按前缀匹配；解析不了的片段保守放行，
+    宁可放过也不误报"依赖缺失"。
     """
     inst_key = _version_key(installed)
     inst_norm = _strip_trailing_zeros(inst_key)
@@ -148,12 +143,9 @@ class PipManager:
     def _pip_cmd(subcommand: list[str]) -> list[str]:
         """构建 pip 命令。
 
-        Endstone 嵌入式 Python 的用户 site-packages 位于
-        ``plugins/.local/lib/pythonX.Y/site-packages``（由 ``PYTHONUSERBASE``
-        指向 ``plugins/.local``）。uv 不尊重 ``PYTHONUSERBASE``，会把包装到
-        系统 Python 导致 ``import`` 失败，因此 install/uninstall 一律用
-        ``sys.executable -m pip`` + ``--user``。会修改环境的命令还需
-        ``--break-system-packages``（PEP 668）。
+        uv 不尊重 ``PYTHONUSERBASE``，会把包装到系统 Python 导致 ``import`` 失败，
+        因此 install/uninstall 一律用 ``sys.executable -m pip`` + ``--user``
+        （装到 ``plugins/.local``），并加 ``--break-system-packages``（PEP 668）。
         """
         pip_args = list(subcommand)
         if pip_args and pip_args[0] in ("install", "uninstall") and "--break-system-packages" not in pip_args:
@@ -164,8 +156,7 @@ class PipManager:
         self.logger = logger
         cfg = config.get("pip", {}) if isinstance(config, dict) else {}
         self.enable: bool = bool(cfg.get("enable", True))
-        # 用 `or ""` 防 None：config.json 写 "index_url": null 时 str(None) 会得到
-        # 字符串 "None" 被 pip 当作 URL，导致安装失败
+        # 用 or "" 防 None：index_url 为 null 时 str(None) 会得到 "None" 被当 URL
         self.index_url: str = str(cfg.get("index_url") or "")
         try:
             self.timeout: int = int(cfg.get("timeout") or 300)
@@ -185,7 +176,6 @@ class PipManager:
                 dirs.append(user_site)
         except Exception:
             pass
-        # 去重并保持顺序
         seen: set[str] = set()
         ordered: list[str] = []
         for d in dirs:
@@ -196,19 +186,11 @@ class PipManager:
 
     @staticmethod
     def _find_spec_disk(name: str) -> Any:
-        """检测包是否真实安装于磁盘，全程不触碰 sys.modules（M23）。
+        """检测包是否真实安装于磁盘，全程不触碰 sys.modules（并发 import 下无竞态）。
 
-        旧实现为绕过 sys.modules 缓存会临时 pop 顶层模块再恢复——在并发
-        import 场景存在竞态（弹出/恢复窗口内其他线程可能读到半状态）。现改为
-        纯磁盘判定，按顺序：
-
-        1. ``importlib.metadata.distribution(name)`` 存在 → 已安装（返回
-           Distribution 对象，调用方仅判真值；pip uninstall 后即消失）；
-        2. 找不到 distribution 时回退扫描 site-packages 目录下
-           ``name*.dist-info`` / ``name*.egg-info`` 目录存在性；
-        3. 仍找不到时最后检查 site-packages 下的顶层模块/包文件
-           （``name/__init__.py`` 或 ``name.py``），覆盖 pip 名与 import 名
-           不一致且未在 PACKAGE_IMPORT_MAP 登记的包（如 cv2）。
+        依次尝试：1. ``importlib.metadata.distribution``；2. site-packages 下
+        ``name*.dist-info`` / ``name*.egg-info`` 目录；3. 顶层模块/包文件
+        （``name/__init__.py`` 或 ``name.py``，覆盖未登记的 pip/import 名差异包）。
         """
         if not name:
             return None
@@ -243,13 +225,9 @@ class PipManager:
                     return True
             except Exception:
                 continue
-        # 4) PathFinder 磁盘查找终局回退：覆盖 vendored 库（如内置 lib/websockets，
-        #    经 sys.path 注入）与 PACKAGE_IMPORT_MAP / packages_distributions
-        #    索引都未覆盖的 import 名。
-        #    使用 PathFinder.find_spec 而非 importlib.util.find_spec，因为后者会
-        #    先查 sys.modules 缓存——当依赖曾被 import 后又被 pip uninstall 时，
-        #    pip 只删磁盘不清 sys.modules，find_spec 仍返回旧 __spec__（假阳性）。
-        #    PathFinder 直接扫 sys.path 做真实磁盘查找，不读 sys.modules。
+        # 4) 终局回退：PathFinder 只做真实磁盘查找，覆盖 vendored 库与索引未覆盖
+        #    的 import 名；不用 importlib.util.find_spec（先查 sys.modules，
+        #    pip uninstall 后残留旧 __spec__ 会假阳性）
         try:
             return importlib.machinery.PathFinder.find_spec(name)
         except (ImportError, ValueError, AttributeError):
@@ -257,10 +235,9 @@ class PipManager:
 
     @staticmethod
     def _metadata_version(name: str) -> str | None:
-        """H17：按分发（PyPI）名查询已安装版本；查不到返回 None（不抛异常）。
+        """按分发（PyPI）名查询已安装版本；查不到返回 None（不抛异常）。
 
-        优先用约束串中的包名直查 importlib.metadata（3.11+ 自带 PEP 503
-        归一化）；老版本解释器再补试连字符/下划线变体。
+        3.11+ 自带 PEP 503 归一化；老版本解释器补试连字符/下划线变体。
         """
         canonical = re.sub(r"[-_.]+", "-", name.lower())
         candidates = list(dict.fromkeys((name, canonical, canonical.replace("-", "_"))))
@@ -278,20 +255,12 @@ class PipManager:
 
     @staticmethod
     def check_dependency(package_spec: str) -> bool:
-        """检测某个依赖是否已安装（package_spec 可含版本号，如 'openai>=1.0.0'）。
+        """检测依赖是否已安装（package_spec 可含版本号，如 'openai>=1.0.0'）。
 
-        H17：manifest 声明了版本约束时，优先用**约束串中的分发（PyPI）名**
-        查 ``importlib.metadata`` 版本并逐条校验约束：
-
-        - 元数据命中且满足全部约束 → 已装，跳过安装；
-        - 元数据命中但不满足 → 视为缺失，调用方以完整约束串触发 pip
-          安装/升级（loader 报缺失依赖，WebUI/marketplace 传原始 spec 安装）；
-        - 元数据查不到（vendored / 无 dist-info 的包）→ 回退原有 import 名
-          磁盘检查（``_find_spec_disk``），保留现状行为。
-
-        无版本约束时维持原有判据：``_find_spec_disk`` 是唯一权威判据——实际
-        测试当前解释器能否从磁盘找到该包，metadata / ``pip list`` 仅用于发现
-        import 名（处理 pip 名与 import 名不一致的包）。
+        带版本约束时：元数据版本满足全部约束 → 已装；不满足 → 视为缺失，
+        由调用方以完整约束串触发安装/升级；元数据查不到（vendored / 无
+        dist-info）→ 回退 import 名磁盘检查。无约束时以 ``_find_spec_disk``
+        为唯一权威判据，metadata 仅用于发现 import 名。
         """
         if not isinstance(package_spec, str):
             return False
@@ -300,13 +269,13 @@ class PipManager:
             # 空字符串/纯空白视为未安装，避免恶意空声明绕过依赖检查
             return False
 
-        # H17：带版本约束 → 元数据版本 + 约束校验（distro 名优先于 import 名）
+        # 带版本约束 → 元数据版本 + 约束校验（分发名优先于 import 名）
         constraint = package_spec.strip()[len(name):].strip()
         if constraint and _VERSION_OP_RE.search(constraint):
             installed_version = PipManager._metadata_version(name)
             if installed_version is not None:
                 return _version_satisfies(installed_version, constraint)
-            # 元数据查不到：落到下方 import 名磁盘检查（保留现状行为）
+            # 元数据查不到 → 落到下方 import 名磁盘检查
 
         norm = _normalize(name)
         canonical = re.sub(r"[-_.]+", "-", name.lower())
@@ -321,8 +290,7 @@ class PipManager:
             if PipManager._find_spec_disk(import_name) is not None:
                 return True
 
-        # 通过 metadata 的「导入包 → 发行包」索引发现 PACKAGE_IMPORT_MAP 未覆盖的
-        # import 名候选，再用 _find_spec_disk 验证可导入性
+        # 经 metadata 的「导入包→发行包」索引发现 PACKAGE_IMPORT_MAP 未覆盖的候选
         try:
             packages_map = importlib.metadata.packages_distributions()
             for imp_name, dist_names in packages_map.items():
@@ -339,15 +307,10 @@ class PipManager:
     def refresh_dependency_cache() -> None:
         """刷新导入查找缓存，并确保 site-packages 在 sys.path 中。
 
-        pip/uv 在 WebUI 后台线程写入新分发包后，FileFinder 与元数据路径可能仍保留旧目录
-        快照，清理缓存后再检查避免把已安装依赖误报为缺失。嵌入式 Python（如 Endstone
-        打包的解释器）可能不会把 ``site.getsitepackages()`` 和
-        ``site.getusersitepackages()`` 全部加入 ``sys.path``，pip 装包成功后子插件仍
-        ``import`` 失败的根因就在于此，这里显式补齐。
-
-        pip uninstall 只删磁盘文件不清 ``sys.modules``，曾 import 过的依赖会以旧模块
-        残留在 ``sys.modules`` 中。这里对磁盘上已不存在的模块做一次 ``sys.modules``
-        清理，使后续 ``_find_spec_disk`` 的 PathFinder 判定不受残留影响。
+        pip/uv 后台写入新包后 FileFinder 与元数据可能保留旧快照，清理缓存避免
+        误报缺失；嵌入式 Python 可能不把全部 site-packages 加入 ``sys.path``，
+        这里显式补齐。pip uninstall 只删磁盘不清 ``sys.modules``，磁盘上已
+        不存在的残留模块也一并清理。
         """
         import site
 
@@ -365,11 +328,9 @@ class PipManager:
         except Exception:
             pass
 
-        # 清理 sys.modules 中磁盘文件已不存在的顶层第三方模块，
-        # 避免 PathFinder 因旧 __spec__ 缓存返回假阳性
+        # 清理磁盘文件已不存在的顶层第三方模块（防 PathFinder 假阳性）
         stale: list[str] = []
         for mod_name, mod in list(sys.modules.items()):
-            # 只清理顶层模块（无点的），且排除核心 / 标准库模块
             if "." in mod_name:
                 continue
             if mod_name in PROTECTED_PACKAGES or mod_name.startswith("_"):
@@ -377,10 +338,8 @@ class PipManager:
             spec = getattr(mod, "__spec__", None)
             if spec is None:
                 continue
-            # 检查模块的磁盘路径是否还存在
             origin = getattr(spec, "origin", None)
-            # 跳过内置 / 冻结模块（origin 为 "built-in" / "frozen"），
-            # 跳过非文件路径的 origin，只清理指向真实文件但文件已不存在的模块
+            # 跳过内置/冻结/非文件路径 origin，只清理指向真实文件但已不存在的模块
             if not origin or origin in ("built-in", "frozen") or not Path(origin).is_absolute():
                 continue
             if not Path(origin).exists():
@@ -430,9 +389,7 @@ class PipManager:
         invalid = [p for p in packages if not self._is_valid_package_arg(p)]
         if invalid:
             return False, _t("pip.invalid_package_arg", packages=", ".join(invalid)), []
-        # uv pip 不支持 pip 的 --report 参数，而预检必须得到结构化 JSON 才能可靠识别
-        # 受保护依赖；因此无论正式安装器是否使用 uv，预检都通过同一解释器的标准 pip
-        # 执行，且显式处理 PEP 668。
+        # uv 不支持 --report，预检必须用标准 pip 拿结构化 JSON 才能识别受保护依赖
         cmd = [
             sys.executable, "-m", "pip", "install", "--break-system-packages",
             "--dry-run", "--report", "-", "--quiet", "--",
@@ -446,8 +403,7 @@ class PipManager:
         if upgrade:
             cmd.insert(-1, "--upgrade")
         cmd.extend(packages)
-        # M24：预检超时上限从 60s 放宽到 180s——慢网络/大依赖树解析容易超 60s；
-        # 用户配置 pip.timeout > 60 时取 min(用户值, 180)，否则维持原 min(用户值, 60)
+        # 预检超时上限 180s：慢网络/大依赖树解析易超 60s，用户配置更低时取更小值
         precheck_timeout = (
             min(self.timeout, 180) if self.timeout > 60 else min(self.timeout, 60)
         )
@@ -457,9 +413,7 @@ class PipManager:
                 timeout=precheck_timeout,
             )
         except subprocess.TimeoutExpired:
-            # M24：预检超时 ≠ 检测到真冲突（慢网络/解析慢而已）。记 warning 后
-            # 放行安装，不再直接拒绝；受保护包防线仍在：uninstall 侧拒绝 +
-            # 预检报告解析失败路径依旧返回 False
+            # 预检超时≠真冲突（慢网络/解析慢），放行安装；受保护包防线仍在 uninstall 侧
             self.logger.warning(
                 f"pip dry-run 预检超时（上限 {precheck_timeout}s），已跳过冲突预检并放行安装"
             )
@@ -469,8 +423,7 @@ class PipManager:
 
         if result.returncode != 0:
             combined = result.stdout + result.stderr
-            # pip<22.0 不支持 --report/--dry-run：预检降级跳过（安装照常执行，
-            # 受保护包在 uninstall 侧仍有防线），避免旧 pip 环境下完全无法安装
+            # pip<22.0 不支持 --report/--dry-run：降级跳过预检，避免旧环境无法安装
             lowered = combined.lower()
             if ("--report" in combined or "--dry-run" in combined) and (
                 "unknown option" in lowered or "no such option" in lowered
@@ -491,7 +444,7 @@ class PipManager:
                 if pkg_name in protected_norm:
                     conflicts.append(meta.get("name", pkg_name))
         except (json.JSONDecodeError, ValueError, AttributeError) as exc:
-            # 预检报告无法验证时绝不继续安装，否则核心依赖冲突检测形同虚设
+            # 报告无法验证时绝不继续安装，否则冲突检测形同虚设
             return False, _t("pip.dry_run_failed", error=exc), []
 
         if conflicts:
@@ -518,15 +471,11 @@ class PipManager:
         if invalid:
             return False, _t("pip.invalid_package_arg", packages=", ".join(invalid))
 
-        # M24：dry_run 预检超时时返回 (True, "", [])，此处不再因预检超时而中断，
-        # 继续执行正式安装；真正的冲突/参数错误仍会在此被拦截
         safe, reason, _conflicts = self.dry_run(packages, upgrade=upgrade)
         if not safe:
             return False, reason
 
-        # -i 必须在 -- 之前（-- 后的参数 pip 不再解析为选项）；--user 让包装到
-        # site.getusersitepackages()（PYTHONUSERBASE 指向 plugins/.local），与
-        # LumenBridge 自身所在目录一致，子插件 import 即可命中
+        # -i 必须在 -- 之前；--user 装到 plugins/.local，与 LumenBridge 同目录，子插件 import 即可命中
         base_cmd = PipManager._pip_cmd(["install", "--no-input", "--progress-bar", "off", "--user"])
         if self.index_url:
             base_cmd.extend(["-i", self.index_url])
@@ -538,8 +487,7 @@ class PipManager:
         if on_log:
             on_log(_t("pip.installing", packages=" ".join(packages)))
 
-        # 流式执行：逐行读取 pip 输出实时回调 on_log，
-        # 安装市场插件的依赖时前端进度弹窗能同步看到 Collecting/Downloading/Installing 过程
+        # 流式逐行回调 on_log，前端进度弹窗可实时看到安装过程
         stdout_tail: list[str] = []
         stderr_lines: list[str] = []
         try:
@@ -562,8 +510,7 @@ class PipManager:
         stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
         stderr_thread.start()
 
-        # 看门狗兜底超时：逐行读 stdout 期间进程挂起不吐输出时，wait(timeout) 永远到不了，
-        # 由定时器强杀进程，读循环随管道 EOF 自然结束
+        # 看门狗兜底：进程挂起不吐输出时由定时器强杀，读循环随管道 EOF 结束
         timed_out = threading.Event()
 
         def _kill_on_timeout() -> None:
@@ -583,9 +530,7 @@ class PipManager:
                     if not line:
                         continue
                     if on_log:
-                        # 回调异常（WebUI 连接断开等）不能中断读取循环：
-                        # 异常逃逸会让 finally 只取消看门狗而不结束子进程，
-                        # pip 在后台继续安装变成无人管理的半安装状态
+                        # 回调异常不能中断读取循环，否则 pip 变成无人管理的后台半安装
                         try:
                             on_log(line)
                         except Exception:  # noqa: BLE001
@@ -614,13 +559,10 @@ class PipManager:
                 on_log(line)
 
         if process.returncode == 0:
-            # pip 退出码成功不等于当前运行中的解释器已可导入；立即在同一解释器验证，
-            # 把环境目标错误或陈旧查找缓存转为可行动错误
+            # 退出码成功≠当前解释器可导入，立即验证把环境错误/陈旧缓存转为可行动信息
             unavailable = self.missing_dependencies(packages)
             if unavailable:
-                # pip 已报告成功但 importlib 仍未检测到，通常发生在嵌入式 Python 或
-                # 特殊 venv（importlib 缓存滞后）而非真正失败；返回成功但附警告，
-                # 子插件加载时若 import 失败会给出准确的 ModuleNotFoundError
+                # 仍未检测到多为嵌入式 Python/venv 缓存滞后而非真失败：返回成功但附警告
                 msg = _t("pip.install_success", packages=" ".join(packages))
                 msg += _t("pip.install_not_visible_warning", packages=", ".join(unavailable))
                 return True, msg

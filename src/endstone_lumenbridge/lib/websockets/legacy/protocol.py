@@ -7,15 +7,14 @@ import logging
 import random
 import ssl
 import struct
-import sys
 import time
 import traceback
 import uuid
 import warnings
+import weakref
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Iterable, Mapping
 from typing import Any, Callable, Deque, cast
 
-from ..asyncio.compatibility import asyncio_timeout
 from ..datastructures import Headers
 from ..exceptions import (
     ConnectionClosed,
@@ -27,19 +26,19 @@ from ..exceptions import (
 )
 from ..extensions import Extension
 from ..frames import (
+    BINARY as OP_BINARY,
+    CLOSE as OP_CLOSE,
+    CONT as OP_CONT,
     OK_CLOSE_CODES,
-    OP_BINARY,
-    OP_CLOSE,
-    OP_CONT,
-    OP_PING,
-    OP_PONG,
-    OP_TEXT,
+    PING as OP_PING,
+    PONG as OP_PONG,
+    TEXT as OP_TEXT,
     Close,
     CloseCode,
     Opcode,
 )
 from ..protocol import State
-from ..typing import Data, LoggerLike, Subprotocol
+from ..typing import BytesLike, Data, DataLike, LoggerLike, Subprotocol
 from .framing import Frame, prepare_ctrl, prepare_data
 
 
@@ -207,7 +206,10 @@ class WebSocketCommonProtocol(asyncio.Protocol):
         # Logger or LoggerAdapter for this connection.
         if logger is None:
             logger = logging.getLogger("websockets.protocol")
-        self.logger: LoggerLike = logging.LoggerAdapter(logger, {"websocket": self})
+        self.logger: LoggerLike = logging.LoggerAdapter(
+            logger,
+            {"websocket": weakref.proxy(self)},
+        )
         """Logger for this connection."""
 
         # Track if DEBUG is enabled. Shortcut logging calls if it isn't.
@@ -229,8 +231,6 @@ class WebSocketCommonProtocol(asyncio.Protocol):
         # Copied from asyncio.FlowControlMixin
         self._paused = False
         self._drain_waiter: asyncio.Future[None] | None = None
-
-        self._drain_lock = asyncio.Lock()
 
         # This class implements the data transfer and closing handshake, which
         # are shared between the client-side and the server-side.
@@ -565,7 +565,7 @@ class WebSocketCommonProtocol(asyncio.Protocol):
 
     async def send(
         self,
-        message: Data | Iterable[Data] | AsyncIterable[Data],
+        message: DataLike | Iterable[DataLike] | AsyncIterable[DataLike],
     ) -> None:
         """
         Send a message.
@@ -624,24 +624,21 @@ class WebSocketCommonProtocol(asyncio.Protocol):
         while self._fragmented_message_waiter is not None:
             await asyncio.shield(self._fragmented_message_waiter)
 
-        # Unfragmented message -- this case must be handled first because
+        # Unfragmented message — this case must be handled first because
         # strings and bytes-like objects are iterable.
 
         if isinstance(message, (str, bytes, bytearray, memoryview)):
             opcode, data = prepare_data(message)
             await self.write_frame(True, opcode, data)
 
-        # Catch a common mistake -- passing a dict to send().
+        # Catch a common mistake — passing a dict to send().
 
         elif isinstance(message, Mapping):
             raise TypeError("data is a dict-like object")
 
-        # Fragmented message -- regular iterator.
+        # Fragmented message — regular iterator.
 
         elif isinstance(message, Iterable):
-            # Work around https://github.com/python/mypy/issues/6227
-            message = cast(Iterable[Data], message)
-
             iter_message = iter(message)
             try:
                 fragment = next(iter_message)
@@ -674,20 +671,20 @@ class WebSocketCommonProtocol(asyncio.Protocol):
                 self._fragmented_message_waiter.set_result(None)
                 self._fragmented_message_waiter = None
 
-        # Fragmented message -- asynchronous iterator
+        # Fragmented message — asynchronous iterator
 
         elif isinstance(message, AsyncIterable):
             # Implement aiter_message = aiter(message) without aiter
             # Work around https://github.com/python/mypy/issues/5738
             aiter_message = cast(
-                Callable[[AsyncIterable[Data]], AsyncIterator[Data]],
+                Callable[[AsyncIterable[DataLike]], AsyncIterator[DataLike]],
                 type(message).__aiter__,
             )(message)
             try:
                 # Implement fragment = anext(aiter_message) without anext
                 # Work around https://github.com/python/mypy/issues/5738
                 fragment = await cast(
-                    Callable[[AsyncIterator[Data]], Awaitable[Data]],
+                    Callable[[AsyncIterator[DataLike]], Awaitable[DataLike]],
                     type(aiter_message).__anext__,
                 )(aiter_message)
             except StopAsyncIteration:
@@ -751,7 +748,7 @@ class WebSocketCommonProtocol(asyncio.Protocol):
 
         """
         try:
-            async with asyncio_timeout(self.close_timeout):
+            async with asyncio.timeout(self.close_timeout):
                 await self.write_close_frame(Close(code, reason))
         except asyncio.TimeoutError:
             # If the close frame cannot be sent because the send buffers
@@ -759,7 +756,7 @@ class WebSocketCommonProtocol(asyncio.Protocol):
             # Fail the connection to shut down faster.
             self.fail_connection()
 
-        # If no close frame is received within the timeout, asyncio_timeout()
+        # If no close frame is received within the timeout, asyncio.timeout()
         # cancels the data transfer task and raises TimeoutError.
 
         # If close() is called multiple times concurrently and one of these
@@ -769,7 +766,7 @@ class WebSocketCommonProtocol(asyncio.Protocol):
         try:
             # If close() is canceled during the wait, self.transfer_data_task
             # is canceled before the timeout elapses.
-            async with asyncio_timeout(self.close_timeout):
+            async with asyncio.timeout(self.close_timeout):
                 await self.transfer_data_task
         except (asyncio.TimeoutError, asyncio.CancelledError):
             pass
@@ -790,7 +787,7 @@ class WebSocketCommonProtocol(asyncio.Protocol):
         """
         await asyncio.shield(self.connection_lost_waiter)
 
-    async def ping(self, data: Data | None = None) -> Awaitable[float]:
+    async def ping(self, data: DataLike | None = None) -> Awaitable[float]:
         """
         Send a Ping_.
 
@@ -849,7 +846,7 @@ class WebSocketCommonProtocol(asyncio.Protocol):
 
         return asyncio.shield(pong_waiter)
 
-    async def pong(self, data: Data = b"") -> None:
+    async def pong(self, data: DataLike = b"") -> None:
         """
         Send a Pong_.
 
@@ -1027,10 +1024,12 @@ class WebSocketCommonProtocol(asyncio.Protocol):
 
         # Shortcut for the common case - no fragmentation
         if frame.fin:
-            return frame.data.decode() if text else frame.data
+            if isinstance(frame.data, memoryview):
+                raise AssertionError("only compressed outgoing frames use memoryview")
+            return frame.data.decode() if text else bytes(frame.data)
 
         # 5.4. Fragmentation
-        fragments: list[Data] = []
+        fragments: list[DataLike] = []
         max_size = self.max_size
         if text:
             decoder_factory = codecs.getincrementaldecoder("utf-8")
@@ -1154,7 +1153,7 @@ class WebSocketCommonProtocol(asyncio.Protocol):
             self.logger.debug("< %s", frame)
         return frame
 
-    def write_frame_sync(self, fin: bool, opcode: int, data: bytes) -> None:
+    def write_frame_sync(self, fin: bool, opcode: int, data: BytesLike) -> None:
         frame = Frame(fin, Opcode(opcode), data)
         if self.debug:
             self.logger.debug("> %s", frame)
@@ -1166,12 +1165,8 @@ class WebSocketCommonProtocol(asyncio.Protocol):
 
     async def drain(self) -> None:
         try:
-            # drain() cannot be called concurrently by multiple coroutines.
-            # See https://github.com/python/cpython/issues/74116 for details.
-            # This workaround can be removed when dropping Python < 3.10.
-            async with self._drain_lock:
-                # Handle flow control automatically.
-                await self._drain()
+            # Handle flow control automatically.
+            await self._drain()
         except ConnectionError:
             # Terminate the connection if the socket died.
             self.fail_connection()
@@ -1180,7 +1175,7 @@ class WebSocketCommonProtocol(asyncio.Protocol):
             await self.ensure_open()
 
     async def write_frame(
-        self, fin: bool, opcode: int, data: bytes, *, _state: int = State.OPEN
+        self, fin: bool, opcode: int, data: BytesLike, *, _state: int = State.OPEN
     ) -> None:
         # Defensive assertion for protocol compliance.
         if self.state is not _state:  # pragma: no cover
@@ -1190,7 +1185,9 @@ class WebSocketCommonProtocol(asyncio.Protocol):
         self.write_frame_sync(fin, opcode, data)
         await self.drain()
 
-    async def write_close_frame(self, close: Close, data: bytes | None = None) -> None:
+    async def write_close_frame(
+        self, close: Close, data: BytesLike | None = None
+    ) -> None:
         """
         Write a close frame if and only if the connection state is OPEN.
 
@@ -1233,18 +1230,20 @@ class WebSocketCommonProtocol(asyncio.Protocol):
             while True:
                 await asyncio.sleep(self.ping_interval)
 
-                self.logger.debug("% sending keepalive ping")
+                if self.debug:
+                    self.logger.debug("% sending keepalive ping")
                 pong_waiter = await self.ping()
 
                 if self.ping_timeout is not None:
                     try:
-                        async with asyncio_timeout(self.ping_timeout):
+                        async with asyncio.timeout(self.ping_timeout):
                             # Raises CancelledError if the connection is closed,
                             # when close_connection() cancels keepalive_ping().
                             # Raises ConnectionClosed if the connection is lost,
                             # when connection_lost() calls abort_pings().
                             await pong_waiter
-                        self.logger.debug("% received keepalive pong")
+                        if self.debug:
+                            self.logger.debug("% received keepalive pong")
                     except asyncio.TimeoutError:
                         if self.debug:
                             self.logger.debug("- timed out waiting for keepalive pong")
@@ -1283,6 +1282,8 @@ class WebSocketCommonProtocol(asyncio.Protocol):
             # Cancel the keepalive ping task.
             if hasattr(self, "keepalive_ping_task"):
                 self.keepalive_ping_task.cancel()
+                # Break reference cycle to allow immediate garbage collection.
+                del self.keepalive_ping_task
 
             # A client should wait for a TCP close from the server.
             if self.is_client and hasattr(self, "transfer_data_task"):
@@ -1353,7 +1354,7 @@ class WebSocketCommonProtocol(asyncio.Protocol):
         """
         if not self.connection_lost_waiter.done():
             try:
-                async with asyncio_timeout(self.close_timeout):
+                async with asyncio.timeout(self.close_timeout):
                     await asyncio.shield(self.connection_lost_waiter)
             except asyncio.TimeoutError:
                 pass
@@ -1372,7 +1373,7 @@ class WebSocketCommonProtocol(asyncio.Protocol):
 
         This requires:
 
-        1. Stopping all processing of incoming data, which means cancelling
+        1. Stopping all processing of incoming data, which means canceling
            :attr:`transfer_data_task`. The close code will be 1006 unless a
            close frame was received earlier.
 
@@ -1471,7 +1472,8 @@ class WebSocketCommonProtocol(asyncio.Protocol):
 
         """
         self.state = State.CLOSED
-        self.logger.debug("= connection is CLOSED")
+        if self.debug:
+            self.logger.debug("= connection is CLOSED")
 
         self.abort_pings()
 
@@ -1544,7 +1546,7 @@ class WebSocketCommonProtocol(asyncio.Protocol):
 
 def broadcast(
     websockets: Iterable[WebSocketCommonProtocol],
-    message: Data,
+    message: DataLike,
     raise_exceptions: bool = False,
 ) -> None:
     """
@@ -1575,9 +1577,9 @@ def broadcast(
     errors on connections where the closing handshake is in progress.
 
     :func:`broadcast` ignores failures to write the message on some connections.
-    It continues writing to other connections. On Python 3.11 and above, you may
-    set ``raise_exceptions`` to :obj:`True` to record failures and raise all
-    exceptions in a :pep:`654` :exc:`ExceptionGroup`.
+    It continues writing to other connections. You may set ``raise_exceptions``
+    to :obj:`True` to record failures and raise all exceptions in a :pep:`654`
+    :exc:`ExceptionGroup`.
 
     While :func:`broadcast` makes more sense for servers, it works identically
     with clients, if you have a use case for opening connections to many servers
@@ -1596,8 +1598,6 @@ def broadcast(
         raise TypeError("data must be str or bytes-like")
 
     if raise_exceptions:
-        if sys.version_info[:2] < (3, 11):  # pragma: no cover
-            raise ValueError("raise_exceptions requires at least Python 3.11")
         exceptions = []
 
     opcode, data = prepare_data(message)
@@ -1626,11 +1626,7 @@ def broadcast(
             else:
                 websocket.logger.warning(
                     "skipped broadcast: failed to write message: %s",
-                    traceback.format_exception_only(
-                        # Remove first argument when dropping Python 3.9.
-                        type(write_exception),
-                        write_exception,
-                    )[0].strip(),
+                    traceback.format_exception_only(write_exception)[0].strip(),
                 )
 
     if raise_exceptions and exceptions:

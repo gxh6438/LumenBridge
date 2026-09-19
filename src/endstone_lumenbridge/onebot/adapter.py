@@ -22,7 +22,6 @@ from .message import format_message
 websockets = import_websockets()
 
 # WebSocket 握手身份标识：QQ 开放平台等网关据此显示客户端名称
-# （未设置时会显示“未知 WebSocket”）
 USER_AGENT = f"LumenBridge/{__version__} (Endstone)"
 
 API_TIMEOUT = 10.0
@@ -60,8 +59,7 @@ class OneBotAdapter:
         self.listen_port = listen_port
         self.access_token = access_token
         self.bot_qq = bot_qq
-        # 多适配器元数据：id 对应 connections.json 卡片；type 为 websocket
-        #（直连协议端）或 astrbot（AstrBot 插件端，协议同为 OneBot v11）
+        # 多适配器元数据：id 对应 connections.json 卡片，type 为 websocket 或 astrbot
         self.adapter_id = adapter_id
         self.adapter_name = adapter_name
         self.adapter_type = adapter_type
@@ -76,17 +74,15 @@ class OneBotAdapter:
         self._ws: Any = None
         self._server: Any = None
         self._clients: set[Any] = set()
-        # 反向模式下是否已广播 bot.online：实例级标志保证多客户端
-        # 场景 online/offline 对称（最后一个客户端断开时才广播下线）
+        # 反向模式下是否已广播 bot.online：实例级标志保证多客户端 online/offline 对称
         self._announced = False
         self._connected_event: asyncio.Event | None = None
         self._send_queue: asyncio.Queue | None = None
         self._pending: dict[str, asyncio.Future] = {}
         self._sender_task: asyncio.Task | None = None
         self._main_future: Any = None
-        # 入站事件派发队列 + 专用工作线程：下游处理器（正则命令执行等）
-        # 可能阻塞数十秒，在 WS 事件循环内同步派发会停跳心跳（20s/10s）
-        # 导致对端主动断连、发送队列积压丢包
+        # 入站派发队列 + 专用工作线程：处理器阻塞数十秒，在 WS 事件循环内
+        # 同步派发会停跳心跳导致对端断连
         self._dispatch_queue: "queue.Queue[dict[str, Any] | None] | None" = None
         self._dispatch_thread: threading.Thread | None = None
 
@@ -96,9 +92,7 @@ class OneBotAdapter:
             ws = self._ws
             if ws is None:
                 return False
-            # websockets>=13 新 asyncio API 用 state（State.OPEN==1）；
-            # 旧 legacy API 没有 state 只有 closed，取不到 state 时回退
-            # closed 判定，避免 legacy 实现下恒为 False
+            # 新版 websockets 用 state，旧 legacy API 只有 closed：回退判定避免恒为 False
             state = getattr(ws, "state", None)
             if state is not None:
                 return state == _WS_STATE_OPEN
@@ -114,6 +108,11 @@ class OneBotAdapter:
         """卡片展示名：适配器名称 + 连接模式。"""
         name = self.adapter_name or ("AstrBot" if self.adapter_type == "astrbot" else "WebSocket")
         return f"{name} ({self.mode_name})"
+
+    @staticmethod
+    def _is_loopback_host(host: str) -> bool:
+        """判定监听地址是否仅本机可达（localhost / IPv4 / IPv6 环回）。"""
+        return host in ("localhost", "::1") or (host.startswith("127.") and host.count(".") == 3)
 
     def start(self) -> None:
         """启动独立事件循环线程并提交连接任务"""
@@ -139,12 +138,8 @@ class OneBotAdapter:
     def _dispatch_worker(self) -> None:
         """串行消费入站事件派发队列（FIFO 保序）。
 
-        事件总线处理器链（正则命令执行最长可阻塞 command_timeout，默认
-        5s 上限 60s）绝不能在 WS 事件循环线程内同步执行：心跳会停跳，
-        对端按 ping_timeout 断开健康连接并触发无谓重连。
-
-        退出条件双保险：收到哨兵包 或 _running 已置 False（stop() 中
-        哨兵在队满时可能被 put_nowait 丢弃，靠 _running 轮询兜底退出）。
+        处理器绝不能在 WS 事件循环线程内同步执行（心跳停跳、对端断连）。
+        退出双保险：哨兵包 或 _running 置 False（哨兵可能队满被丢）。
         """
         q = self._dispatch_queue
         if q is None:
@@ -212,7 +207,7 @@ class OneBotAdapter:
             loop.call_soon_threadsafe(loop.stop())
         if self._thread and self._thread is not threading.current_thread():
             self._thread.join(timeout=5)
-        # 停止派发工作线程：哨兵入队（队满时让位丢弃，正在关停无所谓）
+        # 哨兵停止派发线程（队满被丢也有 _running 兜底）
         if self._dispatch_queue is not None:
             try:
                 self._dispatch_queue.put_nowait(None)
@@ -314,8 +309,7 @@ class OneBotAdapter:
                 was_online = self._ws is not None
                 self._ws = None
                 self._connected_event.clear()
-                # 断线时通知资料卡片下线（插件侧把 connected 置回 False）；
-                # 连接从未建立成功的尝试不触发，避免重复下线通知
+                # 断线通知下线；连接从未建立成功的不触发，避免重复通知
                 if was_online:
                     try:
                         self.bus.emit("bot.offline", self)
@@ -362,8 +356,7 @@ class OneBotAdapter:
                 self._clients.discard(ws)
                 if not self._clients:
                     self._connected_event.clear()
-                    # 最后一个客户端断开：通知资料卡片下线
-                    # （仅此前广播过上线，保持 online/offline 对称）
+                    # 最后一个客户端断开：仅广播过上线时通知下线，保持对称
                     if self._announced:
                         self._announced = False
                         try:
@@ -381,6 +374,11 @@ class OneBotAdapter:
                 self.logger.info(
                     _t("adapter.reverse_started", host=self.listen_host, port=self.listen_port)
                 )
+                if not self.access_token and not self._is_loopback_host(self.listen_host):
+                    self.logger.warning(
+                        _t("adapter.reverse_insecure_warning",
+                           host=self.listen_host, port=self.listen_port)
+                    )
                 await self._server.wait_closed()
             except asyncio.CancelledError:
                 break
@@ -407,13 +405,11 @@ class OneBotAdapter:
         if echo is not None:
             echo_key = str(echo)  # 统一字符串键，与 call_api 写入侧一致
             fut = self._pending.pop(echo_key, None)
-            # 仅当该 echo 仍对应等待中的 Future 才派发；fut 为 None 说明
-            # 已超时/取消被 pop 或未知 echo，迟到的回执不再 emit，避免误触发
+            # fut 为 None 说明已超时/取消或未知 echo，迟到回执不再派发
             if fut is not None:
                 retcode = data.get("retcode")
                 if data.get("status") == "failed" or (retcode is not None and retcode != 0):
-                    # 失败回执与超时回执对调用方同为 None，这里留下
-                    # retcode/wording 日志作为排障依据
+                    # 失败与超时对调用方同为 None，留 retcode/wording 日志排障
                     self.logger.warning(
                         _t(
                             "adapter.api_failed",
@@ -426,18 +422,13 @@ class OneBotAdapter:
                     fut.set_result(data.get("data"))
                 self.bus.emit(f"packid_{echo}", data.get("data"))
 
-        # 注入来源适配器 id（下划线前缀 = LumenBridge 内部字段），分发器据此回查
-        # 适配器实例；onebot.pack 保持单参 (pack) 以兼容子插件监听约定
+        # 注入来源适配器 id 供分发器回查；onebot.pack 保持单参以兼容子插件
         if self.adapter_id and "_lumen_adapter_id" not in data:
             data["_lumen_adapter_id"] = self.adapter_id
         self._dispatch_pack(data)
 
     def _dispatch_pack(self, data: dict[str, Any]) -> None:
-        """把事件包交给派发工作线程（保序）；未启动时退化为同步派发。
-
-        未 start() 的实例（测试桩直接调 _dispatch_raw）没有派发队列，
-        同步派发保持旧行为。
-        """
+        """把事件包交给派发工作线程（保序）；未 start()（测试桩）退化为同步派发。"""
         q = self._dispatch_queue
         if q is None:
             self.bus.emit("onebot.pack", data)
@@ -445,7 +436,7 @@ class OneBotAdapter:
         try:
             q.put_nowait(data)
         except queue.Full:
-            # 派发积压超限：丢最旧保最新（与发送队列同策略），留日志排查
+            # 派发积压超限：丢最旧保最新（与发送队列同策略）
             try:
                 q.get_nowait()
                 q.put_nowait(data)
@@ -487,10 +478,8 @@ class OneBotAdapter:
     def _requeue_head(self, pack: dict[str, Any]) -> None:
         """将发送失败的包重新压回队首，保持消息顺序。
 
-        在同一队列对象上 drain → 重灌：本方法为同步代码块（无 await 点），
-        在事件循环线程内执行时具有原子性。**不替换 self._send_queue 引用**——
-        替换队列对象会与 send_pack / call_api 中已捕获队列引用的入队协程
-        并发交错，导致新包被写入孤儿队列而静默丢失。
+        同步代码块具原子性；不得替换 self._send_queue 引用，否则与已捕获
+        旧引用的入队协程交错，新包写入孤儿队列而丢失。
         """
         q = self._send_queue
         if q is None:
@@ -504,7 +493,7 @@ class OneBotAdapter:
                     break
             maxsize = q.maxsize or 0
             if maxsize and items and len(items) + 1 > maxsize:
-                # 重灌后超容量：丢弃最旧包并完成其 echo Future
+                # 重灌后超容量：丢最旧腾位
                 self._drop_pack(items.pop(0))
             q.put_nowait(pack)
             for it in items:
@@ -523,8 +512,7 @@ class OneBotAdapter:
                 continue
             except (asyncio.CancelledError, RuntimeError, GeneratorExit):
                 return
-            # 序列化失败（不可序列化对象 / 循环引用）时丢弃该包并记录：
-            # 此类毒包若重入队会永久阻塞发送队列，且异常外泄会终止常驻发送协程
+            # 毒包（不可序列化）直接丢弃：重入队会永久阻塞队列，异常外泄终止发送协程
             try:
                 text_pack = json.dumps(pack, ensure_ascii=False)
             except (TypeError, ValueError) as exc:
@@ -534,9 +522,7 @@ class OneBotAdapter:
                 if self.ws_type == 0 and self._ws is not None:
                     await self._ws.send(text_pack)
                 elif self.ws_type == 1 and self._clients:
-                    # 对每个反向客户端独立 try：单客户端故障不影响其他客户端；
-                    # 跟踪 sent_any，全部客户端失败时抛错触发外层重入队，
-                    # 避免消息静默丢失
+                    # 每客户端独立发送；全部失败才抛错重入队，避免静默丢失
                     sent_any = False
                     for client in list(self._clients):
                         try:
@@ -563,8 +549,7 @@ class OneBotAdapter:
             return
 
         async def _enqueue() -> None:
-            # 绑定局部队列引用：full 检查与 put 之间即使 _requeue_head 重排队列，
-            # 也始终作用于同一实例（重排不替换对象），不会把包写入孤儿队列
+            # 绑定局部队列引用：_requeue_head 重排不替换对象，避免写入孤儿队列
             q = self._send_queue
             if q is None:
                 return
@@ -593,8 +578,7 @@ class OneBotAdapter:
         if callback is None:
             self.send_pack(pack)
             return
-        # 始终生成新 echo 并浅拷贝 pack：复用外部传入的 echo 会覆盖 _pending
-        # 中已有的同 echo Future（echo 冲突），且不原地改写调用方字典
+        # 新 echo + 浅拷贝：避免 echo 冲突覆盖 pending Future，且不改写调用方字典
         echo = uuid.uuid4().hex
         pack = {**pack, "echo": echo}
 
@@ -613,8 +597,7 @@ class OneBotAdapter:
                 try:
                     callback(data)
                 except Exception:
-                    # 回调异常不能逃逸到事件循环：记录后吞掉，避免
-                    # "exception was never retrieved" 且中断发送协程
+                    # 回调异常不能逃逸到事件循环：记录后吞掉
                     self.logger.exception("OneBot API callback error")
             except asyncio.TimeoutError:
                 self._pending.pop(echo, None)

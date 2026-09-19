@@ -48,10 +48,7 @@ class EventTranslator:
             self.ad.bus.emit("bot.online", self.ad)
             return
         if event in ("GROUP_MESSAGE_CREATE", "GROUP_AT_MESSAGE_CREATE"):
-            # 全量群消息（需开通权限）与 @ 消息共用同一载荷结构；
-            # GROUP_AT_MESSAGE_CREATE 事件类型本身即「@机器人」信号：
-            # 官方服务端会把 @bot 前缀从 content 中剥离（正文中无任何痕迹），
-            # 内容扫描在 @ 消息场景恒为空，必须靠事件类型判定
+            # @ 消息事件类型即「@机器人」信号：官方会把 @bot 前缀从 content 中剥离，扫描正文恒漏
             await self._emit_group_message(data, at_bot=event == "GROUP_AT_MESSAGE_CREATE")
             return
         if event == "C2C_MESSAGE_CREATE":
@@ -70,20 +67,15 @@ class EventTranslator:
             self._emit_friend_change(data, "friend_del")
             return
         if event in ("GROUP_MSG_REJECT", "GROUP_MSG_RECEIVE"):
-            # 群管理员在机器人群资料页 关闭/开启「接收机器人主动消息」：
-            # 关闭后无法在该群主动发言（被动回复不受影响），静默丢弃
-            # 会让"机器人不说话"无从排查
+            # 群管理员开关「接收主动消息」：关闭后无法主动发言，静默丢弃无从排查
             self._emit_group_msg_switch(data, rejected=event == "GROUP_MSG_REJECT")
             return
         if event in ("C2C_MSG_REJECT", "C2C_MSG_RECEIVE"):
-            # C2C 版本：用户在机器人资料卡 关闭/开启「主动消息」推送开关。
-            # 同属 intent 1<<25；关闭后机器人无法主动私聊该用户
+            # C2C 版：用户开关「主动消息」推送；关闭后无法主动私聊该用户
             self._emit_c2c_msg_switch(data, rejected=event == "C2C_MSG_REJECT")
             return
         if event in ("AT_MESSAGE_CREATE", "MESSAGE_CREATE"):
-            # 频道 @ 消息（1<<30）与私域全量消息（1<<9，官方文档确认载荷相同）：
-            # 映射为群消息，domain="guild" 标记频道域，group_id 使用 channel_id；
-            # 下游按 domain/群列表过滤，不会混入群聊互通
+            # 频道 @（1<<30）与私域全量消息（1<<9）载荷相同：映射群消息，domain="guild" 隔离
             await self._emit_guild_message(data)
             return
         if event == "DIRECT_MESSAGE_CREATE":
@@ -91,19 +83,15 @@ class EventTranslator:
             await self._emit_guild_direct_message(data)
             return
         if event in ("PUBLIC_MESSAGE_DELETE", "DIRECT_MESSAGE_DELETE", "MESSAGE_DELETE"):
-            # 频道消息撤回：PUBLIC_*/MESSAGE_DELETE（私域）→ group_recall，
-            # DIRECT_* → friend_recall
+            # 频道撤回：PUBLIC_*/MESSAGE_DELETE → group_recall，DIRECT_* → friend_recall
             self._emit_guild_recall(data, friend=event == "DIRECT_MESSAGE_DELETE")
             return
         if event in ("GROUP_MEMBER_ADD", "GROUP_MEMBER_REMOVE"):
-            # 群成员进退群（订阅位 1<<24|1<<25 双订，见 constants）：OneBot v11
-            # 语义 group_increase/group_decrease 可表达，附 raw 原文
+            # 群成员进退群：映射 OneBot group_increase/group_decrease，附 raw
             self._emit_group_member_event(data, joined=event == "GROUP_MEMBER_ADD")
             return
         if event == "GROUP_JOIN_REQUEST":
-            # 用户申请加群（intent 1<<25 默认已订阅；机器人须为群管理员才能收到）：
-            # OneBot v11 语义 request.group.add，flag=join_request_id 供
-            # set_group_add_request 审批回传
+            # 申请加群：OneBot request.group.add，flag=join_request_id 供审批回传
             self._emit_group_join_request(data)
             return
         if event in ("GUILD_MEMBER_ADD", "GUILD_MEMBER_UPDATE", "GUILD_MEMBER_REMOVE"):
@@ -156,8 +144,7 @@ class EventTranslator:
             self.ad.logger.info(
                 _t("qqofficial.robot_added", group=group_openid, name=self.ad.display_name)
             )
-            # event_id 可作被动回复凭据（不消耗主动额度，借鉴 Gensokyo）：
-            # 机器人刚入群时的欢迎消息借此发送，不受主动消息频次限制
+            # event_id 可作被动回复凭据：入群欢迎消息借此发送，不受主动频次限制
             self.ad.credentials.cache_event_id(group_openid, data.get("event_id"))
         self._notice_pack("group_increase", "approve", data)
 
@@ -168,9 +155,7 @@ class EventTranslator:
             self.ad.logger.warning(
                 _t("qqofficial.robot_removed", group=group_openid, name=self.ad.display_name)
             )
-            # 移群清理：动态发现记录 + 该群全部回复凭据
-            # （被动池 / event_id / 补发栈），防止死群继续参与
-            # 广播与必败重试
+            # 移群清理：发现记录 + 全部凭据，防死群继续参与广播与必败重试
             self.ad.forget_group(group_openid)
         pack = self._base_pack(
             post_type="notice",
@@ -333,19 +318,14 @@ class EventTranslator:
         msg_id = str(data.get("id") or "")
         if not group_openid or not msg_id:
             return
-        # 动态学习群 openid：官方无群列表 API，未配置群列表时的全局
-        # 转发目标依赖流入事件发现（见 adapter.remember_group）
+        # 动态学习群 openid：官方无群列表 API，靠流入事件发现
         self.ad.remember_group(group_openid)
         author = data.get("author") or {}
         member_openid = str(author.get("member_openid") or "")
         nickname = str(author.get("username") or "").strip() or member_openid[:8]
-        # 按原始顺序解析 content：@其他成员 就地转 at 段（供 /get openid @xxx
-        # 等命令解析，且转发到游戏时 @ 保持在原位置），@机器人自身 触发标记剥离
+        # 按原始顺序解析：@其他成员 就地转 at 段，@机器人自身 剥离触发标记
         message, content = content_segments(data.get("content"), self_id=self.ad.app_id)
-        # @机器人 留痕：子插件据此判定 @ 唤醒。两个来源：
-        # 1) at_bot：GROUP_AT_MESSAGE_CREATE 事件类型本身即 @ 信号（官方已
-        #    剥离 content 中 @bot 前缀，扫描正文恒漏）；2) 全量消息模式下
-        #    （GROUP_MESSAGE_CREATE）正文可能残留 @bot 文本链标记，兜底扫描
+        # @机器人 留痕：at_bot 即 @ 信号（正文恒漏），全量模式兜底扫描标记
         mention_self = at_bot or any(
             str((seg.get("data") or {}).get("qq") or "") == str(self.ad.app_id)
             for seg in mention_segments(data.get("content"))
@@ -409,9 +389,8 @@ class EventTranslator:
     async def _emit_guild_message(self, data: dict[str, Any]) -> None:
         """频道消息（AT_MESSAGE_CREATE 1<<30 / 私域 MESSAGE_CREATE 1<<9）→ OneBot 群消息。
 
-        两者载荷结构相同（官方文档确认，私域为全量消息无需@）。频道两级
-        结构取 channel_id 作 group_id；domain="guild" 标记频道域，下游按
-        群列表匹配自然隔离，不会混入 QQ 群互通。
+        两者载荷相同；channel_id 作 group_id，domain="guild" 标记频道域，
+        下游按群列表隔离。
         """
         msg_id = str(data.get("id") or "")
         channel_id = str(data.get("channel_id") or "")

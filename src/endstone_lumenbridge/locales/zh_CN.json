@@ -435,6 +435,7 @@
         "reply": {
             "already_bound": "你已绑定白名单：{xbox}",
             "invalid_format": "请输入正确的XboxID，格式：{keyword}<你的游戏ID>",
+            "invalid_name": "玩家名只能包含字母、数字、空格、下划线、连字符和点号（长度 1-32）",
             "xbox_taken": "该XboxID已被其他人绑定",
             "operation_in_progress": "该账号或玩家名的白名单操作正在进行，请稍后再试",
             "bind_failed_server": "绑定失败，服务器未能添加白名单：{detail}",
@@ -727,6 +728,7 @@
         "disconnected": "WebSocket 已断开, 将在 {delay:.1f} 秒后尝试第 {attempt} 次重连",
         "connection_error": "WebSocket 连接异常: {error}",
         "reverse_started": "反向 WebSocket 服务器已在 ws://{host}:{port} 开启",
+        "reverse_insecure_warning": "安全警告：反向 WebSocket 正在 {host}:{port} 上无鉴权监听，任何可达该端口的客户端均可注入伪造事件（可能触发管理员命令）。建议配置 access_token 或仅监听内网地址",
         "reverse_client_connected": "反向 WebSocket 已接受来自机器人 [{self_id}] 的连接",
         "reverse_client_disconnected": "反向 WebSocket 客户端已断开连接",
         "reverse_auth_failed": "反向 WS 客户端未提供正确的 Access Token，连接被拒绝",

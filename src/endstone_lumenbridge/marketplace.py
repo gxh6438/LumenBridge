@@ -65,9 +65,7 @@ def _version_tuple(value: str) -> tuple[int, ...]:
 
 
 def _is_newer(remote: str, local: str) -> bool:
-    # 框架更新检查用补 0 对齐比较（1.2 与 1.2.0 视为相等），段数差异
-    # 不应误报“有更新”导致反复提示下载。注意与 requires 约束比较的
-    # version_cmp（宽松元组口径，见 requires.py）是两套不同语义。
+    # 补 0 对齐比较（1.2 与 1.2.0 相等），避免段数差异误报“有更新”；与 requires 的 version_cmp 是两套语义
     ta, tb = _version_tuple(remote), _version_tuple(local)
     n = max(len(ta), len(tb))
     pa = ta + (0,) * (n - len(ta))
@@ -103,23 +101,16 @@ class MarketplaceClient:
         # 防止两个 WebUI 框架更新任务并发执行，导致 wheel 互相覆盖、备份目录错乱或暂存文件残留
         self._framework_update_lock = threading.Lock()
         self._last_checked: dict[str, dict[str, Any]] = {}
-        # 单飞合并：并发触发的更新检查（后台周期线程 + WebUI 手动检查）
-        # 复用同一次在途请求的结果，避免对市场发起重复网络请求与清单写入
+        # 单飞合并：并发更新检查复用同一次在途结果，避免重复网络请求
         self._check_flight_lock = threading.Lock()
         self._check_flight: dict[str, Any] | None = None
-        # 市场站点的匿名访客身份（LBMARKETVISITOR Cookie）：点赞状态与防刷计数
-        # 都绑定该身份。Python 客户端不自动管理 Cookie，若每次请求换一个身份，
-        # 点赞会变成"永远新增"且无法取消；因此持久化到插件数据目录。
+        # 访客身份（LBMARKETVISITOR Cookie）须持久化：每次换新身份会让点赞只增不减、无法取消
         self._visitor_token: str = ""
         self._visitor_lock = threading.Lock()
-        # 匿名写会话（LBMARKETSESSID Cookie + CSRF token）：点赞/举报无需
-        # 任何密钥，先访问市场页面建立匿名会话，再携带会话与 CSRF 头提交。
-        # PHP 会话有服务端过期时间，失效时自动刷新重试。
+        # 匿名写会话（Cookie + CSRF token）：点赞/举报无需密钥，服务端过期时自动刷新重试
         self._market_session: dict[str, str] = {}
         self._market_session_lock = threading.Lock()
-        # 市站路由形式探测："pretty" = /api/v1/... 直接路径（需主机支持
-        # rewrite）；"query" = index.php?lb_route=/api/v1/...（任何 PHP 主机
-        # 都可用）。"" = 尚未探测。探测结果绑定站点根地址，换站自动重置。
+        # 路由形式探测："pretty"=直接路径（需 rewrite），"query"=index.php?lb_route=（任何主机可用）；""=未探测，换站自动重置
         self._route_style: str = ""
         self._route_style_site: str = ""
 
@@ -198,15 +189,13 @@ class MarketplaceClient:
         if not value.startswith("/"):
             value = "/" + value
         root = self._site_root(base)
-        # 服务端返回的地址已自带 index.php?lb_route= 前缀（v3 修复版）：
-        # 直接挂站点根即可；再次包装会双重编码导致封面 404
+        # 已自带 index.php?lb_route= 前缀：直接挂站点根，再包装会双重编码 404
         if "index.php?lb_route=" in value.lower():
             return root + value
         if "index.php?lb_route=" in root.lower():
             # 用户显式配置 query 形式地址：root 已带 ?lb_route= 尾巴
             return root + value
-        # 探测到站点需要 query 形式路由（不支持 rewrite）：媒体文件同样要走
-        # index.php 入口，否则封面 404
+        # query 形式站点的媒体文件同样要走 index.php 入口，否则 404
         if base == "" and self._route_style == "query" and self._route_style_site == root:
             return root + "/index.php?lb_route=" + urllib.parse.quote(value, safe="/")
         return root + value
@@ -234,10 +223,9 @@ class MarketplaceClient:
         request = urllib.request.Request(url, headers=headers)
         limit = 8 * 1024 * 1024
         try:
-            # SSRF 防护不依赖对内网地址的额外校验：同主机白名单 + 重定向
-            # 主机固定 + 大小/类型限制已足够约束该代理端点。
+            # SSRF 防护靠同主机白名单 + 重定向主机固定 + 大小/类型限制
             with self._open(request) as response:
-                # H2：重定向不得离开配置的市场站点
+                # 重定向不得离开配置的市场站点
                 final_host = (urllib.parse.urlsplit(response.geturl()).hostname or "").lower()
                 if final_host != (site.hostname or "").lower():
                     raise RuntimeError("封面重定向到其它主机")
@@ -246,12 +234,12 @@ class MarketplaceClient:
                 ctype = str(response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
                 raw = response.read(limit + 1)
         except Exception as exc:  # noqa: BLE001
-            # H2：对外统一“下载失败”，不回显连接错误细节；完整异常仅记日志
+            # 对外统一“下载失败”，不回显连接错误细节
             self.logger.warning(f"[Market] 封面下载失败 url={url} error={exc!r}")
             raise MarketplaceError("下载失败") from exc
         if len(raw) > limit:
             raise MarketplaceError("封面图片超过大小限制")
-        # M1：SVG 可内嵌脚本构成 XSS，白名单收敛为位图格式
+        # SVG 可内嵌脚本构成 XSS，白名单只允许位图格式
         if ctype not in {"image/png", "image/jpeg", "image/gif", "image/webp"}:
             raise MarketplaceError("封面内容不是允许的图片类型")
         return ctype, raw
@@ -282,9 +270,7 @@ class MarketplaceClient:
                     with os.fdopen(fd, "w", encoding="utf-8") as handle:
                         handle.write(token)
                 except FileExistsError:
-                    # 文件已由他人创建：等待写入完成后回读。回读值必须通过同一
-                    # 格式校验——空（尚未写完）或非法（损坏数据）都不能用作身份；
-                    # 非法内容时用本进程的 token 截断重写
+                    # 他人已创建：回读须过同一格式校验（空=尚未写完），非法则重写
                     existing = self._read_token_with_retry(token_file)
                     if re.fullmatch(r"[A-Za-z0-9_-]{32,128}", existing):
                         token = existing
@@ -403,8 +389,7 @@ class MarketplaceClient:
                     error_code = str(err_payload["error"].get("code") or "")
             except (ValueError, AttributeError):
                 pass
-            # 404 且服务端未返回业务错误信息：可能是主机不支持 rewrite 导致
-            # pretty 路径不存在，用内部信号通知上层尝试 query 形式回退
+            # 404 且无业务错误：可能不支持 rewrite，用内部信号触发 query 形式回退
             if exc.code == 404 and not message:
                 raise _RouteNotFoundError() from exc
             raise MarketplaceError(message or f"市场服务返回 HTTP {exc.code}", code=error_code) from exc
@@ -436,9 +421,8 @@ class MarketplaceClient:
     def _ensure_market_session(self, *, force: bool = False) -> dict[str, str]:
         """获取匿名市场会话（LBMARKETSESSID Cookie + CSRF token）。
 
-        PHP 市场对点赞/举报写操作按会话校验 CSRF；匿名客户端先 GET 一次
-        社区页，从 Set-Cookie 取会话 ID、从 <body data-csrf="..."> 取令牌，
-        即可携带两者通过校验——全程无需任何密钥或登录身份。
+        先 GET 一次社区页，从 Set-Cookie 取会话、从 data-csrf 属性取令牌，
+        即可无密钥通过写操作的 CSRF 校验。
         """
         with self._market_session_lock:
             session = self._market_session
@@ -564,8 +548,7 @@ class MarketplaceClient:
                 continue
             if not isinstance(item.get("download_url"), str) or not isinstance(item.get("sha256"), str):
                 continue
-            # 显式挑最高版本：不依赖服务端返回顺序（旧实现取首个可用项，
-            # 服务端按时间倒序/乱序返回时会装到旧版本）
+            # 显式挑最高版本，不依赖服务端返回顺序
             if release is None or version_cmp(version, release_version) > 0:
                 release, release_version = item, version
         if release is None:
@@ -578,9 +561,8 @@ class MarketplaceClient:
     def _download_verified(self, url: str, sha256: str, *, expected_base: str = "", log=None, progress=None) -> str:
         """下载并校验 SHA-256；expected_base 用于指定主机 pin 的基准地址。
 
-        H20：默认 pin 到配置的市场 api_url（scheme+host 必须一致），使"哈希来源"
-        与"下载通道"解耦——市场端被篡改也无法把下载指向任意主机；
-        框架更新等其它 API 来源可显式传入自身 base。
+        默认 pin 到市场 api_url（scheme+host 必须一致），市场端被篡改也
+        无法把下载指向任意主机；其它 API 来源可显式传入自身 base。
         log / progress 可选回调用于前端进度展示。
         """
         log = log or (lambda _msg: None)
@@ -604,8 +586,7 @@ class MarketplaceClient:
         try:
             request = urllib.request.Request(url, headers={"User-Agent": "LumenBridge-Market/1"})
             with self._open(request) as response:
-                # H20：重定向后必须仍满足 allow_http 约束，且不得离开 pinned 主机
-                # （修复 HTTPS 下载被 30x 降级为 HTTP 绕过 allow_http=False 的路径）
+                # 重定向后仍须满足 allow_http 且不得离开 pinned 主机（防 30x 降级绕过）
                 final = urllib.parse.urlparse(response.geturl())
                 if (final.hostname or "").lower() != (parsed.hostname or "").lower():
                     self.logger.warning(f"[Market] 插件下载重定向到其它主机，已拒绝：{response.geturl()}")
@@ -668,8 +649,7 @@ class MarketplaceClient:
             finally:
                 done.set()
 
-        # 防自死锁：主线程上调度 + 阻塞等待永远等不到任务，直接同步执行。
-        # getattr 兼容测试桩等未实现该方法的插件替身对象。
+        # 主线程上直接同步执行防自死锁；getattr 兼容测试桩
         _on_main = getattr(self.plugin, "is_on_main_thread", None)
         if callable(_on_main) and _on_main():
             wrapped()
@@ -723,12 +703,10 @@ class MarketplaceClient:
         pip_manager = self.plugin._get_pip_manager()
         if manager is None or pip_manager is None:
             return False, "pip 管理器不可用"
-        # 依赖安装纳入任务日志/进度条：下载完插件本体后，前端能看到
-        # "正在安装依赖 → pip 逐行输出 → 热重载" 的完整过程
+        # 依赖安装纳入任务日志/进度条，前端可见完整安装过程
         log(f"检测到声明的依赖: {' '.join(dependencies)}")
         progress(96, "正在安装依赖")
-        # 必须持 plugin._pip_serial_lock：旧版本直接调用 pip_manager.install 绕过了 WebUI 的
-        # _pip_serial_lock，可与 WebUI 安装任务并发执行而损坏 site-packages 元数据。
+        # 必须持 _pip_serial_lock，否则与 WebUI 安装任务并发会损坏 site-packages
         with self.plugin._pip_serial_lock:
             ok, message = pip_manager.install(dependencies, on_log=log, upgrade=upgrade)
         if not ok:
@@ -764,10 +742,8 @@ class MarketplaceClient:
     def _local_name_for_market_id(self, market_id: str) -> str:
         """按市场 ID 反查本地已装子插件名；无匹配时回退 market_id 本身。
 
-        市场下载的 zip 落地为临时文件名（lumen_market_xxxx），若安装包清单
-        缺 name 字段，安装器需要调用方提供有意义的兜底名：升级场景取现有
-        本地目录名保持连续（否则升级会新建一个随机名目录），全新安装取
-        market_id。两者均通过 loader 的安全名校验口径。
+        清单缺 name 字段时安装器需调用方提供兜底名：升级取现有目录名保持
+        连续，全新安装取 market_id。
         """
         manager = self.plugin.subplugin_manager
         if manager is not None:
@@ -781,9 +757,8 @@ class MarketplaceClient:
     def _find_market_plugin_by_manifest_name(self, name: str) -> dict[str, Any] | None:
         """按子插件名（lumen.json 的 name）在市场精确匹配插件。
 
-        服务端支持 ``manifest_name`` 精确过滤；旧版服务端会忽略该参数返回
-        未过滤列表，因此客户端必须逐项核对 ``manifest_name`` 字段，防止
-        把同名关键词的无关插件当成依赖装进来。
+        旧版服务端会忽略 manifest_name 参数返回未过滤列表，客户端必须
+        逐项核对字段，防止装错插件。
         """
         try:
             data = self._request_json("market/plugins", query={"manifest_name": name, "limit": "20"})
@@ -857,14 +832,13 @@ class MarketplaceClient:
         if dep is not None and dep.loaded and req.satisfied_by(local_version):
             return True, ""
         if dep is not None and not dep.loaded and req.satisfied_by(local_version):
-            # 已安装且版本满足，但没加载成功：被清单禁用或自身加载失败，
-            # 市场重装同一版本会被拒绝，升级也解决不了——提示用户处理
+            # 版本满足但未加载：重装/升级均无用，提示用户查看其错误
             return False, (
                 f"依赖 {req.display()} 已安装（v{local_version}）但未加载，"
                 "可能被禁用或自身加载失败，请到子插件页面查看其错误信息"
             )
 
-        # 未安装 / 版本不满足 → 市场按 manifest_name 精确匹配自动安装（像 pip 依赖那样）
+        # 市场按 manifest_name 精确匹配自动安装
         detail = self._find_market_plugin_by_manifest_name(req.name)
         if detail is None:
             return False, f"缺少子插件依赖 {req.display()}：插件市场中没有找到，请手动安装后再试"
@@ -873,9 +847,7 @@ class MarketplaceClient:
             return False, f"缺少子插件依赖 {req.display()}：市场中所有版本均不满足该约束"
         version = str(release.get("version") or "")
         if dep is not None and not _is_newer(version, local_version):
-            # 走到这里时 req.satisfied_by(local_version) 必为 False（满足的
-            # 两种情况——已加载/未加载——在上方都已提前返回），市场能提供的
-            # 最高满足版本又不高于本地：约束是上限型（如 <3.0 而本地 3.0）
+            # 本地不满足且市场最高满足版本也不高于本地：上限型约束（如 <3.0）无解
             return False, (
                 f"依赖 {req.display()} 不满足：本地 v{local_version}，"
                 f"市场可提供的最高满足版本为 v{version}，无法升级"
@@ -903,12 +875,10 @@ class MarketplaceClient:
     ) -> dict[str, Any]:
         """补齐已安装子插件的插件级依赖（requires），像 pip 依赖那样自动安装。
 
-        - 子插件依赖：本地已满足则跳过；否则到市场按 manifest_name 精确
-          匹配并自动安装满足约束的最高版本（递归处理其自身依赖）
+        - 子插件依赖：缺失时到市场按 manifest_name 精确匹配自动安装（递归）
         - Endstone 插件依赖：无法代装，缺失时收集进 missing 提示用户安装
 
-        返回 ``{"ok", "message", "installed", "missing", "endstone_missing"}``；
-        ``ok=False`` 不代表目标插件安装失败，只代表依赖未能全部满足。
+        ``ok=False`` 只代表依赖未能全部满足，不代表目标插件安装失败。
         """
         log = log or (lambda _msg: None)
         progress = progress or (lambda _pct, _label="": None)
@@ -932,8 +902,7 @@ class MarketplaceClient:
         installed: list[str] = []
         missing: list[str] = []
 
-        # Endstone 插件依赖：只能提示安装，无法自动处理。
-        # server 不可用（None）→ 无法核实，不误报缺失
+        # Endstone 依赖只能提示安装；server 不可用时按无法核实处理，不误报
         endstone_missing: list[str] = []
         if declaration.endstone:
             try:
@@ -997,12 +966,9 @@ class MarketplaceClient:
         release = self._select_release(detail, requested_version)
         log(f"选中版本 v{release['version']}")
         path = self._download_verified(str(release["download_url"]), str(release["sha256"]), log=log, progress=progress)
-        # 临时 zip 的删除职责在主线程任务结束时执行（zip 已关闭，Windows 也可
-        # 安全删除）；调用方仅在任务确定不会执行（调度失败/cancelled 跳过）
-        # 时兜底清理，避免超时路径删除正被主线程使用的文件
+        # 临时 zip 由主线程任务结束时删除；调用方仅兜底清理确定不会执行的任务
         cleaned = threading.Event()
-        # 下载落地的临时文件名无意义，清单缺 name 时由兜底名接管（见
-        # _local_name_for_market_id）
+        # 清单缺 name 时的兜底安装名（见 _local_name_for_market_id）
         fallback_name = self._local_name_for_market_id(market_id)
 
         def _install_zip() -> Any:
@@ -1062,8 +1028,7 @@ class MarketplaceClient:
             }
         finally:
             if not cleaned.is_set():
-                # 主线程任务确定不会执行（调度失败/超时后 cancelled 跳过）：
-                # 由调用方兜底清理临时文件
+                # 任务确定不会执行：兜底清理
                 try:
                     os.unlink(path)
                 except OSError:
@@ -1077,9 +1042,8 @@ class MarketplaceClient:
     def check_subplugin_updates(self, *, force: bool = False) -> dict[str, dict[str, Any]]:
         """检查所有市场来源子插件的可用更新（单飞合并并发请求）。
 
-        后台周期线程与 WebUI 手动"检查更新"可能同时触发：在途检查未完成时，
-        后来者等待并复用其结果，避免对市场发起重复网络请求与重复清单写入。
-        在途结果为刚生成的新鲜数据，对 force 调用方语义等价。
+        在途检查未完成时，后来者等待并复用其结果，避免重复请求与清单写入；
+        在途结果是新鲜数据，对 force 调用方语义等价。
         """
         while True:
             with self._check_flight_lock:
@@ -1149,8 +1113,7 @@ class MarketplaceClient:
                     raise MarketplaceError("市场更新数据格式无效")
                 remote_version = str(latest.get("version") or "")
                 available = bool(_VERSION_RE.fullmatch(remote_version) and _is_newer(remote_version, local_version))
-                # 市场端字段类型不可信：字符串会被 list() 拆成单字符列表、
-                # 数字直接抛 TypeError 中断整个检查流程
+                # 市场端字段类型不可信，逐项过滤转换，防 TypeError/单字符拆分
                 deps_raw = latest.get("dependencies", [])
                 deps_list = [str(d) for d in deps_raw if d] if isinstance(deps_raw, list) else []
                 snapshot = {
@@ -1220,8 +1183,7 @@ class MarketplaceClient:
         if not _MARKET_ID_RE.fullmatch(market_id):
             raise MarketplaceError("市场来源记录无效")
         if requested_version:
-            # 市场更新弹窗已限定"仅高于当前版本"，后端再兜底校验一次，
-            # 防止旧前端/直接调 API 把版本降级覆盖本地更新的 lumen.json
+            # 后端兜底防降级：防止直接调 API 用旧版本覆盖本地 lumen.json
             if not _VERSION_RE.fullmatch(requested_version):
                 raise MarketplaceError("请求更新的版本号非法")
             if not _is_newer(requested_version, local_version):
@@ -1262,9 +1224,7 @@ class MarketplaceClient:
                 "error": "",
             }
             try:
-                # 默认参数在 def 时求值，绑定本轮 base/span/label：
-                # 否则闭包引用循环变量，回调整发（如 pip 输出线程延迟触发）时
-                # 会读到后续迭代的值，进度条与标签错乱
+                # 默认参数在 def 时求值绑定本轮值，防闭包延迟触发时读到后续迭代的循环变量
                 def _sub_progress(
                     pct: float,
                     _label: str = "",
@@ -1280,7 +1240,6 @@ class MarketplaceClient:
                 entry["to_version"] = str(result.get("version") or info.get("latest_version") or "")
                 log(f"{label} 更新成功")
             except Exception as exc:  # noqa: BLE001
-                # 单个失败（网络/市场数据/安装器）不阻断批量更新其余插件
                 entry["error"] = str(exc)
                 self.logger.warning(f"[Market] 批量更新 {name} 失败: {exc}")
                 log(f"{label} 更新失败: {exc}")
@@ -1306,8 +1265,7 @@ class MarketplaceClient:
             subplugin = manager.subplugins.get(plugin_name)
             if subplugin is None:
                 raise MarketplaceError("未找到子插件")
-            # 与 _load_one 一致：dependencies 为字符串时 [str(x) for x in "openai"]
-            # 会拆成单字符列表，导致 pip install o p e n a i
+            # 字符串 dependencies 会被逐字符拆分（pip install o p e n a i），须按列表处理
             deps_raw = subplugin.manifest.get("dependencies", [])
             dependencies = [str(x) for x in deps_raw if x] if isinstance(deps_raw, list) else []
         ok, message = self._install_declared_dependencies(plugin_name, dependencies, upgrade=True, log=log, progress=progress)
@@ -1317,8 +1275,7 @@ class MarketplaceClient:
         base = str(self.plugin.config_manager.data.get("updates", {}).get("api_url") or "").strip()
         if not base:
             return {"configured": False, "available": False}
-        # 与插件市场一致：配置只填站点根地址，这里自动补全 /api/v1/updates/lumenbridge；
-        # 若已显式填了完整接口地址（含 /updates/lumenbridge）则按原样请求。
+        # 站点根地址自动补全 API 前缀与路径；已显式填完整接口地址则按原样请求
         root = self._site_root(base)
         prefix_match = _API_PREFIX_RE.search(base.rstrip("/"))
         prefix = prefix_match.group(0) if prefix_match else _DEFAULT_API_PREFIX
@@ -1376,8 +1333,7 @@ class MarketplaceClient:
         sha256 = str(latest.get("sha256") or "").lower()
         if not _VERSION_RE.fullmatch(version) or not download_url or not re.fullmatch(r"[a-f0-9]{64}", sha256):
             raise MarketplaceError("版本更新记录缺少有效版本、下载地址或 SHA-256")
-        # 幂等复用：目标 wheel 已按同一发布记录暂存且哈希一致时跳过重复下载，
-        # 供"暂存→立即热重载"两步流程与自动更新共用。
+        # 幂等复用：同版本同哈希已暂存时跳过重复下载
         receipt_path = Path(self.plugin.data_folder) / "data" / "framework_update.json"
         plugins_dir = Path(self.plugin.data_folder).parent
         target = plugins_dir / f"endstone_lumenbridge-{version}-py3-none-any.whl"
@@ -1394,8 +1350,7 @@ class MarketplaceClient:
                 and self._file_sha256(target) == sha256
             ):
                 return receipt
-        # H20：框架更新的哈希来自 updates.api_url，pin 基准同样是该 API 主机
-        #（未配置时退回市场 api_url 基准）
+        # 框架更新的 pin 基准是 updates.api_url（未配置时退回市场 api_url）
         updates_base = str(self.plugin.config_manager.data.get("updates", {}).get("api_url") or "").strip()
         log(f"开始下载 LumenBridge v{version}")
         download = self._download_verified(
@@ -1426,12 +1381,8 @@ class MarketplaceClient:
             backup_dir = plugins_dir / ".lumenbridge_update_backups" / time.strftime("%Y%m%d-%H%M%S")
             try:
                 shutil.copyfile(download, stage)
-                # 先原子放置新 wheel 再移出旧 wheel：若先移出旧 wheel、放置
-                # 新 wheel 失败，plugins 目录将没有任何 wheel（重启后插件
-                # 彻底丢失）。代价是存在短暂的新旧共存窗口；若移出旧 wheel
-                # 中途失败，必须删掉新 wheel 并放回已移出的旧 wheel——
-                # 否则重启时两个 wheel 都被安装，安装顺序不确定，
-                # 可能旧版覆盖新版（如 1.0.9 与 1.0.10 的字典序颠倒）
+                # 先原子放新 wheel 再移旧的（防目录短暂无 wheel）；移出中途失败须
+                # 回滚放回，否则重启时新旧共存、安装顺序不定可能旧版覆盖新版
                 os.replace(stage, target)
                 moved: list[Path] = []
                 try:
@@ -1470,8 +1421,7 @@ class MarketplaceClient:
             (receipt_dir / "framework_update.json").write_text(
                 json.dumps(receipt, ensure_ascii=False, indent=2), encoding="utf-8"
             )
-            # 旧 wheel 备份不无限累积：每次成功暂存新版本时只保留最近 3 份，
-            # 更早的备份（对应早已过时的版本）自动清理
+            # 备份不无限累积，只保留最近 3 份
             self._cleanup_framework_backups(keep=3)
             log(f"新版本 v{version} 已暂存就绪，执行 /lumen update framework -y 热重载生效")
             return receipt
@@ -1484,9 +1434,7 @@ class MarketplaceClient:
     def _cleanup_framework_backups(self, keep: int = 3) -> None:
         """清理过旧的框架更新备份目录，仅保留最近 keep 份。
 
-        备份目录名为 %Y%m%d-%H%M%S 定长时间戳，字典序即时间序。
-        本次暂存的备份排在最新，不会被清理；回滚阶段使用的正是最新
-        备份，不受影响。
+        目录名为定长时间戳，字典序即时间序；最新一份（回滚所用）不会被清理。
         """
         root = Path(self.plugin.data_folder).parent / ".lumenbridge_update_backups"
         if not root.is_dir():
@@ -1509,9 +1457,7 @@ class MarketplaceClient:
     def staged_framework_update(self) -> dict[str, Any] | None:
         """返回当前有效且待应用的暂存回执；无则返回 None（仅本地校验，不触网）。
 
-        供 /lumen update framework -y 命令快速判断是否可以直接热重载。
-        回执指向的版本不高于当前运行版本（如已成功热重载后残留的旧回执）
-        或 wheel 哈希不一致时视为无效。
+        版本不高于当前运行版本或 wheel 哈希不一致的回执视为无效。
         """
         receipt_path = Path(self.plugin.data_folder) / "data" / "framework_update.json"
         if not receipt_path.is_file():
@@ -1537,14 +1483,10 @@ class MarketplaceClient:
     def apply_framework_update(self, *, log=None, progress=None) -> dict[str, Any]:
         """暂存新 wheel 并返回热重载指引（本方法绝不触发重载）。
 
-        ⚠ 历史实现在调度器任务内（run_on_main → Server.reload()）执行热
-        重载导致崩服：reload 过程 ``disablePlugins`` → ``cancelTasks`` 会
-        取消"当前正在执行的任务"，随后 ``removeCancelledTasks()`` 直接改动
-        ``mainThreadHeartbeat`` 正在迭代的任务队列（endstone 0.11.10
-        scheduler.cpp:255），心跳循环悬垂引用 → SIGSEGV。因此本方法只负责
-        下载校验与暂存；热重载必须由管理员在命令上下文同步触发
-        （/lumen update framework -y，与内建 /reload 同款安全路径），
-        见 :meth:`execute_framework_reload`。
+        ⚠ 在调度器任务内执行 reload 会导致崩服：cancelTasks →
+        removeCancelledTasks 会改动 mainThreadHeartbeat 正在迭代的队列，
+        悬垂引用 → SIGSEGV。热重载必须由管理员在命令上下文触发
+        （/lumen update framework -y），见 :meth:`execute_framework_reload`。
         """
         log = log or (lambda _msg: None)
         progress = progress or (lambda _pct, _label="": None)
@@ -1563,20 +1505,14 @@ class MarketplaceClient:
     def execute_framework_reload(self, *, log=None) -> dict[str, Any]:
         """同步执行框架热重载（等同 /reload）并校验新实例，失败自动回滚。
 
-        ⚠ 只允许在服务器主线程的命令/事件上下文调用（如
-        /lumen update framework -y 处理器）。``Server.reload()`` 会取消并
-        清理调度器中本插件的任务：若本方法运行在调度器任务内，心跳正在
-        迭代的队列会被 ``removeCancelledTasks`` 改动 → 悬垂引用 SIGSEGV；
-        若运行在后台线程，则在错误线程触碰 Level 与 PluginManager。命令
-        执行阶段不在调度器心跳内（内建 /reload 命令即走此路径），是唯一
-        安全的进程内触发点。
+        ⚠ 只允许在主线程命令/事件上下文调用：调度器任务内 reload 会因
+        removeCancelledTasks 改动正在迭代的队列而 SIGSEGV；后台线程会在
+        错误线程触碰 Level 与 PluginManager。命令执行阶段不在调度器心跳内，
+        是唯一安全的进程内触发点。
 
-        热重载走 Endstone 官方 ``Server.reload()``（``disablePlugins`` →
-        ``clearPlugins`` → ``reloadData`` → ``loadPlugins`` →
-        ``enablePlugins``），会重载服务器内全部 Endstone 插件（非仅
-        LumenBridge 自身）。不能用 ``disable_plugin`` + ``load_plugin``
-        手工替换：disable 只停用不注销，旧插件名仍留在 PluginManager 的
-        lookup_names_ 里，``load_plugin`` 会被同名拒绝。
+        走官方 ``Server.reload()``，会重载服务器内全部 Endstone 插件。
+        不能用 disable_plugin + load_plugin 手工替换：旧插件名仍留在
+        PluginManager 的 lookup_names_ 里，同名加载会被拒绝。
         """
         receipt = self.staged_framework_update()
         if receipt is None:
@@ -1602,8 +1538,7 @@ class MarketplaceClient:
             else:  # 旧版 Endstone 无 Server.reload 绑定，回退命令派发
                 server.dispatch_command(server.command_sender, "reload")
 
-        # 运行在命令上下文（主线程）；reload 后只触碰局部引用与新插件实例，
-        # 不再访问已停用的旧插件服务
+        # reload 后只触碰局部引用与新实例，不再访问旧插件服务
         server = old_plugin.server
         manager = server.plugin_manager
         try:
@@ -1638,8 +1573,7 @@ class MarketplaceClient:
             target.unlink(missing_ok=True)
             if backup_directory:
                 backup_dir = Path(backup_directory)
-                # 按语义版本挑最高（不能按文件名字典序：字典序下
-                # "1.0.9" > "1.0.10"，会放回更旧的版本）
+                # 按语义版本挑最高（字典序下 "1.0.9" > "1.0.10"）
                 wheels = list(backup_dir.glob("endstone_lumenbridge-*.whl"))
                 if wheels:
                     def _wheel_version(p: Path) -> tuple[int, ...]:
@@ -1655,16 +1589,12 @@ class MarketplaceClient:
     def _make_reload_ghost(self):
         """构造"幽灵所有者"插件：已初始化、已启用、但未注册到 PluginManager。
 
-        直接 new 出的 Plugin 实例无法通过 pybind 类型检查（run_task 抛
-        TypeError），且 C++ 内部指针（loader_ 等）未初始化，读写即崩。
-        唯一可行路径（BDS 实测验证）：临时替换 PythonPluginLoader.load_plugin
-        返回幽灵实例，让 PluginManager.load_plugin 走 C++ initPlugin 完成内部
-        指针初始化，再借与运行中插件同名被重名拒绝，使其"已初始化但未注册"
-        ——disable_plugins() 永远触不到它，它的调度任务不会在热重载中被取消。
+        直接 new 的 Plugin 实例无法通过 pybind 类型检查且内部指针未初始化。
+        唯一可行路径：临时替换 load_plugin 返回幽灵实例，走 C++ initPlugin
+        完成初始化，再借与运行中插件同名被重名拒绝而不注册——其调度任务
+        不会在热重载中被取消。
 
-        副作用：服务器日志会出现一条 ERROR "Could not load plugin
-        'lumenbridge': Another plugin with the same name has been loaded"
-        和一行 "Enabling lumenbridge v0.0.0"，均为预期行为。
+        副作用：日志出现重名 ERROR 与 "Enabling lumenbridge v0.0.0"，均预期。
         """
         import endstone.plugin.plugin_loader as plm
         from endstone.plugin import Plugin, PluginDescription
@@ -1717,23 +1647,15 @@ class MarketplaceClient:
     def safe_framework_reload(self, *, log=None, timeout: float = 180.0) -> dict[str, Any]:
         """在任意线程（如 WebUI 后台任务线程）安全触发框架热重载。
 
-        原理（BDS 1.26.45 + Endstone 0.11.10 实测验证）：以"幽灵所有者"
-        （未注册插件，见 :meth:`_make_reload_ghost`）调度两阶段任务——
+        以"幽灵所有者"（见 :meth:`_make_reload_ghost`）调度两阶段任务——
+        - phase1（tick T）：disable_plugins() 禁用全部插件，cancelTasks 只置标志不动队列；
+        - tick T+1 心跳开头 removeCancelledTasks() 在任务迭代之外安全清理；
+        - phase2（tick T+1）：server.reload()——无已取消任务，不会改写
+          正在迭代的队列 → 无悬垂引用。
 
-        - phase1（tick T）：``disable_plugins()`` 禁用全部已注册插件，
-          ``cancelTasks`` 只置取消标志，不动队列；
-        - tick T+1 心跳开头 ``removeCancelledTasks()`` 在任务迭代之外
-          安全清理已取消任务；
-        - phase2（tick T+1）：``server.reload()``——此时 disablePlugins
-          无事可做、无已取消任务，``erase_if`` 不会改写心跳正在迭代的
-          队列 → 无悬垂引用（这正是旧实现任务内直接 reload 崩服的根源）。
+        失败回滚同样必须两阶段（先 disable 再 restore+reload），原因同上。
 
-        失败回滚同样必须两阶段（先 disable 再 restore+reload），原因同上：
-        第一次 reload 已重新启用全部插件，若在 phase2 任务内直接二次
-        reload，cancelTasks+removeCancelledTasks 会改写正在迭代的队列。
-
-        本方法会阻塞到重载完成（或超时）；期间 WebUI 面板会短暂无法
-        访问（旧实例停用 → 新实例启动），前端应轮询健康检查等待恢复。
+        阻塞到完成或超时；期间 WebUI 面板短暂不可访问，前端应轮询健康检查。
         """
         receipt = self.staged_framework_update()
         if receipt is None:
@@ -1779,9 +1701,7 @@ class MarketplaceClient:
                 _finish(ok=True, to_version=str(new_plugin.version))
             except Exception as exc:  # noqa: BLE001
                 glog.error(f"[Update] phase2 热重载失败：{exc!r}，开始两阶段回滚")
-                # 不能在本任务内直接二次 reload（新插件已启用，会重蹈
-                # cancelTasks→removeCancelledTasks 改写迭代队列的覆辙），
-                # 再走一次 disable → restore+reload 两阶段
+                # 任务内直接二次 reload 会改写迭代队列，须再走两阶段回滚
                 scheduler.run_task(ghost, phase3, delay=2)
                 scheduler.run_task(ghost, phase4, delay=4)
 
@@ -1813,8 +1733,7 @@ class MarketplaceClient:
                 glog.error(f"[Update] 回滚阶段出错：{exc!r}")
                 _finish(ok=False, error=f"回滚阶段出错：{exc}")
 
-        # 延迟 5/6 tick：phase1 与 phase2 分属不同 tick，中间隔一次心跳
-        # 开头的 removeCancelledTasks（迭代外清理，安全）
+        # 延迟 5/6 tick：两阶段分属不同 tick，中间隔一次迭代外清理
         scheduler.run_task(ghost, phase1, delay=5)
         scheduler.run_task(ghost, phase2, delay=6)
 

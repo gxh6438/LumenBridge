@@ -6,7 +6,7 @@ import threading
 from typing import Any, Callable, Iterable, Iterator, Literal, overload
 
 from ..exceptions import ConcurrencyError
-from ..frames import OP_BINARY, OP_CONT, OP_TEXT, Frame
+from ..frames import BINARY, CONT, TEXT, Frame
 from ..typing import Data
 from .utils import Deadline
 
@@ -38,7 +38,7 @@ class Assembler:
         pause: Callable[[], Any] = lambda: None,
         resume: Callable[[], Any] = lambda: None,
     ) -> None:
-        # Serialize reads and writes -- except for reads via synchronization
+        # Serialize reads and writes — except for reads via synchronization
         # primitives provided by the threading and queue modules.
         self.mutex = threading.Lock()
 
@@ -165,16 +165,16 @@ class Assembler:
         try:
             deadline = Deadline(timeout)
 
-            # First frame
+            # Fetch the first frame.
             frame = self.get_next_frame(deadline.timeout(raise_if_elapsed=False))
             with self.mutex:
                 self.maybe_resume()
-            assert frame.opcode is OP_TEXT or frame.opcode is OP_BINARY
+            assert frame.opcode is TEXT or frame.opcode is BINARY
             if decode is None:
-                decode = frame.opcode is OP_TEXT
+                decode = frame.opcode is TEXT
             frames = [frame]
 
-            # Following frames, for fragmented messages
+            # Fetch subsequent frames for fragmented messages.
             while not frame.fin:
                 try:
                     frame = self.get_next_frame(
@@ -187,12 +187,13 @@ class Assembler:
                     raise
                 with self.mutex:
                     self.maybe_resume()
-                assert frame.opcode is OP_CONT
+                assert frame.opcode is CONT
                 frames.append(frame)
 
         finally:
             self.get_in_progress = False
 
+        # This converts frame.data to bytes when it's a bytearray.
         data = b"".join(frame.data for frame in frames)
         if decode:
             return data.decode()
@@ -244,29 +245,31 @@ class Assembler:
         # If get_iter() raises an exception e.g. in decoder.decode(),
         # get_in_progress remains set and the connection becomes unusable.
 
-        # First frame
+        # Yield the first frame.
         frame = self.get_next_frame()
         with self.mutex:
             self.maybe_resume()
-        assert frame.opcode is OP_TEXT or frame.opcode is OP_BINARY
+        assert frame.opcode is TEXT or frame.opcode is BINARY
         if decode is None:
-            decode = frame.opcode is OP_TEXT
+            decode = frame.opcode is TEXT
         if decode:
             decoder = UTF8Decoder()
             yield decoder.decode(frame.data, frame.fin)
         else:
-            yield frame.data
+            # Convert to bytes when frame.data is a bytearray.
+            yield bytes(frame.data)
 
-        # Following frames, for fragmented messages
+        # Yield subsequent frames for fragmented messages.
         while not frame.fin:
             frame = self.get_next_frame()
             with self.mutex:
                 self.maybe_resume()
-            assert frame.opcode is OP_CONT
+            assert frame.opcode is CONT
             if decode:
                 yield decoder.decode(frame.data, frame.fin)
             else:
-                yield frame.data
+                # Convert to bytes when frame.data is a bytearray.
+                yield bytes(frame.data)
 
         self.get_in_progress = False
 
@@ -297,26 +300,26 @@ class Assembler:
 
     def maybe_pause(self) -> None:
         """Pause the writer if queue is above the high water mark."""
-        # Skip if flow control is disabled
+        # Skip if flow control is disabled.
         if self.high is None:
             return
 
         assert self.mutex.locked()
 
-        # Check for "> high" to support high = 0
+        # Check for "> high" to support high = 0.
         if self.frames.qsize() > self.high and not self.paused:
             self.paused = True
             self.pause()
 
     def maybe_resume(self) -> None:
         """Resume the writer if queue is below the low water mark."""
-        # Skip if flow control is disabled
+        # Skip if flow control is disabled.
         if self.low is None:
             return
 
         assert self.mutex.locked()
 
-        # Check for "<= low" to support low = 0
+        # Check for "<= low" to support low = 0.
         if self.frames.qsize() <= self.low and self.paused:
             self.paused = False
             self.resume()

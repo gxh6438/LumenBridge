@@ -12,7 +12,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-# 支持的语言代码 -> 显示名
 SUPPORTED_LANGUAGES: dict[str, str] = {
     "en": "English",
     "zh_CN": "简体中文",
@@ -22,8 +21,7 @@ SUPPORTED_LANGUAGES: dict[str, str] = {
 DEFAULT_LANGUAGE = "zh_CN"
 AUTO_DETECT = "auto"
 
-# locale 别名映射：连字符 -> 下划线，脚本子标签（Hans/Hant）优先于地区子标签判定繁简，
-# 纯中文 zh / chinese -> zh_CN；不支持的语言回退到 DEFAULT_LANGUAGE
+# locale 别名：脚本子标签（Hans/Hant）优先于地区判定繁简；不支持语言回退 DEFAULT_LANGUAGE
 _LOCALE_ALIASES: dict[str, str] = {
     "zh": "zh_CN",
     "zh-hans": "zh_CN",
@@ -81,16 +79,13 @@ def normalize_locale(locale: str) -> str:
     key = raw.lower()
     if key in _LOCALE_ALIASES:
         return _LOCALE_ALIASES[key]
-    # 下划线变体归一到连字符形式再查一次：别名表的扩展形式（脚本子标签等）
-    # 只登记了连字符键，否则 zh_Hant / zh_hant 这类写法会漏过快速路径，
-    # 走到语言级兜底被误判为 zh_CN（繁体服务器整套文案变简体）
+    # 下划线变体归一到连字符再查一次：扩展别名仅登记连字符键，否则 zh_Hant 会被兜底误判 zh_CN
     hyphen_key = key.replace("_", "-")
     if hyphen_key != key and hyphen_key in _LOCALE_ALIASES:
         return _LOCALE_ALIASES[hyphen_key]
     normalized = raw.replace("-", "_")
     parts = [p for p in normalized.split("_") if p]
-    # 三段式：语言_脚本_国家（如 zh_Hans_CN / zh_Hant_TW）
-    # 脚本子标签特征：4 字符且首字母大写（Hans/Hant/Cyrl/Latn）
+    # 三段式 语言_脚本_国家：脚本子标签特征为 4 字符首字母大写（Hans/Hant）
     if len(parts) >= 3 and len(parts[1]) == 4 and parts[1][0].isupper():
         lang = parts[0].lower()
         script = parts[1]
@@ -200,8 +195,7 @@ class I18n:
     def set_language(self, language: str) -> str:
         """设置当前语言，返回实际生效的语言代码（已规范化）。
 
-        若 language 为 "auto"，保持当前语言不变（由 plugin 调用
-        detect_endstone_language 后再 set_language 实际值）。
+        "auto" 时保持当前语言不变（由调用方检测后再 set 实际值）。
         """
         if language == AUTO_DETECT:
             return self._language
@@ -281,7 +275,6 @@ class I18n:
         val = ns.get(self._language, {}).get(key)
         if val is None and self._language != "en":
             val = ns.get("en", {}).get(key)
-        # 子插件单语言场景：回退到第一个可用语言
         if val is None:
             for lang_kvs in ns.values():
                 if key in lang_kvs:
@@ -308,8 +301,7 @@ class I18n:
         """导出指定语言的完整翻译字典（供 WebUI 前端使用）。lang 为 None 则导出当前语言。"""
         target = lang or self._language
         normalized = normalize_locale(target) if target else self._language
-        # 始终深拷贝再合并：直接返回 _load 的缓存引用（尤其 en 分支）会把
-        # 缓存字典暴露给调用方，外部改写会污染后续所有翻译
+        # 深拷贝再合并：直接返回 _load 缓存引用会让外部改写污染后续翻译
         data = copy.deepcopy(self._load(normalized))
         # 该语言缺失的键用 en 补全，前端无需处理回退
         if normalized != "en":
