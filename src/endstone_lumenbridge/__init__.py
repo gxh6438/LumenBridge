@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-__version__ = "1.0.7"
+__version__ = "1.0.8"
 
 if TYPE_CHECKING:
     from endstone_lumenbridge.plugin import LumenBridgePlugin

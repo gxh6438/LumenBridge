@@ -404,8 +404,10 @@ class WebUIServer:
         )
         self._thread.start()
         self.metrics_collector.start()
-        display_host = "127.0.0.1" if self.host == "0.0.0.0" else self.host
-        self.logger.info(_t("plugin.webui_started", url=f"http://{display_host}:{self.port}"))
+        # 按实际监听地址打印（0.0.0.0 如实显示），并补一条局域网访问提示
+        self.logger.info(_t("plugin.webui_started", url=f"http://{self.host}:{self.port}"))
+        if self.host == "0.0.0.0":
+            self.logger.info(_t("plugin.webui_listening_all", port=self.port))
 
     @staticmethod
     def _install_sigpipe_ignore() -> None:
@@ -640,6 +642,42 @@ class WebUIServer:
             self.stop()
             self.start()
 
+    def _schedule_config_hot_apply(self, plugin: Any) -> None:
+        """外部手改 config.json 后的热生效调度（由 GET /api/config 检测到指纹变化时调用）。
+
+        - 语言：_init_i18n()（须主线程，访问 Endstone server 对象）
+        - WebUI 监听地址/端口/密码/密钥：refresh_config()（host/port 变化时重启监听）
+        - pip 镜像配置：失效缓存，下次使用时按新配置重建 manager
+        全部异步调度且不等待：本轮 GET 响应先返回（延迟 2 tick 让响应先发完，
+        避免重启监听掐断正在传输的连接）。
+        """
+        def _apply() -> None:
+            init_i18n = getattr(plugin, "_init_i18n", None)
+            if callable(init_i18n):
+                try:
+                    init_i18n()
+                except Exception:
+                    pass
+            try:
+                with getattr(plugin, "_pip_manager_lock", threading.RLock()):
+                    if getattr(plugin, "_pip_manager", None) is not None:
+                        plugin._pip_manager = None
+            except Exception:
+                pass
+            try:
+                self.refresh_config()
+            except Exception:
+                pass
+
+        try:
+            plugin.run_on_main(_apply, delay=2)
+        except Exception:
+            # 调度失败（如测试替身无 scheduler）：退化为后台定时器，同样避开本轮响应
+            try:
+                threading.Timer(1.0, _apply).start()
+            except Exception:
+                pass
+
     def _get_pip_manager_for_plugin(self, plugin: "LumenBridgePlugin"):
         """委托给 plugin._get_pip_manager()，复用其双检锁线程安全。"""
         return plugin._get_pip_manager()
@@ -870,8 +908,9 @@ class WebUIServer:
 
     @property
     def url(self) -> str:
-        display_host = "127.0.0.1" if self.host == "0.0.0.0" else self.host
-        return f"http://{display_host}:{self.port}"
+        # 如实反映监听地址（0.0.0.0 = 所有接口）；IPv6 地址需加方括号
+        host = f"[{self.host}]" if ":" in self.host else self.host
+        return f"http://{host}:{self.port}"
 
     def _debug_log(self, key: str, **kwargs: Any) -> None:
         """调试日志：仅在 config 开启 debug 时经 debug 级别输出。
@@ -1644,14 +1683,18 @@ class _RequestHandler(BaseHTTPRequestHandler):
             # QQ 官方适配器未知属性返回桩函数，ws_type 须校验为 int 才可 JSON 序列化
             raw_mode = getattr(primary, "ws_type", None) if primary else None
             mode_value = raw_mode if isinstance(raw_mode, int) and not isinstance(raw_mode, bool) else -1
+            # 主群展示用全部适配器群标识并集（含官方域 group_openid 字符串）；
+            # cm.main_groups 仅统计 WebSocket 数字群号，官方机器人会永远显示"未设置"
+            connections = getattr(plugin, "connections", None)
+            group_keys: list[Any] = connections.all_group_keys() if connections is not None else []
             return self._send_json({"code": 200, "data": {
                 "version": plugin.VERSION,
                 "connected": bool(adapter and adapter.is_connected),
                 "mode": mode_value,
                 "mode_name": adapter.mode_name if adapter else _t("webui.msg.not_started"),
                 "adapters": adapter.status() if hasattr(adapter, "status") else [],
-                "main_group": cm.main_group,
-                "main_groups": cm.main_groups,
+                "main_group": group_keys[0] if group_keys else 0,
+                "main_groups": group_keys,
                 "bot_qq": bot_qq,
                 "bot_profile": profile,
                 "bot_profiles": profiles,
@@ -1675,6 +1718,14 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
         if path == "/api/config":
             if method == "GET":
+                # 外部手改 config.json 热重载：指纹变化才重读磁盘，
+                # 使 WebUI 无需手动刷新浏览器即可看到最新配置（后端同时热生效语言/监听地址）
+                try:
+                    if cm is not None and cm.file_changed_on_disk():
+                        cm.load()
+                        self.webui._schedule_config_hot_apply(plugin)
+                except Exception:
+                    pass
                 # 序列化前先取快照，避免与保存线程并发修改导致迭代异常
                 snapshot = cm.snapshot() if hasattr(cm, "snapshot") else copy.deepcopy(cm.data)
                 data = json.loads(json.dumps(snapshot))
@@ -1720,6 +1771,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                         body_webui["password"] = auth_util.hash_password(typed_pw)
 
                 # 由 ConfigManager 统一校验并原子合并/保存，避免未知键/错误类型/危险范围值落盘后在 reload 时失败。
+                old_language = str(cm.data.get("language", "auto"))
                 try:
                     cm.apply_patch(body)
                 except Exception as exc:
@@ -1727,6 +1779,27 @@ class _RequestHandler(BaseHTTPRequestHandler):
                         "code": 400,
                         "msg": _t("webui.msg.invalid_config") + f": {exc}",
                     }, 400)
+                # 语言变更热生效：_init_i18n 的自动检测会访问 Endstone server 对象，
+                # 须调度到主线程执行（与 /api/reload 同款安全路径）
+                new_language = str(body.get("language", old_language))
+                init_i18n = getattr(plugin, "_init_i18n", None)
+                if callable(init_i18n) and new_language != old_language:
+                    done = threading.Event()
+
+                    def _apply_language() -> None:
+                        try:
+                            init_i18n()
+                        except Exception:
+                            pass
+                        finally:
+                            done.set()
+
+                    try:
+                        plugin.run_on_main(_apply_language)
+                    except Exception:
+                        # 调度失败任务不会执行，手动置位避免等满超时
+                        done.set()
+                    done.wait(timeout=2.0)
                 # 修改 WebUI 密码/密钥后立即生效并使旧 token 全部失效（token 版本 +1）
                 try:
                     new_webui_conf = cm.data.get("webui", {}) or {}

@@ -100,7 +100,7 @@
         "os_version": "作業系統",
         "pid": "處理程序 PID",
         "arch": "架構",
-        "onebot_connection": "OneBot 連線",
+        "onebot_connection": "轉接器狀態",
         "connected": "已連線",
         "disconnected": "未連線",
         "connecting": "連線中...",
@@ -165,9 +165,11 @@
         "pane_filter": "聊天遮蔽",
         "hint_basic": "連線與群服互通設定已遷移至「連線配置」頁籤，按轉接器卡片單獨配置。",
         "no_data": "暫無設定資料",
-        "json_parse_error": "設定 JSON 解析失敗，請檢查格式"
+        "json_parse_error": "設定 JSON 解析失敗，請檢查格式",
+        "external_refreshed": "偵測到設定檔在外部被修改，已自動重新整理",
+        "external_changed_dirty": "偵測到設定檔在外部被修改；你正在編輯中未自動重新整理，儲存將覆蓋外部修改"
     },
-    "chatfilter": {
+    "rules": {
         "title": "聊天遮蔽",
         "hero_badge": "雙向轉發過濾",
         "hero_sub": "遊戲與 QQ 群互通訊息的敏感詞過濾，支援遮罩或整條攔截",
@@ -653,6 +655,7 @@
         "connection_reloaded": "OneBot 連線已按新設定重建（模式: {mode}）",
         "random_password": "[WebUI] 已生成隨機管理員密碼: {password}",
         "webui_started": "[WebUI] Web 控制面板已啟動: {url}",
+        "webui_listening_all": "[WebUI] 正在監聽所有網路介面 (0.0.0.0)，區域網路裝置可透過 本機IP:{port} 存取",
         "webui_port_failed": "[WebUI] 連接埠 {port} 監聽失敗: {error}",
         "webui_stopped": "[WebUI] Web 控制面板已停止",
         "webui_api_registered": "[WebUI] 已註冊插件 API: {method} {path}",
@@ -661,7 +664,7 @@
         "death_fallback": "{player} 死了",
         "command": {
             "description": "LumenBridge 群服互通管理指令",
-            "usage": "/lumen (status|reload|say|plugins|pip|update|password)<action: LumenAction> [message: message]",
+            "usage": "/lumen (status|reload|say|plugins|pip|update|password|webui-host)<action: LumenAction> [message: message]",
             "permission_desc": "允許使用 /lumen 管理指令",
             "status_title": "===== LumenBridge 狀態 =====",
             "status_version": "版本: {version}",
@@ -711,13 +714,21 @@
             "plugins_list_empty": "（未初始化）",
             "plugins_list_no_plugins": "暫無子插件載入",
             "no_permission": "你沒有權限使用此指令",
-            "unknown_action": "未知子指令: {action}。可用: status | reload | say | plugins | pip | update | password",
+            "unknown_action": "未知子指令: {action}。可用: status | reload | say | plugins | pip | update | password | webui-host",
             "password_console_only": "該指令只能在伺服器控制台執行",
             "password_invalid": "密碼不能為空白且長度不超過 128；留空則清除密碼並產生隨機密碼",
             "password_set_ok": "WebUI 管理員密碼已重設並已生效，所有已登入工作階段已失效",
             "password_cleared": "WebUI 管理員密碼已清除並產生隨機密碼（見上方控制台輸出），所有已登入工作階段已失效",
             "password_staged": "已寫入設定（WebUI 目前未啟用，下次啟動生效）",
             "password_failed": "密碼重設失敗: {error}",
+            "webui_host_console_only": "該指令只能在伺服器控制台執行",
+            "webui_host_usage": "用法: /lumen webui-host [local|public|<IP>]（local=127.0.0.1，public=0.0.0.0）\n目前監聽位址: {host}",
+            "webui_host_invalid": "無效的監聽位址: {host}（可選 local=127.0.0.1、public=0.0.0.0 或具體 IP）",
+            "webui_host_same": "監聽位址已是 {host}，無需切換",
+            "webui_host_applied": "WebUI 監聽位址已切換: {old} → {host}，立即生效",
+            "webui_host_all_hint": "\n注意: 正在監聽所有網路介面，區域網路裝置可透過 本機IP:{port} 存取",
+            "webui_host_staged": "監聽位址 {host} 已寫入設定（WebUI 目前未啟用，下次啟動生效）",
+            "webui_host_failed": "監聽位址切換失敗: {error}",
             "status_no_group": "未設定"
         },
         "tagline": "Endstone 群服互通框架"

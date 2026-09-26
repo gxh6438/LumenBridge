@@ -250,6 +250,9 @@ class ConfigManager:
         self._save_lock = threading.RLock()
         # 避免 reload 时重复按语言覆盖 pip 镜像源
         self._pip_index_applied: bool = False
+        # 最近一次由 load/save 记录的文件指纹 (mtime_ns, size)：
+        # 用于检测外部手改 config.json（WebUI 据此热重载 + 自动刷新页面）
+        self._file_stamp: tuple[int, int] | None = None
         self.load()
 
     def attach_connections(self, connections: Any) -> None:
@@ -259,6 +262,7 @@ class ConfigManager:
     def load(self) -> None:
         # 与 apply_patch / save / apply_pip_index_by_language 互斥，保证 self.data 读改写原子可见
         with self._save_lock:
+            self._record_file_stamp()
             if self.path.is_file():
                 try:
                     raw = json.loads(self.path.read_text(encoding="utf-8"))
@@ -299,6 +303,31 @@ class ConfigManager:
                 self._write_locked()
                 self.logger.info(_t("plugin.config_generated", path=self.path))
 
+    def _record_file_stamp(self) -> None:
+        """记录当前磁盘文件指纹（mtime_ns + size），供外部修改检测。"""
+        try:
+            st = self.path.stat()
+        except OSError:
+            self._file_stamp = None
+            return
+        self._file_stamp = (st.st_mtime_ns, st.st_size)
+
+    def file_changed_on_disk(self) -> bool:
+        """检测 config.json 是否在 load/save 之外被外部修改（手改/其他工具写入）。
+
+        指纹 = (mtime_ns, size)：stat 一次的开销极小，可被 WebUI 轮询调用。
+        文件不存在且从未记录过指纹时视为未变化（首次生成场景）。
+        """
+        try:
+            st = self.path.stat()
+        except OSError:
+            return self._file_stamp is not None
+        current = (st.st_mtime_ns, st.st_size)
+        if self._file_stamp is None:
+            # 从未记录（如文件本不存在，外部新建后出现）
+            return True
+        return current != self._file_stamp
+
     def _write_locked(self) -> None:
         """已持有 _save_lock 的内部写入入口。"""
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -308,6 +337,8 @@ class ConfigManager:
             json.dumps(self.data, ensure_ascii=False, indent=4), encoding="utf-8"
         )
         os.replace(tmp, self.path)
+        # 写盘后同步指纹：自己写入不算外部修改，避免轮询误触发重载
+        self._record_file_stamp()
 
     def apply_pip_index_by_language(self, language: str) -> bool:
         """根据界面语言设置 pip 镜像源默认值（中文=腾讯源，英文=官方 PyPI）。
