@@ -52,16 +52,17 @@ from .subplugin.context import (
 )
 from .webui import LogBuffer, LoggerTee, WebUIServer
 
-# 启动横幅：figlet 字体，前 32 列 "Lumen" 与 "Bridge" 双色拼接
+# 启动横幅：figlet standard 字体，前 33 列 "Lumen" 与后 31 列 "Bridge" 双色拼接
+#（由 pyfiglet.figlet_format 生成后逐列拼接，各行为等宽 64 列；改动请重新生成勿手改）
 _BANNER_LINES: tuple[str, ...] = (
-    " _                               ____       _     _ ",
-    "| |   _   _ _ __ ___   ___ _ __ | __ ) _ __(_) __| | __ _  ___",
-    "| |  | | | | '_ ` _ \\ / _ \\ '_ \\|  _ \\| '__| |/ _` |/ _` |/ _ \\",
-    "| |__| |_| | | | | | |  __/ | | | |_) | |  | | (_| | (_| |  __/",
-    "|_____|__,_|_| |_| |_|\\___|_| |_|____/|_|  |_|\\__,_|\\__, |\\___/",
-    "                                                    |___/       ",
+    " _                                ____       _     _            ",
+    "| |   _   _ _ __ ___   ___ _ __  | __ ) _ __(_) __| | __ _  ___ ",
+    "| |  | | | | '_ ` _ \\ / _ \\ '_ \\ |  _ \\| '__| |/ _` |/ _` |/ _ \\",
+    "| |__| |_| | | | | | |  __/ | | || |_) | |  | | (_| | (_| |  __/",
+    "|_____\\__,_|_| |_| |_|\\___|_| |_||____/|_|  |_|\\__,_|\\__, |\\___|",
+    "                                                     |___/      ",
 )
-_BANNER_SPLIT = 32
+_BANNER_SPLIT = 33
 
 
 class LumenBridgePlugin(Plugin):
@@ -75,7 +76,7 @@ class LumenBridgePlugin(Plugin):
     commands = {
         "lumen": {
             "description": "LumenBridge 群服互通管理命令",
-            "usages": ["/lumen (status|reload|say|plugins|pip|update|password)<action: LumenAction> [message: message]"],
+            "usages": ["/lumen (status|reload|say|plugins|pip|update|password|webui-host)<action: LumenAction> [message: message]"],
             "permissions": ["lumenbridge.command.lumen"],
         },
     }
@@ -841,7 +842,7 @@ class LumenBridgePlugin(Plugin):
 
         action = args[0].lower() if args else "status"
 
-        known_actions = {"status", "reload", "say", "plugins", "pip", "update", "password"}
+        known_actions = {"status", "reload", "say", "plugins", "pip", "update", "password", "webui-host"}
         if action not in known_actions:
             sender.send_message(f"{ColorFormat.RED}{_t('plugin.command.unknown_action', action=action)}{ColorFormat.RESET}")
             return True
@@ -850,6 +851,11 @@ class LumenBridgePlugin(Plugin):
         # 独立认证域，被盗 OP 不得借此接管可安装子插件（任意代码执行）的 WebUI
         if action == "password":
             return self._handle_password_command(sender, args[1:] if len(args) > 1 else [])
+
+        # 监听地址切换同样仅限控制台：0.0.0.0 会把管理面板暴露到局域网/公网，
+        # 属于服务器运维决策，不应让游戏内 OP（独立认证域）代替控制台操作
+        if action == "webui-host":
+            return self._handle_webui_host_command(sender, args[1:] if len(args) > 1 else [])
 
         # config_manager 为 None 时默认拒绝（安全降级），避免配置加载失败后权限体系失效
         if self.config_manager:
@@ -1033,6 +1039,80 @@ class LumenBridgePlugin(Plugin):
             sender.send_message(f"{ColorFormat.RED}{_t('plugin.command.password_invalid')}{ColorFormat.RESET}")
         except Exception as e:  # noqa: BLE001
             sender.send_message(f"{ColorFormat.RED}{_t('plugin.command.password_failed', error=e)}{ColorFormat.RESET}")
+        return True
+
+    def _handle_webui_host_command(self, sender: CommandSender, args: list[str]) -> bool:
+        """处理 /lumen webui-host [local|public|<IP>]：切换 WebUI 监听地址（仅限控制台）。
+
+        local = 127.0.0.1（仅本机），public = 0.0.0.0（所有接口），
+        其余参数按具体 IP 校验。写入配置立即生效：运行中则重启监听 socket，
+        未运行则写入配置供下次启动使用。
+        """
+        from endstone.command import ConsoleCommandSender  # type: ignore
+
+        if not isinstance(sender, ConsoleCommandSender):
+            sender.send_message(f"{ColorFormat.RED}{_t('plugin.command.webui_host_console_only')}{ColorFormat.RESET}")
+            return True
+
+        if self.config_manager is None:
+            sender.send_message(f"{ColorFormat.RED}{_t('commands.config_unavailable')}{ColorFormat.RESET}")
+            return True
+
+        tokens = [tok for tok in str(args[0]).split()] if args else []
+        webui_conf = self.config_manager.data.get("webui", {})
+        current = str(webui_conf.get("host") or "127.0.0.1") if isinstance(webui_conf, dict) else "127.0.0.1"
+
+        if not tokens:
+            sender.send_message(
+                f"{ColorFormat.GOLD}{_t('plugin.command.webui_host_usage', host=current)}{ColorFormat.RESET}"
+            )
+            return True
+
+        value = tokens[0]
+        lowered = value.lower()
+        if lowered == "local":
+            host = "127.0.0.1"
+        elif lowered == "public":
+            host = "0.0.0.0"
+        else:
+            # 具体 IP：ipaddress 严格校验（IPv4/IPv6 均可），防笔误写入无效地址
+            import ipaddress
+
+            try:
+                parsed = ipaddress.ip_address(value)
+            except ValueError:
+                sender.send_message(f"{ColorFormat.RED}{_t('plugin.command.webui_host_invalid', host=value)}{ColorFormat.RESET}")
+                return True
+            host = str(parsed)
+
+        if host == current:
+            sender.send_message(f"{ColorFormat.YELLOW}{_t('plugin.command.webui_host_same', host=host)}{ColorFormat.RESET}")
+            return True
+
+        try:
+            self.config_manager.apply_patch({"webui": {"host": host}})
+        except Exception as e:  # noqa: BLE001
+            sender.send_message(f"{ColorFormat.RED}{_t('plugin.command.webui_host_failed', error=e)}{ColorFormat.RESET}")
+            return True
+
+        webui = self.webui
+        if webui is None:
+            sender.send_message(f"{ColorFormat.GREEN}{_t('plugin.command.webui_host_staged', host=host)}{ColorFormat.RESET}")
+            return True
+
+        # 立即生效：refresh_config 检测 host 变化后重启监听 socket
+        #（未运行的实例仅更新属性，下次 start 使用新地址）
+        try:
+            webui.refresh_config()
+        except Exception as e:  # noqa: BLE001
+            sender.send_message(f"{ColorFormat.RED}{_t('plugin.command.webui_host_failed', error=e)}{ColorFormat.RESET}")
+            return True
+
+        display = f"[{host}]" if ":" in host else host
+        suffix = _t("plugin.command.webui_host_all_hint", port=webui.port) if host == "0.0.0.0" else ""
+        sender.send_message(
+            f"{ColorFormat.GREEN}{_t('plugin.command.webui_host_applied', old=current, host=display)}{ColorFormat.RESET}{suffix}"
+        )
         return True
 
     def _handle_pip_command(self, sender: CommandSender, args: list[str]) -> bool:

@@ -22,6 +22,9 @@ let editingRuleIndex = -1;
 let bgConfigured = null;
 let configLabelsLoading = false;
 let configEditorBound = false;
+let configDirty = false;        // 配置页有未保存编辑（外部变更时不自动覆盖，仅提示）
+let configExternalTimer = null; // 外部手改 config.json 检测轮询句柄
+let configExternalNotified = ""; // 已提示过的外部变更签名（避免重复弹 toast）
 
 let metricsTimer = null;
 let metricsGeneration = 0;
@@ -40,7 +43,8 @@ let configNavObserver = null;
 let spMoreMenuState = null;    // { name, btn } 当前打开的 ⋯ 菜单
 let marketUpdateState = null;  // { name, marketId, detail, currentVersion, selectedVersion } 市场更新流程状态
 const CONFIG_RELOAD_PREFIXES = ["connection.", "pip.", "commands."];
-const CONFIG_RELOAD_EXACT = ["webui.enable", "webui.host", "webui.port", "language"];
+// language 不在此列：WebUI 保存后由后端热生效，无需提示重载
+const CONFIG_RELOAD_EXACT = ["webui.enable", "webui.host", "webui.port"];
 
 let I18N = {};
 let CURRENT_LANG = localStorage.getItem("lumen_lang") || "auto";  // "auto" 或具体语言
@@ -155,6 +159,14 @@ document.addEventListener("click", async (e) => {
   if (!btn) return;
   const lang = btn.dataset.lang;
   await loadI18n(lang);
+  // 持久化到 config.json 并让插件后端语言热生效；未登录（登录页）时仅切界面
+  if (TOKEN) {
+    try {
+      await api("POST", "/api/config", { language: lang });
+    } catch (err) {
+      toast(err.message || t("config.save_failed", { error: "" }), true);
+    }
+  }
 });
 
 function customConfirm(message, title) {
@@ -742,6 +754,7 @@ function nav(page, customUrl, customTitle) {
 
   if (currentPage === "logs" && page !== "logs") closeLogStream();
   if (currentPage === "dashboard" && target !== "dashboard") stopMetricsPolling();
+  if (currentPage === "config" && target !== "config") stopConfigExternalPolling();
   if (currentPage === "marketplace" && target !== "marketplace") {
     if (marketTaskTimer) { clearInterval(marketTaskTimer); marketTaskTimer = null; }
     if (frameworkUpdateTimer) { clearInterval(frameworkUpdateTimer); frameworkUpdateTimer = null; }
@@ -771,6 +784,7 @@ function nav(page, customUrl, customTitle) {
   if (page === "dashboard") { loadDashboard(); startMetricsPolling(); }
   if (page === "config") {
     loadConfig();
+    startConfigExternalPolling();
     if (configPane === "connections") loadConnections();
   }
   if (page === "rules") loadRules();
@@ -943,6 +957,8 @@ async function loadConfig() {
   const generation = ++configGeneration;
   const form = document.getElementById("config-form");
   if (form) form.innerHTML = '<div class="empty-state">' + esc(t("common.loading_config")) + '</div>';
+  configDirty = false;
+  configExternalNotified = "";
   try {
     if (!Object.keys(configLabels).length && !configLabelsLoading) {
       configLabelsLoading = true;
@@ -971,6 +987,54 @@ async function loadConfig() {
     if (generation !== configGeneration) return;
     if (form) form.innerHTML = `<div class="empty-state error">${esc(t("config.load_failed", { error: e.message }))}</div>`;
     toast(t("config.load_failed", { error: e.message }), true);
+  }
+}
+
+// 配置页任意编辑（表单控件 / JSON 编辑器）即视为脏：外部变更不自动覆盖，仅提示
+document.addEventListener("input", (e) => {
+  const el = e.target;
+  if (!el || !currentPage) return;
+  if (el.closest && (el.closest("#config-form") || el.id === "config-json")) configDirty = true;
+});
+document.addEventListener("change", (e) => {
+  const el = e.target;
+  if (!el || !currentPage) return;
+  if (el.closest && (el.closest("#config-form") || el.id === "config-json")) configDirty = true;
+});
+
+/** 轮询外部手改：后端 GET /api/config 检测到指纹变化会先热重载再返回最新值。 */
+async function pollExternalConfig() {
+  if (currentPage !== "config" || !TOKEN) { stopConfigExternalPolling(); return; }
+  try {
+    const { data } = await api("GET", "/api/config");
+    if (!data || typeof data !== "object") return;
+    const sig = JSON.stringify(data);
+    if (sig === JSON.stringify(configData)) return;
+    if (configDirty) {
+      // 用户正在编辑：不覆盖表单，只提示一次（签名变化才再次提示）
+      if (configExternalNotified !== sig) {
+        configExternalNotified = sig;
+        toast(t("config.external_changed_dirty"), true);
+      }
+      return;
+    }
+    configExternalNotified = "";
+    toast(t("config.external_refreshed"));
+    loadConfig();
+  } catch (e) {
+    // 网络抖动 / 监听地址切换重启中：静默，下一轮再试
+  }
+}
+
+function startConfigExternalPolling() {
+  stopConfigExternalPolling();
+  configExternalTimer = setInterval(pollExternalConfig, 10000);
+}
+
+function stopConfigExternalPolling() {
+  if (configExternalTimer) {
+    clearInterval(configExternalTimer);
+    configExternalTimer = null;
   }
 }
 
@@ -5305,7 +5369,7 @@ function openEditAdapterModal(id) {
     <div class="ae-badges">
       <span class="ae-badge plain">${esc(typeName)}</span>
       <span class="ae-badge">${esc(modeBadge)}</span>
-      <span class="ae-badge ${a.enabled ? "green" : "red"}">${esc(a.enabled ? t("connections.enabled") : t("connections.disabled"))}</span>
+      <span class="ae-badge ${a.enabled ? "green" : "red"}" id="ae-enabled-badge">${esc(a.enabled ? t("connections.enabled") : t("connections.disabled"))}</span>
     </div>
   </div>
 </div>
@@ -5318,7 +5382,7 @@ function openEditAdapterModal(id) {
     <div class="ae-switch-label">${esc(t("connections.enable"))}</div>
     <div class="ae-switch-sub">${esc(t("connections.enable_hint"))}</div>
   </div>
-  <div class="switch"><input type="checkbox" id="ae-enabled" ${a.enabled ? "checked" : ""}>
+  <div class="switch"><input type="checkbox" id="ae-enabled" ${a.enabled ? "checked" : ""} onchange="adapterToggleEnabled(this)">
   <label class="track" for="ae-enabled"></label></div>
 </div>
 
@@ -5770,8 +5834,32 @@ function collectAdapterForm() {
   return patch;
 }
 
+/** "启用"开关即时保存：单字段 PUT，避免用户切开关后直接关弹窗导致更改丢失 */
+async function adapterToggleEnabled(el) {
+  const enabled = el.checked;
+  try {
+    await api("PUT", "/api/connections/" + encodeURIComponent(editingAdapterId), { enabled });
+    const badge = document.getElementById("ae-enabled-badge");
+    if (badge) {
+      badge.className = "ae-badge " + (enabled ? "green" : "red");
+      badge.textContent = t(enabled ? "connections.enabled" : "connections.disabled");
+    }
+    await loadConnections();
+  } catch (e) {
+    el.checked = !enabled; // 保存失败回滚开关视觉状态
+    toast(e.message || t("connections.save_failed"), true);
+  }
+}
+
 async function saveAdapter() {
-  const patch = collectAdapterForm();
+  let patch;
+  try {
+    patch = collectAdapterForm();
+  } catch (e) {
+    // collectAdapterForm 读取 DOM 失败若无捕获会静默中断保存（无提示、弹窗不关）
+    toast(e.message || t("connections.save_failed"), true);
+    return;
+  }
   if (!patch) return;
   try {
     const res = await api("PUT", "/api/connections/" + encodeURIComponent(editingAdapterId), patch);
