@@ -47,12 +47,12 @@ def _default_sync() -> dict[str, Any]:
     }
 
 
-# 默认展示两张卡片：QQ 个人号（WebSocket 直连）+ QQ 官方机器人（均未启用、未配置）
+# 默认展示两张卡片：QQ 个人号（OneBot 直连）+ QQ 官方机器人（均未启用、未配置）
 DEFAULT_ADAPTERS: list[dict[str, Any]] = [
     {
         "id": "ws_default",
         "type": "websocket",
-        "name": "WebSocket",
+        "name": "OneBot",
         "enabled": False,
         "ws_type": 0,
         "target": "",
@@ -418,7 +418,7 @@ class ConnectionManager:
         result = copy.deepcopy(template)
         result["id"] = self._gen_id(adapter_type)
         default_names = {
-            "websocket": "WebSocket",
+            "websocket": "OneBot",
             "astrbot": "AstrBot",
             "qqofficial": "QQ 官方机器人",
         }
@@ -543,7 +543,7 @@ class ConnectionManager:
         created["enabled"] = True
         with self._lock:
             same = [a for a in self.adapters if a.get("type") == adapter_type]
-            base_name = {"websocket": "WebSocket", "astrbot": "AstrBot",
+            base_name = {"websocket": "OneBot", "astrbot": "AstrBot",
                          "qqofficial": "QQ 官方机器人"}.get(adapter_type, "Adapter")
             default_name = base_name if not same else f"{base_name} {len(same) + 1}"
         created["name"] = default_name

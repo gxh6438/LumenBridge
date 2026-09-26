@@ -106,7 +106,7 @@ class OneBotAdapter:
     @property
     def display_name(self) -> str:
         """卡片展示名：适配器名称 + 连接模式。"""
-        name = self.adapter_name or ("AstrBot" if self.adapter_type == "astrbot" else "WebSocket")
+        name = self.adapter_name or ("AstrBot" if self.adapter_type == "astrbot" else "OneBot")
         return f"{name} ({self.mode_name})"
 
     @staticmethod

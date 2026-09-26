@@ -5789,6 +5789,16 @@ function collectAdapterForm() {
     admin_qq: toIntList(document.getElementById("ae-admin-qq").value),
     sync: {},
   };
+  // 群服互通设置对所有适配器类型生效（QQ 官方卡片同样渲染 sync 表单），
+  // 必须在类型分支 return 之前采集，否则官方域的 sync 永远不会被提交
+  const sync = a.sync || {};
+  for (const key of Object.keys(sync)) {
+    const el = document.getElementById("ae-sync-" + key);
+    if (!el) continue;
+    if (typeof sync[key] === "boolean") patch.sync[key] = el.checked;
+    else if (key === "max_message_length") patch.sync[key] = Number(el.value) || 256;
+    else patch.sync[key] = el.value;
+  }
   if (isQQOfficial) {
     const secret = document.getElementById("ae-app-secret").value || "";
     patch.app_id = (document.getElementById("ae-app-id").value || "").trim();
@@ -5823,14 +5833,6 @@ function collectAdapterForm() {
   else patch.target = "";
   if (a.type !== "astrbot") patch.main_group = toIntList(document.getElementById("ae-main-group").value);
   else patch.main_group = a.main_group || [];
-  const sync = a.sync || {};
-  for (const key of Object.keys(sync)) {
-    const el = document.getElementById("ae-sync-" + key);
-    if (!el) continue;
-    if (typeof sync[key] === "boolean") patch.sync[key] = el.checked;
-    else if (key === "max_message_length") patch.sync[key] = Number(el.value) || 256;
-    else patch.sync[key] = el.value;
-  }
   return patch;
 }
 
