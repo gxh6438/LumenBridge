@@ -171,6 +171,79 @@ class V107WebUiFixTests(unittest.TestCase):
         stored = next(a for a in disk["adapters"] if a["id"] == qo_id)
         self.assertFalse(stored["enabled"])
 
+    def test_qqofficial_sync_patch_persists_to_disk(self) -> None:
+        """v1.0.8：QQ 官方适配器群服互通（sync）保存必须落盘且深合并不清空其他键。
+
+        前端 bug 曾表现为官方卡片 sync 表单值从未被提交（采集逻辑位于
+        提前 return 的类型分支之后），重开弹窗永远是旧值。
+        """
+        qo_id = next(a["id"] for a in self.plugin.connections.adapters if a["type"] == "qqofficial")
+        status, data = self.request("PUT", f"/api/connections/{qo_id}", {
+            "sync": {"chat_to_group_enable": False, "max_message_length": 512},
+        }, token=self.token)
+        self.assertEqual(status, 200)
+        # 返回值：指定的 sync 键已更新，未提及的键保留（深合并语义）
+        sync = data["data"]["sync"]
+        self.assertFalse(sync["chat_to_group_enable"])
+        self.assertEqual(sync["max_message_length"], 512)
+        self.assertTrue(sync["chat_to_server_enable"])
+        # 落盘可重载还原
+        disk = json.loads((Path(self.tempdir.name) / "connections" / "qqofficial.json").read_text(encoding="utf-8"))
+        stored = next(a for a in disk["adapters"] if a["id"] == qo_id)
+        self.assertFalse(stored["sync"]["chat_to_group_enable"])
+        self.assertEqual(stored["sync"]["max_message_length"], 512)
+        self.plugin.connections.load()
+        reloaded = self.plugin.connections.get(qo_id)
+        assert reloaded is not None
+        self.assertFalse(reloaded["sync"]["chat_to_group_enable"])
+        self.assertEqual(reloaded["sync"]["max_message_length"], 512)
+
+
+class V108WebUiWordingAndFormTests(unittest.TestCase):
+    """v1.0.8 文案与表单采集回归：OneBot 措辞、适配器重建提示。"""
+
+    LOCALES = ROOT / "src" / "endstone_lumenbridge" / "locales"
+
+    @staticmethod
+    def _locale(key: str) -> dict:
+        return json.loads((V108WebUiWordingAndFormTests.LOCALES / f"{key}.json").read_text(encoding="utf-8"))
+
+    def test_connection_reloaded_wording_is_adapter_not_onebot(self) -> None:
+        """重建提示改为"适配器连接"：QQ 官方等非 OneBot 适配器不再误报 OneBot。"""
+        zh_cn = self._locale("zh_CN")
+        text = zh_cn["plugin"]["connection_reloaded"]
+        self.assertIn("适配器", text)
+        self.assertNotIn("OneBot", text)
+        en = self._locale("en")
+        self.assertIn("Adapter", en["plugin"]["connection_reloaded"])
+        self.assertNotIn("OneBot", en["plugin"]["connection_reloaded"])
+
+    def test_websocket_type_label_renamed_onebot(self) -> None:
+        """连接管理中 WebSocket 类型卡片显示名统一改为 OneBot。"""
+        for lang in ("zh_CN", "zh_TW", "en"):
+            self.assertEqual(self._locale(lang)["connections"]["type_websocket"], "OneBot", lang)
+        # 新建适配器的默认卡片名同步（后端三处默认名来源）
+        from endstone_lumenbridge.connections import DEFAULT_ADAPTERS
+        ws_default = next(a for a in DEFAULT_ADAPTERS if a["type"] == "websocket")
+        self.assertEqual(ws_default["name"], "OneBot")
+
+    def test_collect_adapter_form_gathers_sync_before_qqofficial_return(self) -> None:
+        """app.js 的 sync 采集必须位于 QQ 官方类型分支（提前 return）之前。
+
+        前端 bug 根因：官方分支 return 后才采集 ae-sync-* 表单，
+        导致 QQ 官方卡片的群服互通设置永远不随保存提交。
+        """
+        source = (ROOT / "src" / "endstone_lumenbridge" / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+        start = source.index("function collectAdapterForm()")
+        end = source.index("function adapterToggleEnabled")
+        body = source[start:end]
+        sync_pos = body.index('getElementById("ae-sync-" + key)')
+        branch_pos = body.index("if (isQQOfficial)")
+        self.assertLess(
+            sync_pos, branch_pos,
+            "sync 表单采集必须在 isQQOfficial 分支之前执行，否则官方域保存丢失群服互通设置",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
