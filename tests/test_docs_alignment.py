@@ -623,13 +623,18 @@ class DeleteMsgTests(unittest.TestCase):
         self._wait(lambda: "MSG1" not in self.ad._msg_scopes)
         self.assertNotIn("MSG1", self.ad._msg_scopes)
 
-    def test_delete_private_message_warns(self):
-        """C2C 消息：官方无撤回接口 → 告警且不调用。"""
+    def test_delete_private_message_calls_api(self):
+        """C2C 消息：官方 2026-07 起提供单聊撤回接口 → 走 users 路径。"""
         self.ad._msg_scopes["MSG2"] = ("private", "UOPEN1")
         self._start_loop()
         self._delete("MSG2")
-        self.assertTrue(any(lv == "warn" for lv, _ in self.ad.logger.lines))
-        self.assertEqual(len(self.ad.api_calls), 0)
+        self.assertTrue(self._wait(lambda: len(self.ad.api_calls) >= 1))
+        method, path, body = self.ad.api_calls[0]
+        self.assertEqual(method, "DELETE")
+        self.assertEqual(path, "/v2/users/UOPEN1/messages/MSG2")
+        # 成功后清除缓存
+        self._wait(lambda: "MSG2" not in self.ad._msg_scopes)
+        self.assertNotIn("MSG2", self.ad._msg_scopes)
 
     def test_delete_unknown_id_warns(self):
         self._start_loop()
