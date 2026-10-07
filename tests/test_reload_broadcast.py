@@ -18,6 +18,7 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -55,9 +56,12 @@ class _FakeChatSync:
 
 
 def _make_plugin(data_dir: Path, start_time: datetime, *, started: bool = False):
-    """__new__ 桩：只补齐 on_disable / _on_bot_online 涉及的属性。"""
+    """__new__ 桩：只补齐 on_disable / _on_bot_online 涉及的属性。
+
+    注意：endstone Plugin.logger 为只读 property（C++ 侧），实例赋值抛
+    AttributeError，logger 经 _patch_logger() 在类级遮蔽注入。
+    """
     plugin = LumenBridgePlugin.__new__(LumenBridgePlugin)
-    plugin.logger = _FakeLogger()
     plugin._tee_logger = None
     plugin.server = _FakeServer(start_time)
     plugin.data_folder = str(data_dir)
@@ -78,6 +82,25 @@ def _make_plugin(data_dir: Path, start_time: datetime, *, started: bool = False)
     plugin.config_manager = None
     plugin.connections = None
     return plugin
+
+
+class _LoggerShadowMixin(unittest.TestCase):
+    """类级遮蔽 endstone Plugin 的只读 property（logger/server/data_folder）。
+
+    __new__ 构造的实例没有 C++ 侧对象，直接读 self.logger 等会段错误，
+    实例赋值则抛 AttributeError（property 无 setter）；patch 在子类上新增
+    同名属性遮蔽父类 property，用例结束删除恢复继承。
+    """
+
+    def setUp(self) -> None:
+        for name, value in (
+            ("logger", _FakeLogger()),
+            ("server", None),
+            ("data_folder", ""),
+        ):
+            patcher = mock.patch.object(LumenBridgePlugin, name, new=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
 
 class ReloadCommandDetectionTests(unittest.TestCase):
@@ -111,7 +134,7 @@ class ReloadCommandDetectionTests(unittest.TestCase):
         self.assertFalse(plugin._is_reload_pending())
 
 
-class ServerStopBroadcastTests(unittest.TestCase):
+class ServerStopBroadcastTests(_LoggerShadowMixin):
     """on_disable：reload 窗口内跳过关服播报，真实停服正常播报。"""
 
     def test_stop_broadcast_on_real_shutdown(self):
@@ -139,7 +162,7 @@ class ServerStopBroadcastTests(unittest.TestCase):
             self.assertEqual(chat.stop_calls, [])
 
 
-class ServerStartBroadcastTests(unittest.TestCase):
+class ServerStartBroadcastTests(_LoggerShadowMixin):
     """_on_bot_online：同进程 reload 不播开服，新进程正常播。"""
 
     def test_first_start_broadcasts(self):
@@ -190,7 +213,7 @@ class ServerStartBroadcastTests(unittest.TestCase):
             self.assertEqual(plugin.chat_sync_module.start_calls, ["start"])
 
 
-class DegradedEnvironmentTests(unittest.TestCase):
+class DegradedEnvironmentTests(_LoggerShadowMixin):
     """start_time 不可用等异常场景保持旧行为（播报，不抛异常）。"""
 
     def test_missing_start_time_still_broadcasts(self):

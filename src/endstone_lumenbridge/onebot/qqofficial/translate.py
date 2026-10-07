@@ -25,6 +25,43 @@ from .constants import (
 from .utils import content_segments, mention_segments, plain_content
 
 
+def _scene_ext_value(data: dict[str, Any], key: str) -> str:
+    """提取 message_scene.ext 中 key=value 条目的值（如 ref_msg_idx 引用索引）。
+
+    官方 2026-09 载荷：ext 为 ["msg_idx=...", "ref_msg_idx=...", "auth_token=..."]。
+    """
+    scene = data.get("message_scene")
+    ext = scene.get("ext") if isinstance(scene, dict) else None
+    if isinstance(ext, list):
+        prefix = f"{key}="
+        for item in ext:
+            text = str(item or "")
+            if text.startswith(prefix):
+                return text[len(prefix):]
+    return ""
+
+
+def _mention_nickmap(data: dict[str, Any]) -> dict[str, str]:
+    """官方 mentions 数组 → {openid: 昵称} 映射（2026-09 载荷新增）。
+
+    官方已把 @ 提及从 content 文本中剥离、经 mentions 字段单独下发
+    （不含 @机器人自身）；映射用于给 at 段补昵称、并补齐 content 中
+    已不存在的 @ 标记，避免提及信息整体丢失。
+    """
+    mentions = data.get("mentions")
+    if not isinstance(mentions, list):
+        return {}
+    result: dict[str, str] = {}
+    for user in mentions:
+        if not isinstance(user, dict):
+            continue
+        uid = str(user.get("member_openid") or user.get("user_openid") or user.get("id") or "")
+        nick = str(user.get("username") or "").strip()
+        if uid and nick:
+            result[uid] = nick
+    return result
+
+
 class EventTranslator:
     """官方网关事件翻译器（组合于 QQOfficialAdapter）。"""
 
@@ -261,6 +298,88 @@ class EventTranslator:
         self.ad._emit_pack(pack)
 
     # ------------------------------------------------------------ 消息翻译
+    # msg_elements 携带正文的消息类型（官方 2026-09 载荷）：
+    # 101=并行消息 102=聊天记录（合并转发）103=引用消息（content 可为空）
+    _ELEMENT_TEXT_TYPES = frozenset({101, 102, 103})
+
+    def _reference_segments(self, data: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+        """官方 msg_elements 载荷 → (前置消息段列表, raw 兜底文本)。
+
+        - 引用消息（message_type=103 / ref_msg_idx）：被引用内容转 OneBot
+          reply 段（go-cqhttp 惯例附 text/sender/user_id，子插件可直接读）；
+        - 聊天记录（102）：转 OneBot forward 段（[合并转发]）；
+        - content 为空（纯引用 / 聊天记录转发）：元素正文兜底为 text 段，
+          游戏侧不再显示为空消息。
+        """
+        elements = data.get("msg_elements")
+        if not isinstance(elements, list) or not elements:
+            return [], ""
+        try:
+            mtype = int(data.get("message_type") or 0)
+        except (TypeError, ValueError):
+            mtype = 0
+        quoted = None
+        for elem in elements:  # 取首个携带内容的元素为被引用消息
+            if isinstance(elem, dict) and (
+                str(elem.get("content") or "").strip() or elem.get("msg_idx")
+            ):
+                quoted = elem
+                break
+        if quoted is None:
+            return [], ""
+        ref_idx = _scene_ext_value(data, "ref_msg_idx")
+        author = quoted.get("author") if isinstance(quoted.get("author"), dict) else {}
+        q_uid = str(
+            author.get("member_openid") or author.get("user_openid") or author.get("id") or ""
+        )
+        q_nick = str(author.get("username") or "").strip() or (q_uid[:8] if q_uid else "")
+        q_text = str(quoted.get("content") or "").strip()
+        segments: list[dict[str, Any]] = []
+        if mtype == 102:
+            # 聊天记录（合并转发）：OneBot forward 段
+            segments.append(
+                {"type": "forward", "data": {"id": ref_idx or str(quoted.get("msg_idx") or "")}}
+            )
+        elif mtype == 103 or ref_idx:
+            # 引用回复：reply 段（id 优先官方引用索引，缺省回落元素索引）
+            reply_data: dict[str, Any] = {"id": ref_idx or str(quoted.get("msg_idx") or "")}
+            if q_text:
+                reply_data["text"] = q_text
+            if q_nick:
+                reply_data["sender"] = q_nick
+            if q_uid:
+                reply_data["user_id"] = q_uid
+            segments.append({"type": "reply", "data": reply_data})
+        # 正文为空且元素携带正文：兜底 text 段（同时作为 raw_message 兜底）
+        if not str(data.get("content") or "").strip() and q_text and mtype in self._ELEMENT_TEXT_TYPES:
+            segments.append({"type": "text", "data": {"text": q_text}})
+            return segments, q_text
+        return segments, ""
+
+    @staticmethod
+    def _enrich_mentions(message: list[dict[str, Any]], data: dict[str, Any]) -> None:
+        """用官方 mentions 数组增强 at 段：补昵称 + 补齐缺失的 @。
+
+        content 内联标记解析出的 at 段只有 openid；官方新载荷把 @ 剥离到
+        mentions 字段（带昵称），就地补 nickname，未覆盖的追加到尾部，
+        保证提及信息不因载荷改版而丢失。
+        """
+        nickmap = _mention_nickmap(data)
+        if not nickmap:
+            return
+        covered: set[str] = set()
+        for seg in message:
+            if isinstance(seg, dict) and seg.get("type") == "at":
+                uid = str((seg.get("data") or {}).get("qq") or "")
+                if not uid:
+                    continue
+                covered.add(uid)
+                if uid in nickmap:
+                    seg["data"]["nickname"] = nickmap[uid]
+        for uid, nick in nickmap.items():
+            if uid not in covered:
+                message.append({"type": "at", "data": {"qq": uid, "nickname": nick}})
+
     async def _fetch_media_url(self, scope: str, owner: str, msg_id: str, seg_type: str) -> str:
         """经官方 media 接口换取附件下载 URL；失败返回空串。
 
@@ -308,9 +427,21 @@ class EventTranslator:
             filename = str(att.get("filename") or "")
             if not url and msg_id:
                 url = await self._fetch_media_url(scope, owner, msg_id, seg_type)
-            segments.append(
-                {"type": seg_type, "data": {"url": url, "file": filename, "path": url}}
-            )
+            seg_data: dict[str, Any] = {"url": url, "file": filename, "path": url}
+            asr_text = ""
+            if seg_type == "record":
+                # 官方 2026-09 载荷：语音附件附带 WAV 直链与 ASR 识别文本；
+                # SILK 原始链多数播放器不可播，WAV 作为补充字段下发
+                wav_url = str(att.get("voice_wav_url") or "").strip()
+                if wav_url:
+                    seg_data["wav_url"] = wav_url
+                    if not url:
+                        seg_data["url"] = seg_data["path"] = wav_url
+                asr_text = str(att.get("asr_refer_text") or "").strip()
+            segments.append({"type": seg_type, "data": seg_data})
+            if asr_text:
+                # 语音识别文本随段附送：游戏聊天无语音通道，文本是唯一可读形态
+                segments.append({"type": "text", "data": {"text": f"[语音] {asr_text}"}})
         return segments
 
     async def _emit_group_message(self, data: dict[str, Any], at_bot: bool = False) -> None:
@@ -325,6 +456,13 @@ class EventTranslator:
         nickname = str(author.get("username") or "").strip() or member_openid[:8]
         # 按原始顺序解析：@其他成员 就地转 at 段，@机器人自身 剥离触发标记
         message, content = content_segments(data.get("content"), self_id=self.ad.app_id)
+        # 官方新载荷：引用消息 / 聊天记录前置段（reply / forward）与空正文兜底
+        ref_segments, ref_fallback = self._reference_segments(data)
+        message = ref_segments + message
+        # mentions 数组增强：at 段补昵称、补齐 content 已剥离的 @
+        self._enrich_mentions(message, data)
+        if not content:
+            content = ref_fallback
         # @机器人 留痕：at_bot 即 @ 信号（正文恒漏），全量模式兜底扫描标记
         mention_self = at_bot or any(
             str((seg.get("data") or {}).get("qq") or "") == str(self.ad.app_id)
@@ -363,13 +501,19 @@ class EventTranslator:
             return
         nickname = str(author.get("username") or "").strip() or user_openid[:8]
         content = plain_content(data.get("content"))
+        # 官方新载荷：引用消息（message_type=103）被引用内容在 msg_elements
+        ref_segments, ref_fallback = self._reference_segments(data)
+        message: list[dict[str, Any]] = list(ref_segments)
+        if content or not ref_segments:
+            message.append({"type": "text", "data": {"text": content}})
+        if not content:
+            content = ref_fallback
         self.ad.credentials.cache_passive(
             user_openid, msg_id, PASSIVE_WINDOW_C2C, PASSIVE_MAX_SEQ_C2C
         )
-        # 记录消息归属（官方无 C2C 撤回接口，记录仅为给出明确告警）
+        # 记录消息归属（C2C 撤回接口 /v2/users/{u}/messages/{id} 按此反查目标）
         self.ad.remember_msg_scope(msg_id, "private", user_openid)
 
-        message: list[dict[str, Any]] = [{"type": "text", "data": {"text": content}}]
         message += await self._attachment_segments("private", user_openid, msg_id, data)
 
         pack = self._base_pack(

@@ -814,10 +814,13 @@ class QQOfficialAdapter:
     def delete_msg(
         self, message_id: Any, callback: Callable[[Any], None] | None = None
     ) -> None:
-        """撤回消息：OneBot 语义 → 官方 DELETE /v2/groups/{g}/messages/{id}。
+        """撤回消息：OneBot 语义 → 官方 DELETE 接口（2026-07 起单聊亦可撤回）。
 
-        仅群聊可撤回（自发限 2 分钟内，管理员可撤群员的）；结果经
-        callback 回传 {"ok": ...} 供调用方感知成败。
+        - 群聊 /v2/groups/{g}/messages/{id}：机器人（管理员可撤群员的）
+          发送超过 2 分钟的消息不可撤回；
+        - 单聊 /v2/users/{u}/messages/{id}：仅可撤回机器人发给该用户
+          自己的消息（同样 2 分钟时限）。
+        结果经 callback 回传 {"ok": ...} 供调用方感知成败。
         """
         key = str(message_id or "")
         scope = self._msg_scopes.get(key)
@@ -827,10 +830,10 @@ class QQOfficialAdapter:
                 callback({"ok": False, "error": "未知消息 ID（消息可能已过期或未被机器人收到）"})
             return
         kind, target = scope
-        if kind != "group":
+        if kind not in ("group", "private"):
             self.logger.warning(_t("qqofficial.recall_unsupported_scope", id=key[:24]))
             if callback:
-                callback({"ok": False, "error": "该消息不在群聊中，官方接口不支持撤回"})
+                callback({"ok": False, "error": "未知消息归属，无法撤回"})
             return
         loop = self._loop
         if loop is None or not loop.is_running():
@@ -840,8 +843,13 @@ class QQOfficialAdapter:
             return
 
         async def _recall() -> Any:
+            path = (
+                f"/v2/users/{target}/messages/{key}"
+                if kind == "private"
+                else f"/v2/groups/{target}/messages/{key}"
+            )
             try:
-                await self._api_request("DELETE", f"/v2/groups/{target}/messages/{key}")
+                await self._api_request("DELETE", path)
             except Exception as e:  # noqa: BLE001
                 self.logger.warning(_t("qqofficial.recall_failed", group=target, error=e))
                 return {"ok": False, "error": f"撤回失败：{e}"}

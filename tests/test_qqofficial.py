@@ -1090,6 +1090,224 @@ def test_whitelist_dual_store() -> None:
         check("QQ 域不受影响", wl.snapshot("qq") == [{"qid": "10001", "xbox": "Steve"}])
 
 
+# ---------------------------------------------------------------- 2026-09 新载荷
+def test_inbound_reference_reply() -> None:
+    """引用消息（message_type=103）：被引用内容在 msg_elements，须转 reply 段。"""
+    ad = make_adapter()
+    # C2C 引用回复：content=新消息，msg_elements[0]=被引用原文
+    data = {
+        "id": "MSG_REF1",
+        "content": "这个建议很有帮助，谢谢你！",
+        "message_type": 103,
+        "author": {"user_openid": "USEROPEN1", "username": "Alex"},
+        "msg_elements": [
+            {
+                "msg_idx": "REFIDX_aaa==",
+                "message_type": 103,
+                "content": "每天坚持阅读半小时，一个月后你会发现自己的变化",
+            }
+        ],
+        "message_scene": {
+            "source": "default",
+            "ext": ["ref_msg_idx=REFIDX_aaa==", "msg_idx=REFIDX_zzz=="],
+        },
+    }
+    run_async(ad._emit_c2c_message(data))
+    pack = [p for e, p in ad.bus.events if e == "onebot.pack"][0]
+    segs = pack["message"]
+    check("C2C 引用生成 reply 段", segs and segs[0]["type"] == "reply")
+    reply_data = segs[0]["data"]
+    check(
+        "reply 段 id 取官方引用索引",
+        reply_data["id"] == "REFIDX_aaa==",
+    )
+    check("reply 段携带被引用文本", "每天坚持阅读半小时" in reply_data.get("text", ""))
+    check("新消息正文保留", segs[1]["type"] == "text" and segs[1]["data"]["text"] == "这个建议很有帮助，谢谢你！")
+    check("raw_message 仍为新消息正文", pack["raw_message"] == "这个建议很有帮助，谢谢你！")
+
+    # 群聊引用回复：reply 段 + 被引用者昵称
+    ad2 = make_adapter()
+    data2 = {
+        "id": "MSG_REF2",
+        "group_openid": "GRPOPENID1",
+        "content": "收到，这就改",
+        "message_type": 103,
+        "author": {"member_openid": "MEMBER1", "username": "Steve"},
+        "msg_elements": [
+            {
+                "msg_idx": "REFIDX_bbb==",
+                "message_type": 103,
+                "content": "服务器几点维护？",
+                "author": {"member_openid": "MEMBER2", "username": "Alex"},
+            }
+        ],
+        "message_scene": {"source": "default", "ext": ["ref_msg_idx=REFIDX_bbb=="]},
+    }
+    run_async(ad2._emit_group_message(data2))
+    pack2 = [p for e, p in ad2.bus.events if e == "onebot.pack"][0]
+    segs2 = pack2["message"]
+    check("群引用生成 reply 段", segs2[0]["type"] == "reply")
+    check(
+        "reply 段附被引用者昵称与 openid",
+        segs2[0]["data"].get("sender") == "Alex" and segs2[0]["data"].get("user_id") == "MEMBER2",
+    )
+    check("群引用正文保留", segs2[1]["type"] == "text" and segs2[1]["data"]["text"] == "收到，这就改")
+
+
+def test_inbound_reference_blank_content() -> None:
+    """纯引用（content 为空）：元素正文兜底，游戏侧不再显示为空。"""
+    ad = make_adapter()
+    data = {
+        "id": "MSG_REF3",
+        "group_openid": "GRPOPENID1",
+        "content": " ",
+        "message_type": 103,
+        "author": {"member_openid": "MEMBER1", "username": "Steve"},
+        "msg_elements": [{"msg_idx": "REFIDX_ccc==", "content": "=== 消息 1 ===\n[消息内容] 今天的学习计划已完成"}],
+        "message_scene": {"source": "default", "ext": ["ref_msg_idx=REFIDX_ccc=="]},
+    }
+    run_async(ad._emit_group_message(data))
+    pack = [p for e, p in ad.bus.events if e == "onebot.pack"][0]
+    segs = pack["message"]
+    check("纯引用 reply 段在前", segs[0]["type"] == "reply")
+    check(
+        "元素正文兜底 text 段",
+        segs[1]["type"] == "text" and "今天的学习计划已完成" in segs[1]["data"]["text"],
+    )
+    check("raw_message 用元素正文兜底", "今天的学习计划已完成" in pack["raw_message"])
+
+
+def test_inbound_chat_record_forward() -> None:
+    """聊天记录（message_type=102）：转 OneBot forward 段（合并转发）。"""
+    ad = make_adapter()
+    data = {
+        "id": "MSG_FWD1",
+        "group_openid": "GRPOPENID1",
+        "content": " ",
+        "message_type": 102,
+        "author": {"member_openid": "MEMBER1", "username": "Steve"},
+        "msg_elements": [{"msg_idx": "REFIDX_ddd==", "content": "=== 消息 1 ===\n[消息内容] 合并的聊天记录"}],
+    }
+    run_async(ad._emit_group_message(data))
+    pack = [p for e, p in ad.bus.events if e == "onebot.pack"][0]
+    segs = pack["message"]
+    check("聊天记录转 forward 段", segs and segs[0]["type"] == "forward")
+    check("forward 段 id", segs[0]["data"].get("id") == "REFIDX_ddd==")
+    check("聊天记录正文兜底", segs[1]["type"] == "text" and "合并的聊天记录" in segs[1]["data"]["text"])
+
+
+def test_inbound_mentions_field() -> None:
+    """mentions 数组（2026-09 载荷）：补昵称 + 补齐 content 已剥离的 @。"""
+    ad = make_adapter()
+    # 场景1：content 无内联标记（新载荷把 @ 剥离到 mentions）
+    data = {
+        "id": "MSG_MEN1",
+        "group_openid": "GRPOPENID1",
+        "content": "晚上一起玩",
+        "author": {"member_openid": "MEMBER1", "username": "Steve"},
+        "mentions": [{"member_openid": "MEMBER2", "username": "Alex"}],
+    }
+    run_async(ad._emit_group_message(data))
+    pack = [p for e, p in ad.bus.events if e == "onebot.pack"][0]
+    ats = [s for s in pack["message"] if s["type"] == "at"]
+    check("mentions 补齐 at 段", len(ats) == 1 and ats[0]["data"]["qq"] == "MEMBER2")
+    check("at 段带昵称", ats[0]["data"].get("nickname") == "Alex")
+
+    # 场景2：content 仍含旧内联标记 → 就地补昵称且不重复
+    ad2 = make_adapter()
+    data2 = {
+        "id": "MSG_MEN2",
+        "group_openid": "GRPOPENID1",
+        "content": "<@!MEMBER2> 看看这个",
+        "author": {"member_openid": "MEMBER1", "username": "Steve"},
+        "mentions": [{"member_openid": "MEMBER2", "username": "Alex"}],
+    }
+    run_async(ad2._emit_group_message(data2))
+    pack2 = [p for e, p in ad2.bus.events if e == "onebot.pack"][0]
+    ats2 = [s for s in pack2["message"] if s["type"] == "at"]
+    check("内联 at 不重复", len(ats2) == 1)
+    check("内联 at 补昵称", ats2[0]["data"].get("nickname") == "Alex")
+
+
+def test_inbound_voice_asr() -> None:
+    """语音附件（2026-09 载荷）：WAV 直链与 ASR 识别文本。"""
+    ad = make_adapter()
+    data = {
+        "id": "MSG_VOICE1",
+        "group_openid": "GRPOPENID1",
+        "content": "听我说",
+        "author": {"member_openid": "MEMBER1", "username": "Steve"},
+        "attachments": [
+            {
+                "content_type": "voice",
+                "filename": "voice.silk",
+                "url": "https://dl.example.com/voice.silk",
+                "voice_wav_url": "https://dl.example.com/voice.wav",
+                "asr_refer_text": "帮我把这个箱子搬到门口",
+            }
+        ],
+    }
+    run_async(ad._emit_group_message(data))
+    pack = [p for e, p in ad.bus.events if e == "onebot.pack"][0]
+    segs = pack["message"]
+    record = [s for s in segs if s["type"] == "record"]
+    check("语音转 record 段", len(record) == 1)
+    check("record 段附 WAV 直链", record[0]["data"].get("wav_url") == "https://dl.example.com/voice.wav")
+    check("record 段 url 保留原链", record[0]["data"].get("url") == "https://dl.example.com/voice.silk")
+    texts = [s for s in segs if s["type"] == "text"]
+    check(
+        "ASR 识别文本随段附送",
+        any("帮我把这个箱子搬到门口" in s["data"]["text"] for s in texts),
+    )
+
+
+def test_delete_msg_private() -> None:
+    """delete_msg 单聊路径：官方 2026-07 起支持撤回机器人发给用户的消息。"""
+    ad = make_adapter()
+    calls: list[tuple[str, str]] = []
+
+    async def fake_api(method: str, path: str, body: Any = None) -> Any:
+        calls.append((method, path))
+        return {}
+
+    ad._api_request = fake_api  # type: ignore[method-assign]
+    loop, _t = _start_bg_loop()
+    try:
+        ad._loop = loop
+        # 单聊消息：入站记录归属后撤回 → /v2/users/{openid}/messages/{id}
+        data = {
+            "id": "MSG_DEL1",
+            "content": "你好",
+            "author": {"user_openid": "USEROPEN9", "username": "Alex"},
+        }
+        run_async(ad._emit_c2c_message(data))
+        results: list[Any] = []
+        ad.delete_msg("MSG_DEL1", results.append)
+        for _ in range(50):
+            if results:
+                break
+            time.sleep(0.02)
+        check("单聊撤回成功回调", results and results[0].get("ok") is True)
+        check(
+            "单聊撤回走 users 路径",
+            calls and calls[0] == ("DELETE", "/v2/users/USEROPEN9/messages/MSG_DEL1"),
+        )
+        # 群聊路径回归
+        calls.clear()
+        ad.remember_msg_scope("MSG_DEL2", "group", "GRPOPENID1")
+        ad.delete_msg("MSG_DEL2", lambda _: None)
+        for _ in range(50):
+            if calls:
+                break
+            time.sleep(0.02)
+        check(
+            "群聊撤回仍走 groups 路径",
+            calls and calls[0] == ("DELETE", "/v2/groups/GRPOPENID1/messages/MSG_DEL2"),
+        )
+    finally:
+        loop.call_soon_threadsafe(loop.stop())
+
+
 def main() -> int:
     tests = [
         test_inbound_group_message,
@@ -1118,6 +1336,12 @@ def main() -> int:
         test_set_group_ban_batch_limit,
         test_call_action_dispatch,
         test_get_group_info_official_fallback,
+        test_inbound_reference_reply,
+        test_inbound_reference_blank_content,
+        test_inbound_chat_record_forward,
+        test_inbound_mentions_field,
+        test_inbound_voice_asr,
+        test_delete_msg_private,
     ]
     for fn in tests:
         print(f"\n== {fn.__name__} ==")
@@ -1131,10 +1355,6 @@ def main() -> int:
     if FAILED:
         print("失败项:", ", ".join(FAILED))
     return 1 if FAILED else 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
 
 
 # ---------------------------------------------------------------- 群管理 API
@@ -1294,3 +1514,7 @@ def test_get_group_info_official_fallback() -> None:
         )
     finally:
         loop.call_soon_threadsafe(loop.stop())
+
+
+if __name__ == "__main__":
+    sys.exit(main())
