@@ -1,8 +1,5 @@
 "use strict";
 
-// 日志级别白名单：防止畸形/恶意 level 注入 HTML
-const LOG_LEVELS = new Set(["trace", "debug", "info", "warn", "warning", "error", "critical", "fatal"]);
-
 let TOKEN = localStorage.getItem("lumen_token") || "";
 let configMode = "form"; // form | json
 let configData = null;
@@ -3528,26 +3525,147 @@ function closeMoreSheet() {
 }
 
 
-function appendLog(entry) {
+/* ================= 实时日志（SSE 流 + 级别/关键词筛选） ================= */
+const LOG_LV_META = {
+  info: ["INFO", "#30d158"],
+  warn: ["WARN", "#ff9f0a"],
+  error: ["ERROR", "#ff453a"],
+  debug: ["DEBUG", "#64d2ff"],
+};
+const logView = {
+  entries: [],      // 最近 500 条全量（含被筛掉的行，改筛选时全量重放）
+  levels: new Set(Object.keys(LOG_LV_META)),
+  terms: [],        // 关键词（空格分隔 AND，小写）
+  paused: false,
+  counts: { info: 0, warn: 0, error: 0, debug: 0 },
+};
+
+function normLogLevel(lv) {
+  lv = (lv || "").toLowerCase();
+  if (lv === "warn" || lv === "warning") return "warn";
+  if (lv === "error" || lv === "critical" || lv === "fatal") return "error";
+  if (lv === "debug" || lv === "trace") return "debug";
+  return "info";
+}
+
+function logPassFilter(e) {
+  if (!logView.levels.has(e.lv)) return false;
+  if (logView.terms.length) {
+    const hay = (String(e.msg || "") + "\n" + String(e.plugin || "")).toLowerCase();
+    if (!logView.terms.every((w) => hay.includes(w))) return false;
+  }
+  return true;
+}
+
+function logMsgHtml(msg) {
+  let s = esc(msg);
+  for (const term of logView.terms) {
+    try {
+      s = s.replace(new RegExp("(" + term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ")", "gi"),
+        '<mark class="log-mark">$1</mark>');
+    } catch (e) { /* 忽略非法正则 */ }
+  }
+  return s;
+}
+
+function logLineHtml(e) {
+  const time = String(e.time || "").slice(11) || e.time || "";
+  return `<span class="t">${esc(time)}</span>` +
+    `<span class="lv lv-${e.lv}">${LOG_LV_META[e.lv][0]}</span>` +
+    `<span class="src">[${esc(e.plugin || "?")}]</span>${logMsgHtml(e.msg || "")}`;
+}
+
+function logUpdateCounts() {
   const box = document.getElementById("log-box");
-  const line = document.createElement("div");
-  line.className = "log-line";
-  const lv = LOG_LEVELS.has((entry.level || "").toLowerCase()) ? entry.level.toLowerCase() : "info";
-  line.innerHTML = `<span class="t">${esc(entry.time)}</span>` +
-    `<span class="lv lv-${lv}">${lv.toUpperCase()}</span>` +
-    `<span style="color:#64d2ff">[${esc(entry.plugin)}]</span> ${esc(entry.msg)}`;
-  box.appendChild(line);
-  while (box.childNodes.length > 800) box.removeChild(box.firstChild);
+  document.querySelectorAll("#log-lvchips .log-lvn").forEach((n) => {
+    n.textContent = String(logView.counts[n.dataset.lv] || 0);
+  });
+  const meta = document.getElementById("log-meta");
+  if (meta) {
+    meta.textContent = t("logs.meta", {
+      shown: box ? box.childNodes.length : 0,
+      total: logView.entries.length,
+    });
+  }
+}
+
+function renderLogChips() {
+  const el = document.getElementById("log-lvchips");
+  if (!el) return;
+  el.innerHTML = Object.entries(LOG_LV_META).map(([lv, [label, color]]) => {
+    const on = logView.levels.has(lv);
+    const style = on ? `border-color:${color}66;background:${color}1a;color:${color}` : "";
+    return `<button class="log-lvchip" data-lv="${lv}" style="${style}" title="${esc(t("logs.level_toggle_hint"))}">` +
+      `${label}<span class="log-lvn" data-lv="${lv}">0</span></button>`;
+  }).join("");
+}
+
+function appendLog(entry) {
+  const e = {
+    time: entry.time, plugin: entry.plugin, msg: entry.msg,
+    lv: normLogLevel(entry.level),
+  };
+  logView.entries.push(e);
+  logView.counts[e.lv] = (logView.counts[e.lv] || 0) + 1;
+  while (logView.entries.length > 500) {
+    const dropped = logView.entries.shift();
+    logView.counts[dropped.lv] = Math.max(0, (logView.counts[dropped.lv] || 0) - 1);
+  }
+  const box = document.getElementById("log-box");
+  if (box && logPassFilter(e)) {
+    const line = document.createElement("div");
+    line.className = "log-line";
+    line.innerHTML = logLineHtml(e);
+    box.appendChild(line);
+    while (box.childNodes.length > 800) box.removeChild(box.firstChild);
+    const cb = document.getElementById("log-autoscroll");
+    if (cb && cb.checked) box.scrollTop = box.scrollHeight;
+  }
+  logUpdateCounts();
+}
+
+function renderLogAll() {
+  const box = document.getElementById("log-box");
+  if (!box) return;
+  box.innerHTML = logView.entries.filter(logPassFilter)
+    .map((e) => `<div class="log-line">${logLineHtml(e)}</div>`).join("")
+    || `<div class="log-empty">${esc(t("logs.empty_filtered"))}</div>`;
   const cb = document.getElementById("log-autoscroll");
   if (cb && cb.checked) box.scrollTop = box.scrollHeight;
+  logUpdateCounts();
+}
+
+function resetLogView() {
+  logView.entries = [];
+  logView.counts = { info: 0, warn: 0, error: 0, debug: 0 };
+  const box = document.getElementById("log-box");
+  if (box) box.innerHTML = "";
+  logUpdateCounts();
+}
+
+function setLogPaused(paused) {
+  logView.paused = paused;
+  const btn = document.getElementById("log-pause-btn");
+  if (btn) {
+    // data-i18n 跟随语言切换刷新按钮文案
+    btn.setAttribute("data-i18n", paused ? "logs.resume" : "logs.pause");
+    btn.textContent = t(paused ? "logs.resume" : "logs.pause");
+  }
+  const dot = document.getElementById("log-dot");
+  if (dot) dot.classList.toggle("paused", paused);
+  if (paused) {
+    closeLogStream();
+    const status = document.getElementById("log-status");
+    if (status) status.textContent = t("logs.status_paused");
+  }
 }
 
 async function initLogs() {
   closeLogStream();
   const generation = logGeneration;
-  const box = document.getElementById("log-box");
+  resetLogView();
+  renderLogChips();
   const status = document.getElementById("log-status");
-  box.innerHTML = "";
   if (status) status.textContent = t("logs.status_connecting");
   try {
     const { data } = await api("GET", "/api/logs");
@@ -3557,7 +3675,7 @@ async function initLogs() {
     if (generation !== logGeneration) return;
     if (status) status.textContent = t("logs.status_load_failed");
   }
-  if (generation !== logGeneration || currentPage !== "logs" || document.hidden) return;
+  if (generation !== logGeneration || currentPage !== "logs" || document.hidden || logView.paused) return;
   const source = new EventSource("/api/logs/stream?token=" + encodeURIComponent(TOKEN));
   logSource = source;
   source.onopen = () => {
@@ -3581,14 +3699,43 @@ document.addEventListener("visibilitychange", () => {
     closeLogStream();
     stopMetricsPolling();
   } else if (TOKEN) {
-    if (currentPage === "logs") initLogs();
+    if (currentPage === "logs" && !logView.paused) initLogs();
     if (currentPage === "dashboard") startMetricsPolling();
   }
 });
 
 function clearLogView() {
-  document.getElementById("log-box").innerHTML = "";
+  resetLogView();
 }
+
+// 级别筛选 chips
+document.getElementById("log-lvchips").addEventListener("click", (e) => {
+  const btn = e.target.closest(".log-lvchip");
+  if (!btn) return;
+  const lv = btn.dataset.lv;
+  if (logView.levels.has(lv)) logView.levels.delete(lv); else logView.levels.add(lv);
+  if (logView.levels.size === 0) logView.levels = new Set(Object.keys(LOG_LV_META));
+  renderLogChips();
+  renderLogAll();
+});
+
+// 关键词过滤（防抖）
+let logFilterTimer = null;
+document.getElementById("log-filter").addEventListener("input", (e) => {
+  logView.terms = e.target.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  clearTimeout(logFilterTimer);
+  logFilterTimer = setTimeout(renderLogAll, 180);
+});
+
+// 暂停 / 继续
+document.getElementById("log-pause-btn").addEventListener("click", () => {
+  if (logView.paused) {
+    setLogPaused(false);
+    initLogs();
+  } else {
+    setLogPaused(true);
+  }
+});
 
 
 

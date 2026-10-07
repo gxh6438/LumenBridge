@@ -619,10 +619,18 @@
         "status_ok": "Realtime connection OK",
         "status_reconnecting": "Connection lost, reconnecting...",
         "stream_connected_msg": "Real-time log stream connected",
+        "filter_placeholder": "Filter logs (space-separated keywords)...",
+        "pause": "Pause",
+        "resume": "Resume",
+        "status_paused": "Paused · click Resume to continue",
+        "meta": "Showing {shown} / buffered {total}",
+        "empty_filtered": "No matching log entries",
+        "level_toggle_hint": "Click to toggle this level",
         "level_all": "All",
         "level_info": "Info",
         "level_warning": "Warning",
-        "level_error": "Error"
+        "level_error": "Error",
+        "level_debug": "Debug"
     },
     "modal": {
         "confirm_title": "Confirm",
