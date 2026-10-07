@@ -1526,6 +1526,12 @@ class MarketplaceClient:
         logger = self.logger
         old_plugin.logger.info(f"[Update] 开始热重载至 v{version}（等同 /reload，服务器插件将全部重载）")
         log(f"正在热重载至 v{version}（等同 /reload，服务器插件将全部重载）...")
+        # server.reload() 直接 API 不经过命令系统，不会触发 ServerCommandEvent
+        # 探测；须在此显式标记 reload 意图，on_disable 才能跳过关服误播报
+        try:
+            old_plugin.note_reload_intent()
+        except Exception:  # noqa: BLE001
+            pass
 
         def _restore_backup(reason: str) -> bool:
             logger.error(f"[Update] {reason}")
@@ -1668,6 +1674,13 @@ class MarketplaceClient:
         plugins_dir = Path(self.plugin.data_folder).parent
         target = plugins_dir / str(receipt.get("wheel") or "")
         backup_directory = str(receipt.get("backup_directory") or "")
+
+        # 标记 reload 意图：phase1 禁用插件（on_disable）发生在 server.reload()
+        # 之前，须提前告知插件这是框架更新而非真实停服，跳过关服误播报
+        try:
+            self.plugin.note_reload_intent()
+        except Exception:  # noqa: BLE001
+            pass
 
         ghost = self._make_reload_ghost()
         glog = ghost.logger

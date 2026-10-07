@@ -3,6 +3,7 @@
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -12,9 +13,11 @@ from endstone.event import (
     BroadcastMessageEvent,
     EventPriority,
     PlayerChatEvent,
+    PlayerCommandEvent,
     PlayerDeathEvent,
     PlayerJoinEvent,
     PlayerQuitEvent,
+    ServerCommandEvent,
     event_handler,
 )
 from endstone.plugin import Plugin
@@ -63,6 +66,15 @@ _BANNER_LINES: tuple[str, ...] = (
     "                                                     |___/      ",
 )
 _BANNER_SPLIT = 33
+
+# reload 意图窗口（秒）：命令事件 / 框架更新标记后，on_disable 在此窗口内
+# 视为 reload 而非真实停服，跳过关服误播报。窗口取宽（120s）以覆盖慢加载，
+# 窗口内真实停服仅漏播一条提示，影响远小于每次 reload 的误播。
+_RELOAD_INTENT_WINDOW = 120.0
+
+# server.start_time 持久化文件名（存于插件数据目录）：
+# 同一进程内 reload 后 start_time 不变，据此区分"新进程开服"与"reload 重启"。
+_SERVER_START_TIME_FILE = ".server_start_time"
 
 
 class LumenBridgePlugin(Plugin):
@@ -120,6 +132,9 @@ class LumenBridgePlugin(Plugin):
         self._language: str = DEFAULT_LANGUAGE
         # 服务器主线程 ident：主线程上 run_on_main+等待须直接调用，避免自死锁
         self._main_thread_id: int = threading.get_ident()
+        # reload 意图时间戳：玩家/控制台执行 reload 命令或框架更新触发
+        # server.reload() 前记录；on_disable 据此跳过关服误播报
+        self._reload_requested_at: float = 0.0
         # 周期性市场更新检查线程的停止信号（on_disable 置位，热重载/停服时退出循环）
         self._market_check_stop = threading.Event()
         # 市场检查线程引用：幂等补启用（reload 时不叠加重复线程）
@@ -319,10 +334,12 @@ class LumenBridgePlugin(Plugin):
         self._market_check_stop.set()
         # 每个清理步骤独立 try/except，避免单步异常阻断后续清理导致资源泄漏
         log = self._tee_logger or self.logger
+        # reload 周期内禁用（全服 /reload 或框架更新）不是真实停服，跳过关服播报
+        reloading = self._is_reload_pending()
         for cleanup in (
             lambda: self.webui.stop() if self.webui else None,
             lambda: self.subplugin_manager.unload_all() if self.subplugin_manager else None,
-            lambda: self.chat_sync_module.on_server_stop() if self.chat_sync_module else None,
+            lambda: self.chat_sync_module.on_server_stop() if (self.chat_sync_module and not reloading) else None,
             lambda: self.hub.stop_all() if self.hub else None,
             lambda: self.bus.remove_all() if self.bus else None,
         ):
@@ -595,8 +612,65 @@ class LumenBridgePlugin(Plugin):
             if self._started:
                 return
             self._started = True
-        if self.chat_sync_module:
+        # 同一进程内 reload（start_time 未变）不是真实开服，跳过开服播报
+        if self.chat_sync_module and self._is_new_server_process():
             self.chat_sync_module.on_server_start()
+
+    # ------------------------------------------------- reload / 停服播报判定
+
+    def note_reload_intent(self) -> None:
+        """标记"全服 reload 即将发生"（/reload 命令或框架更新）。
+
+        供 on_disable 判定：窗口内禁用属 reload 流程而非真实停服，
+        跳过关服播报；marketplace 框架更新（phase2 server.reload）前调用。
+        """
+        self._reload_requested_at = time.time()
+
+    def _is_reload_pending(self) -> bool:
+        """on_disable 时是否处于 reload 意图窗口内。"""
+        try:
+            return (time.time() - self._reload_requested_at) < _RELOAD_INTENT_WINDOW
+        except (TypeError, ValueError):
+            return False
+
+    def _is_new_server_process(self) -> bool:
+        """本次启用是否为全新进程开服（False = 同进程 reload 重启）。
+
+        server.start_time 在 reload 前后不变、真重启才变化，与数据目录中
+        持久化的上次记录比较即可区分；无法判断时保守返回 True（维持播报）。
+        """
+        try:
+            current = self.server.start_time
+            path = Path(self.data_folder) / _SERVER_START_TIME_FILE
+            saved = ""
+            if path.is_file():
+                saved = path.read_text(encoding="utf-8").strip()
+            current_str = str(getattr(current, "isoformat", lambda: current)())
+            if saved and saved == current_str:
+                return False  # 同一进程内的 reload 重启
+            path.write_text(current_str, encoding="utf-8")
+            return True
+        except Exception:
+            return True
+
+    def _note_reload_if_reload_command(self, command: Any) -> None:
+        """命令为全服 reload 时记录意图（玩家 /reload 与控制台 reload）。"""
+        try:
+            head = str(command).strip().lstrip("/").split(None, 1)[0].lower()
+        except Exception:
+            return
+        if head == "reload":
+            self.note_reload_intent()
+
+    @event_handler
+    def _on_player_command_reload_probe(self, event: PlayerCommandEvent) -> None:
+        """玩家命令探测：捕获 /reload（仅全服 reload，不含 /lumen reload）。"""
+        self._note_reload_if_reload_command(getattr(event, "command", ""))
+
+    @event_handler
+    def _on_server_command_reload_probe(self, event: ServerCommandEvent) -> None:
+        """控制台命令探测：捕获 reload（含 WebUI 控制台转发的命令）。"""
+        self._note_reload_if_reload_command(getattr(event, "command", ""))
 
     def _on_bot_offline(self, adapter: Any = None) -> None:
         """断线回调（WS 线程）：把对应适配器的资料卡片连接状态置回 False。"""
