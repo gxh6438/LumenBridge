@@ -414,13 +414,20 @@
         <div class="page-title" data-i18n="logs.title">实时日志</div>
         <div class="page-sub" data-i18n="logs.subtitle">SSE 实时流 · 最近 500 条</div>
         <div class="toolbar">
+          <div id="log-lvchips" class="log-lvchips"></div>
+          <input type="text" id="log-filter" data-i18n-placeholder="logs.filter_placeholder"
+                 placeholder="过滤日志（关键词空格分隔）..." style="flex:1;min-width:150px" autocomplete="off">
+          <button class="btn small ghost" id="log-pause-btn" data-i18n="logs.pause">暂停</button>
           <button class="btn small ghost" onclick="clearLogView()" data-i18n="logs.clear_button">清屏</button>
-          <label style="display:flex;align-items:center;gap:7px;font-size:13px;color:var(--muted)">
+          <label style="display:flex;align-items:center;gap:7px;font-size:13px;color:var(--muted);white-space:nowrap">
             <input type="checkbox" id="log-autoscroll" checked style="width:18px;height:18px;accent-color:var(--accent)"> <span data-i18n="logs.auto_scroll">自动滚动</span>
           </label>
-          <span id="log-status" class="tag gray">尚未连接</span>
         </div>
         <div class="log-box" id="log-box"></div>
+        <div class="hint log-statusbar">
+          <span><span class="log-dot" id="log-dot"></span><span id="log-status" class="tag gray">尚未连接</span></span>
+          <span id="log-meta"></span>
+        </div>
       </div>
 
       <div id="page-custom" class="page" style="display:none">

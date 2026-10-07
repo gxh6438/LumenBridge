@@ -443,13 +443,42 @@
   -webkit-backdrop-filter: blur(var(--blur)); backdrop-filter: blur(var(--blur));
   border: 1px solid rgba(255,255,255,.08);
   color: #d5dbe8;
+  overscroll-behavior: contain;
 }
 @media (max-width: 640px) { .log-box { height: 60vh; font-size: 11.5px; } }
-.log-line { white-space: pre-wrap; word-break: break-all; }
+.log-line { white-space: pre-wrap; word-break: break-all; padding: 1px 6px; border-radius: 6px; }
+.log-line:hover { background: rgba(255,255,255,.05); }
 .log-line .t { color: rgba(213,219,232,.45); margin-right: 8px; }
 .log-line .lv { display: inline-block; width: 52px; font-weight: 700; }
+.log-line .src { color: #64d2ff; margin-right: 6px; }
 .lv-info { color: #30d158; } .lv-warn { color: #ff9f0a; }
 .lv-error { color: #ff453a; } .lv-debug { color: #64d2ff; }
+mark.log-mark { background: rgba(255,159,10,.35); color: inherit; border-radius: 4px; padding: 0 2px; }
+@media (prefers-color-scheme: dark) { mark.log-mark { background: rgba(255,159,10,.3); color: #ffd60a; } }
+.log-empty { color: rgba(213,219,232,.5); text-align: center; padding: 40px 0; }
+
+/* 级别筛选 chips */
+.log-lvchips { display: flex; gap: 6px; flex-wrap: wrap; }
+.log-lvchip {
+  display: inline-flex; align-items: center; gap: 5px;
+  border: 1px solid var(--divider); background: var(--input-bg);
+  color: var(--muted); font-size: 11.5px; font-weight: 700;
+  padding: 5px 12px; border-radius: 20px; cursor: pointer;
+  transition: all .15s; letter-spacing: .3px; font-family: inherit;
+}
+.log-lvchip:hover { transform: translateY(-1px); }
+.log-lvchip .log-lvn { font-size: 10.5px; opacity: .7; font-weight: 500; }
+
+/* 底部状态栏 */
+.log-statusbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.log-statusbar #log-status { font-size: 12px; }
+.log-dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--green); box-shadow: 0 0 8px rgba(48,209,88,.6);
+  margin-right: 7px; vertical-align: 1px;
+}
+.log-dot.paused { background: var(--orange); box-shadow: 0 0 8px rgba(255,159,10,.6); }
+#log-meta { font-variant-numeric: tabular-nums; }
 
 #toast {
   position: fixed; top: calc(18px + env(safe-area-inset-top, 0px));

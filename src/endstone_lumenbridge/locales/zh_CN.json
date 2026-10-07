@@ -619,10 +619,18 @@
         "status_ok": "实时连接正常",
         "status_reconnecting": "连接中断，正在自动重连...",
         "stream_connected_msg": "日志实时流已连接",
+        "filter_placeholder": "过滤日志（关键词空格分隔）...",
+        "pause": "暂停",
+        "resume": "继续",
+        "status_paused": "已暂停 · 点击「继续」恢复接收",
+        "meta": "显示 {shown} / 缓存 {total} 条",
+        "empty_filtered": "暂无匹配的日志",
+        "level_toggle_hint": "点击切换该级别显示",
         "level_all": "全部",
         "level_info": "信息",
         "level_warning": "警告",
-        "level_error": "错误"
+        "level_error": "错误",
+        "level_debug": "调试"
     },
     "modal": {
         "confirm_title": "确认操作",

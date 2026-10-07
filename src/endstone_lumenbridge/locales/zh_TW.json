@@ -619,10 +619,18 @@
         "status_ok": "即時連線正常",
         "status_reconnecting": "連線中斷，正在自動重連...",
         "stream_connected_msg": "日誌即時串流已連線",
+        "filter_placeholder": "過濾日誌（關鍵詞空格分隔）...",
+        "pause": "暫停",
+        "resume": "繼續",
+        "status_paused": "已暫停 · 點擊「繼續」恢復接收",
+        "meta": "顯示 {shown} / 快取 {total} 條",
+        "empty_filtered": "暫無符合的日誌",
+        "level_toggle_hint": "點擊切換該級別顯示",
         "level_all": "全部",
         "level_info": "資訊",
         "level_warning": "警告",
-        "level_error": "錯誤"
+        "level_error": "錯誤",
+        "level_debug": "除錯"
     },
     "modal": {
         "confirm_title": "確認操作",
