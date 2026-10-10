@@ -21,9 +21,24 @@ from .i18n import t as _t
 
 _LOG = logging.getLogger(__name__)
 
-# Endstone / LumenBridge 核心依赖，禁止被升级或卸载
+# Endstone / LumenBridge 核心依赖，禁止被升级或卸载。
+# endstone 的完整运行时依赖闭包（`pip install endstone` 默认安装集，
+# pip 解析器 dry-run 报告 + importlib.metadata 环境标记求值双重核对，
+# 不含 extra=="dev" 的开发依赖）全部纳入保护：任一被覆盖/卸载都会破坏
+# Endstone 服务器本体。子插件声明与已装版本兼容的共享依赖（如 requests）
+# 不受影响——pip 不会重装已满足的包，预检只拦截真正要改动受保护包的安装。
 PROTECTED_PACKAGES = {
-    "endstone", "websockets", "pip", "setuptools", "wheel",
+    # ── endstone 本体 + 运行时依赖闭包（endstone 0.11.x，32 项）──
+    "endstone",
+    "aiohttp", "aiohappyeyeballs", "aiosignal", "asyncio",
+    "attrs", "certifi", "charset_normalizer", "click", "colorlog",
+    "frozenlist", "idna", "importlib_metadata", "importlib_resources",
+    "lazy_loader", "markdown_it_py", "mdurl", "multidict",
+    "numpy", "packaging", "pkginfo", "propcache", "psutil",
+    "pygments", "pyyaml", "requests", "rich", "tomlkit",
+    "typing_extensions", "urllib3", "yarl", "zipp",
+    # ── 基础设施与 LumenBridge 本体 ──
+    "pip", "setuptools", "wheel", "websockets",
     "endstone-lumenbridge", "endstone_lumenbridge",
 }
 

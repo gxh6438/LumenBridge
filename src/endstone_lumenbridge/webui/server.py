@@ -703,7 +703,8 @@ class WebUIServer:
             "success": False,
             "msg": "",
             "subplugin_name": subplugin_name,
-            # 依赖安装默认不自动重载子插件（用户显式确认第二步）；reload_after_install 仅内部联动。
+            # 子插件依赖安装任务在安装成功后自动热重载（reload_after_install）；
+            # reload_required 仅为兼容旧前端字段保留（现在恒为 False）。
             "reload_required": bool(subplugin_name and not reload_after_install),
             "reload_after_install": bool(reload_after_install),
             "action": action,
@@ -2604,7 +2605,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             if not pip_mgr.enable:
                 return self._send_json({"code": 403, "msg": _t("pip.disabled")}, 403)
             task_id = self.webui._start_pip_task(
-                pip_mgr, deps, "install_deps", subplugin_name=name, reload_after_install=False
+                pip_mgr, deps, "install_deps", subplugin_name=name, reload_after_install=True
             )
             if task_id is None:
                 return self._send_json({"code": 429, "msg": "任务数过多，请稍后再试"}, 429)
