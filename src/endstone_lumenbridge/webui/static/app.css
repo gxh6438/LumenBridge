@@ -207,12 +207,27 @@
 .bot-avatar { width: 38px; height: 38px; flex: 0 0 38px; border-radius: 50%; object-fit: cover; border: 1px solid var(--glass-border); background: var(--input-bg); }
 .bot-avatar.fallback { display: inline-flex; align-items: center; justify-content: center; color: var(--muted); font-size: 11px; font-weight: 700; }
 .bot-avatar.fallback[hidden] { display: none; }
-/* 多账号机器人资料：小头像 + 最多 3 行，超出省略 */
+/* 多账号机器人资料：小头像 + 最多两行可视（限高防卡片被拉高），
+   超出部分纵向滑动查看（移动端触摸滑动，桌面滚轮/细滚动条） */
 .bot-profile-list {
   display: flex; flex-direction: column; gap: 7px; min-width: 0; max-width: 100%;
-  max-height: calc(3 * 30px + 2 * 7px); overflow: hidden;
-  -webkit-mask-image: linear-gradient(to bottom, #000 78%, transparent);
-  mask-image: linear-gradient(to bottom, #000 78%, transparent);
+  max-height: calc(2 * 30px + 7px); overflow-y: auto;
+  overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+}
+.bot-profile-list::-webkit-scrollbar { width: 4px; }
+.bot-profile-list::-webkit-scrollbar-thumb { background: var(--glass-border); border-radius: 2px; }
+/* 主群：群号芯片单行排列，横向滑动查看（多群号不再把卡片撑高） */
+.group-chips {
+  display: flex; gap: 6px; min-width: 0; max-width: 100%;
+  overflow-x: auto; overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch;
+  scrollbar-width: none; padding-bottom: 2px;
+}
+.group-chips::-webkit-scrollbar { display: none; }
+.group-chip {
+  font-style: normal; font-size: 12px; font-weight: 600; color: var(--muted);
+  background: var(--input-bg); border: 1px solid var(--glass-border);
+  border-radius: 6px; padding: 2px 8px; white-space: nowrap; flex: none;
 }
 .bot-profile-list .bot-profile-inline { gap: 7px; }
 .bot-avatar.sm { width: 24px; height: 24px; flex: 0 0 24px; font-size: 8.5px; }
@@ -483,7 +498,7 @@ mark.log-mark { background: rgba(255,159,10,.35); color: inherit; border-radius:
 #toast {
   position: fixed; top: calc(18px + env(safe-area-inset-top, 0px));
   left: 50%; transform: translateX(-50%) translateY(-120px);
-  z-index: 99; padding: 13px 24px;
+  z-index: 150; padding: 13px 24px;
   border-radius: 30px; font-size: 14px; font-weight: 500;
   max-width: min(480px, calc(100vw - 40px));
   background: var(--glass-strong);
@@ -501,12 +516,33 @@ mark.log-mark { background: rgba(255,159,10,.35); color: inherit; border-radius:
 #toast .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
 #toast.err .dot { background: var(--red); }
 
-#subplugin-dim { display: none; position: fixed; inset: 0; z-index: 80; pointer-events: none; }
-#subplugin-dim.show { display: block; }
-#subplugin-dim .dim-strip {
-  position: absolute; background: rgba(0,0,0,.35);
+/* ── 子插件弹窗（接管模式）──
+   架构：弹窗打开时 iframe 整体转为全屏 fixed 层（其内遮罩由注入 CSS 固定为
+   全屏透明、仅承载卡片与点击），主面板渲染唯一一层全屏遮罩 #subplugin-dim。
+   此前“iframe 内遮罩 + iframe 外四条遮罩”的拼接方案不可修：iframe 内的
+   backdrop-filter 采样不到主页面内容（浏览器按 iframe 划分合成层），两层
+   遮罩的模糊对象不同，交界处必然出现色差与分割线。单层遮罩从根本消灭接缝。
+   层级（两级抬升，缺一不可）：
+   1. .layout 抬到 100：.layout 有 isolation:isolate 形成“闷罐”层叠上下文，
+      .main 的 z-index 再高也被困在里面；而 .tabbar（z:60）与确认弹窗(120)/
+      toast(150) 挂在 body 层。不抬 .layout，底部 tabbar 会永远浮在全屏
+      遮罩之上。抬到 100 即压过 tabbar(60)，又低于 confirm(120)/toast(150)。
+   2. .main 抬到 110：压过 .layout 内的侧栏（sticky，z:2），使全屏遮罩
+      （.main 内 z:80）与全屏 iframe（z:85）盖住侧栏与页面内容，
+      卡片透过透明 iframe 浮于遮罩之上。 */
+#subplugin-dim {
+  position: fixed; inset: 0; z-index: 80; pointer-events: none;
+  background: rgba(0,0,0,.35);
   -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
-  cursor: pointer; pointer-events: auto;
+  opacity: 0; transition: opacity .22s ease;
+}
+body.subplugin-modal #subplugin-dim { opacity: 1; }
+body.subplugin-modal .layout { z-index: 100; }
+body.subplugin-modal .main { z-index: 110; }
+body.subplugin-modal #custom-frame {
+  position: fixed !important; inset: 0 !important;
+  width: 100% !important; height: 100% !important;
+  z-index: 85; background: transparent;
 }
 /* 确认/告警弹窗必须永远置于其它弹窗之上：与详情等业务弹窗同为 z-index:80 时，
    DOM 序靠后的业务弹窗（如插件详情卡片）会盖住确认弹窗 */
@@ -703,9 +739,18 @@ textarea.file-editor {
 .custom-select-option:hover { background: var(--hover-bg, rgba(0,0,0,.04)); }
 .custom-select-option.selected { color: var(--accent, #4f8cff); font-weight: 600; }
 
-.rules-list { display: flex; flex-direction: column; gap: 12px; }
+/* 正则列表栅格：与子插件/插件市场页一致的自适应多卡片并行——列宽下限 420px
+   （正则卡片含徽章行 + pattern + 操作按钮行，过窄会挤压换行），窄屏自动单列，
+   宽屏 2~3 列并排；min(100%,…) 防超小屏溢出视口，minmax 轨道防长 pattern 撑爆 */
+.rules-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr));
+  gap: 12px;
+}
+.rules-list .empty-state { grid-column: 1 / -1; }
 .rule-card {
   padding: 16px 18px; border-radius: var(--radius-md);
+  min-width: 0; display: flex; flex-direction: column;
 }
   .rule-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
   .rule-head .name { font-size: 15px; font-weight: 700; flex: 1 1 180px; min-width: 0; overflow-wrap: anywhere; line-height: 1.45; }
@@ -718,8 +763,11 @@ textarea.file-editor {
   }
 
 .rule-meta { color: var(--muted); font-size: 12.5px; margin-top: 8px; line-height: 1.6; }
-.rule-meta code { background: var(--input-bg); padding: 1px 6px; border-radius: 5px; font-size: 12px; }
-.rule-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+/* 长 pattern 在窄列内换行（栅格列宽有限，不换行会溢出卡片） */
+.rule-meta code { background: var(--input-bg); padding: 1px 6px; border-radius: 5px; font-size: 12px; overflow-wrap: anywhere; }
+/* 等高卡片内操作按钮行贴底对齐；单列自然高度时 free space 为 0，由
+   padding-top 保住原有 12px 间距 */
+.rule-actions { display: flex; gap: 8px; margin-top: auto; padding-top: 12px; flex-wrap: wrap; }
 
 .code-editor-host {
   position: relative;

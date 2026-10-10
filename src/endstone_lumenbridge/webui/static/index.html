@@ -12,16 +12,6 @@
 
 <div id="toast" onclick="dismissToast()"><span class="dot"></span><span id="toast-text"></span></div>
 
-<!-- 子插件弹窗打开时的外围遮罩：4 条同色遮罩盖住 iframe 之外的整个视口（含底部导航），
-     iframe 区域本身由子插件页面内部遮罩负责，两者拼成一块视觉无缝的全屏遮罩。
-     遮罩条位置由 app.js 按 #custom-frame 实时位置计算（随滚动/缩放更新）。 -->
-<div id="subplugin-dim" aria-hidden="true">
-  <div class="dim-strip" data-pos="top"></div>
-  <div class="dim-strip" data-pos="bottom"></div>
-  <div class="dim-strip" data-pos="left"></div>
-  <div class="dim-strip" data-pos="right"></div>
-</div>
-
 <!-- 背景层挂在 body 直属：登录页与主界面共用（置于 app-view 内会被
      display:none 连带隐藏，登录页背景图因此不显示） -->
 <div id="bg-layer" aria-hidden="true"></div>
@@ -434,6 +424,11 @@
         <div class="page-title" id="custom-title">插件页面</div>
         <div class="page-sub"></div>
         <div class="iframe-wrap"><iframe id="custom-frame" src="about:blank"></iframe></div>
+        <!-- 子插件弹窗打开时的全屏遮罩：唯一一层，与主面板原生弹窗同参数。
+             放在 page-custom 内以进入 .main 的层叠上下文（弹窗时 .layout 与
+             .main 两级抬升至侧栏/底部导航之上，遮罩压暗它们，iframe 又在
+             遮罩之上，卡片浮于最前；见 app.css「子插件弹窗（接管模式）」）。 -->
+        <div id="subplugin-dim" aria-hidden="true"></div>
       </div>
     </main>
   </div>

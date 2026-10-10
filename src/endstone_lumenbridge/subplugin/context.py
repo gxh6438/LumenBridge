@@ -12,7 +12,7 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from ..i18n import get_i18n, t as _t
+from ..i18n import DEFAULT_LANGUAGE, get_i18n, t as _t
 from ..onebot import message as msgbuilder
 from ..onebot import packets as packbuilder
 from .. import __version__
@@ -873,6 +873,16 @@ class LumenContext:
     def server(self) -> Any:
         """Endstone Server 对象（后台线程请配合 run_on_main 使用）"""
         return self._plugin.server
+
+    @property
+    def language(self) -> str:
+        """LumenBridge 主程序当前生效的语言代码（``zh_CN`` / ``zh_TW`` / ``en``）。
+
+        配置为 ``auto`` 时已解析为实际生效值；子插件可据此选择自身文案语言，
+        与主程序保持统一。子插件前端页面（iframe）可用公共接口
+        ``GET /api/i18n/current`` 获取同一信息。
+        """
+        return str(getattr(self._plugin, "language", "") or DEFAULT_LANGUAGE)
 
     @property
     def scheduler(self) -> Any:

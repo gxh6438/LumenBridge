@@ -533,7 +533,9 @@ function expandCustomFrame() {
   }
 }
 window.addEventListener("resize", () => {
-  if (document.getElementById("page-custom").style.display !== "none") expandCustomFrame();
+  if (document.getElementById("page-custom").style.display !== "none") {
+    expandCustomFrame();
+  }
 });
 
 /* 子插件（iframe 内）委托主面板顶层显示确认弹窗：
@@ -576,92 +578,76 @@ window.addEventListener("message", async (e) => {
       if (e.source) e.source.postMessage({ type: "lumen-toast-ack", id: String(d.id || "") }, e.origin);
     } catch (err) { /* ignore */ }
   }
-  /* 子插件弹窗（iframe 内）打开/关闭：
-     - 打开：iframe 外围（含底部导航）盖同色遮罩条，与 iframe 内部遮罩拼成
-       视觉无缝的全屏遮罩（消除“只有 iframe 矩形变暗”的方形边界）；
-       同时把 iframe 顶端滚到视口顶部附近，让弹窗卡片尽量上移。
-     - 关闭：撤遮罩并恢复打开前的滚动位置。 */
+  /* 子插件弹窗打开/关闭（注入脚本 CUSTOM_MODAL_SCRIPT 检测后代发；子插件
+     手动发送同一协议亦兼容）：切换 body.subplugin-modal——唯一全屏遮罩显现 +
+     iframe 抬升为全屏 fixed 层（见 app.css「子插件弹窗（接管模式）」）。 */
   if (d.type === "lumen-modal-open") subpluginModalOpen();
   if (d.type === "lumen-modal-close") subpluginModalClose();
 });
 
-/* ---- 子插件弹窗的外围遮罩与滚动配合 ---- */
+/* ───────── 子插件弹窗：接管模式 ─────────
+   架构（v2 重写）：弹窗打开时 iframe 整体转为全屏 fixed 层，主面板渲染唯一
+   一层全屏遮罩。此前“iframe 内遮罩 + iframe 外四条遮罩”的拼接方案中，
+   iframe 内的 backdrop-filter 采样不到主页面内容（浏览器按 iframe 划分
+   合成层），两层遮罩的模糊对象不同，交界处必然色差与分割线——无论参数
+   如何对齐都不可修；围绕遮罩条的一系列补丁（布局 clamp、滚动对齐、
+   tabbar 隐藏、可视区广播）也因此全部撤除。v2 分工：
+   - 注入脚本（CUSTOM_MODAL_SCRIPT）：检测弹窗开/关 → 给 <html> 挂
+     lumen-modal-takeover（注入 CSS 随之生效：body 一刀切 visibility:hidden
+     隐去全页内容与不透明外壳，唯弹窗子树强制可见；页面内遮罩被固定为
+     全屏透明的点击层，卡片随 flex 居中于屏幕）→ postMessage 通知主面板；
+   - 主面板（本组函数）：校验 iframe 内已挂 lumen-modal-takeover（注入
+     未生效绝不抬升，防不透明页面盖满全屏）→ body.subplugin-modal
+     （遮罩显现 + .layout/.main 两级层级抬升压过侧栏/tabbar）+
+     .iframe-wrap 等高占位（iframe 脱离文档流期间防页面塌缩与滚动
+     位置丢失）+ 锁背景滚动。 */
 let _subModalOpen = false;
 let customPageSeq = 0;  // 自定义页面加载序号：标识 #custom-frame 当前文档，过期高度上报据此作废
-function _subDimLayout() {
-  const wrap = document.getElementById("subplugin-dim");
-  const frame = document.getElementById("custom-frame");
-  if (!wrap || !frame) return;
-  const r = frame.getBoundingClientRect();
-  const W = window.innerWidth;
-  const H = window.innerHeight;
-  const y1 = Math.max(0, r.top);
-  const y2 = Math.min(H, r.bottom);
-  const set = (pos, l, t, w, h) => {
-    const el = wrap.querySelector('[data-pos="' + pos + '"]');
-    if (!el) return;
-    el.style.left = l + "px";
-    el.style.top = t + "px";
-    el.style.width = Math.max(0, w) + "px";
-    el.style.height = Math.max(0, h) + "px";
-  };
-  set("top", 0, 0, W, r.top);
-  set("bottom", 0, r.bottom, W, H - r.bottom);
-  set("left", 0, y1, r.left, y2 - y1);
-  set("right", r.right, y1, W - r.right, y2 - y1);
-}
 function subpluginModalOpen() {
+  if (_subModalOpen) return;
   const frame = document.getElementById("custom-frame");
-  if (!frame) return;
-  _subModalOpen = true;
-  const dim = document.getElementById("subplugin-dim");
-  if (dim) {
-    dim.classList.add("show");
-    _subDimLayout();
-    window.addEventListener("scroll", _subDimLayout, { passive: true });
-    window.addEventListener("resize", _subDimLayout);
-  }
-  /* 弹窗卡片尽量上移：仅当 iframe 顶端在视口内偏下（页面顶部标题区域）时
-     瞬时滚动把它带到视口顶部附近；用户已滚进页面深处时（iframe 顶端在视口外）
-     不滚动——卡片由子插件 rAF 钉在可视区顶部，避免任何滚动突跳 */
-  const t = frame.getBoundingClientRect().top;
-  if (t > 10 && t < 400) window.scrollBy(0, t - 10);
-  /* 锁定背景滚动（标准模态行为）：
-     1. 弹窗内滚动不再链式带动父页面（此前滚到底会拖着整页滚）；
-     2. 卡片钉在可视区完全静止——此前 rAF 每帧跟随父页面滚动重写位置，
-        按钮在 mousedown→mouseup 之间移位会导致 click 丢失（保存按钮"点了没反应"）。
-     桌面端锁定后滚动条消失会引起 ~15px 横移，用等宽 padding 补偿。 */
-  const doc = document.documentElement;
-  const sbw = window.innerWidth - doc.clientWidth;
-  doc.style.overflow = "hidden";
-  doc.style.paddingRight = sbw > 0 ? sbw + "px" : "";
+  const page = document.getElementById("page-custom");
+  if (!frame || !page || page.style.display === "none") return;  // 已离开自定义页（延迟打开的弹窗）
+  /* 接管就绪校验：只有 iframe 内 <html> 已挂上 lumen-modal-takeover（由注入
+     脚本设置，意味着页面内遮罩已被压成全屏透明层、不透明外壳已被隐藏），
+     才把 iframe 抬升为全屏层。校验失败短暂重试（手动发 lumen-modal-open
+     的页面可能早于注入脚本的观察器一拍）；始终未就绪则放弃接管——弹窗
+     保持页面原生行为渲染在 iframe 内，绝不能让不透明遮罩铺满全屏
+     盖住导航栏（注入脚本失效时的灾难态）。 */
+  let tries = 0;
+  const ready = () => {
+    try {
+      return !!frame.contentDocument.documentElement.classList.contains("lumen-modal-takeover");
+    } catch (e) { return false; }
+  };
+  const go = () => {
+    if (_subModalOpen) return;
+    if (page.style.display === "none") return;  // 重试期间已离开自定义页
+    if (!ready() && tries++ < 8) { setTimeout(go, 30); return; }
+    if (!ready()) return;
+    _subModalOpen = true;
+    const wrap = frame.parentElement;
+    if (wrap) wrap.style.height = frame.offsetHeight + "px";  // 等高占位
+    document.body.classList.add("subplugin-modal");
+    /* 锁背景滚动：全屏 iframe 拦截了指针，但滚轮/触摸仍可能链式滚动底层文档 */
+    const doc = document.documentElement;
+    const sbw = window.innerWidth - doc.clientWidth;
+    doc.style.overflow = "hidden";
+    doc.style.paddingRight = sbw > 0 ? sbw + "px" : "";
+  };
+  go();
 }
 function subpluginModalClose() {
-  const dim = document.getElementById("subplugin-dim");
-  if (dim) dim.classList.remove("show");
-  window.removeEventListener("scroll", _subDimLayout);
-  window.removeEventListener("resize", _subDimLayout);
+  if (!_subModalOpen) return;
+  _subModalOpen = false;
+  document.body.classList.remove("subplugin-modal");
+  const frame = document.getElementById("custom-frame");
+  const wrap = frame && frame.parentElement;
+  if (wrap) wrap.style.height = "";
   const doc = document.documentElement;
   doc.style.overflow = "";
   doc.style.paddingRight = "";
-  _subModalOpen = false;
 }
-/* 点击 iframe 外的遮罩条 = 点击弹窗外区域：转发关闭指令给 iframe 内的弹窗 */
-(function initSubpluginDim() {
-  document.addEventListener("DOMContentLoaded", () => {
-    const dim = document.getElementById("subplugin-dim");
-    if (!dim) return;
-    dim.addEventListener("click", () => {
-      if (!_subModalOpen) return;
-      const frame = document.getElementById("custom-frame");
-      try {
-        if (frame && frame.contentWindow) {
-          frame.contentWindow.postMessage({ type: "lumen-modal-dismiss" }, window.location.origin);
-        }
-      } catch (e) { /* 跨域等异常：忽略 */ }
-    });
-  });
-})();
 
 /* 注入到子插件页面（同源 iframe）的自适应高度上报脚本：
    内容尺寸变化（ResizeObserver）+ 结构变化兜底轮询，实时把文档高度
@@ -705,7 +691,109 @@ const CUSTOM_AUTOHEIGHT_SCRIPT =
   "ro.observe(document.body);ro.observe(document.documentElement);}catch(e){}}" +
   "setInterval(report,800);report();})();";
 
-/* 子插件页面加载完成后注入两样东西（同源可写 contentDocument；
+/* 注入到子插件页面的弹窗接管脚本（与自适应高度脚本并列，幂等标志独立）：
+   检测弹窗（.modal-mask / .modal-overlay 可见）开/关 →
+   - 开：给 <html> 挂 lumen-modal-takeover 即可——页面其余内容的隐藏由
+     注入 CSS 完成（body 一刀切 visibility:hidden，唯 .modal-mask/
+     .modal-overlay 强制 visibility:visible 抢回弹窗子树，见
+     CUSTOM_BASE_STYLE），脚本不再逐元素收拢（prune 方案存在死局：
+     不透明外壳常是弹窗的祖先，visibility 无法隐藏祖先而不连弹窗
+     一起藏）。→ postMessage 通知主面板接管；
+   - 关：摘类（CSS 隐身随之解除）+ 通知主面板释放；
+   - 兜底关闭：遮罩带 data-closable（非 "false"）但页面自身 250ms 内未
+     处理遮罩点击时，代为收掉（移除 .show + 内联 display:none）。
+     强制收掉会记入 forced 名单：页面之后重加 .show 重开时，sync 先清掉
+     我们的内联 display:none 再判定——否则类驱动 display 的弹窗被内联
+     样式压死后永远打不开；
+   - lumen-modal-force-close：主面板导航离开自定义页时要求强制关闭，
+     先对遮罩派发点击让页面自身处理器正常收尾，200ms 后仍开着的强收。
+   独立打开（非 iframe 嵌入）时跳过——原生行为本就正确。
+   弹窗可见性判定用 computed display（兼容 .show 类 / 内联 display:flex /
+   动态创建删除等各种页面写法）。 */
+const CUSTOM_MODAL_SCRIPT = `
+(function(){
+if(window.__lumenModalSync)return;window.__lumenModalSync=1;
+if(window.self===window.top)return;
+var TK='lumen-modal-takeover',active=false,cur=[],forced=[];
+function opens(){
+  var o=[],l=document.querySelectorAll('.modal-mask,.modal-overlay');
+  for(var i=0;i<l.length;i++){
+    if(l[i].style.display==='none')continue;
+    if(document.defaultView.getComputedStyle(l[i]).display!=='none')o.push(l[i]);
+  }
+  return o;
+}
+function revive(list){
+  for(var i=forced.length-1;i>=0;i--){
+    var el=forced[i];
+    if(list.indexOf(el)>=0)continue;
+    if(el.style.display!=='none'){forced.splice(i,1);continue;}
+    if(el.classList.contains('show')){el.style.display='';forced.splice(i,1);}
+  }
+}
+function forceShut(ov){
+  ov.classList.remove('show');
+  if(forced.indexOf(ov)<0)forced.push(ov);
+  ov.style.display='none';
+}
+function onOvClick(e){
+  var ov=e.currentTarget;
+  if(e.target!==ov)return;
+  if(!ov.hasAttribute('data-closable'))return;
+  if((ov.getAttribute('data-closable')||'').toLowerCase()==='false')return;
+  setTimeout(function(){
+    if(opens().indexOf(ov)>=0){forceShut(ov);sync();}
+  },250);
+}
+function takeover(list){
+  active=true;cur=list.slice();
+  document.documentElement.classList.add(TK);
+  for(var i=0;i<list.length;i++)list[i].addEventListener('click',onOvClick);
+  try{parent.postMessage({type:'lumen-modal-open'},location.origin);}catch(e){}
+}
+function release(){
+  active=false;cur=[];
+  document.documentElement.classList.remove(TK);
+  try{parent.postMessage({type:'lumen-modal-close'},location.origin);}catch(e){}
+}
+function sync(){
+  var list=opens();
+  revive(list);
+  if(list.length&&!active)takeover(list);
+  else if(!list.length&&active)release();
+  else if(list.length&&active){
+    for(var i=0;i<list.length;i++)
+      if(cur.indexOf(list[i])<0){list[i].addEventListener('click',onOvClick);cur.push(list[i]);}
+    var live=[];
+    for(var j=0;j<cur.length;j++)if(list.indexOf(cur[j])>=0)live.push(cur[j]);
+    cur=live;
+  }
+}
+function start(){
+  if(!document.body){requestAnimationFrame(start);return;}
+  if(window.MutationObserver){
+    new MutationObserver(sync).observe(document.body,
+      {childList:true,subtree:true,attributes:true,attributeFilter:['class','style']});
+  }
+  setInterval(sync,800);
+  sync();
+}
+window.addEventListener('message',function(e){
+  if(e.origin!==location.origin)return;
+  if(e.data&&e.data.type==='lumen-modal-force-close'){
+    var l=opens();
+    for(var i=0;i<l.length;i++)l[i].click();
+    setTimeout(function(){
+      var r=opens();
+      for(var j=0;j<r.length;j++)forceShut(r[j]);
+      sync();
+    },200);
+  }
+});
+start();
+})();`;
+
+/* 子插件页面加载完成后注入三样东西（同源可写 contentDocument；
    万一注入失败则保持 CSS 兜底高度，行为回退为原固定高度内滚动）：
    1. 融合基础样式：画布透明（与主面板背景无缝衔接，不再是一块自带底色的
       “嵌入网页方框”）。注意不能注入 height:auto——满屏型页面
@@ -715,9 +803,36 @@ const CUSTOM_AUTOHEIGHT_SCRIPT =
       需要自定义页面背景的子插件可用内联样式覆盖（内联 !important
       优先级最高）：<body style="background:#fff !important">。
    2. 自适应高度上报脚本。注入在子插件自己的 <style> 之后，等优先级下后者胜出。
-   每次加载把 frame.dataset.seq 烘入脚本：主面板据此区分新旧文档的上报。 */
+   每次加载把 frame.dataset.seq 烘入脚本：主面板据此区分新旧文档的上报。
+   3. 弹窗同步脚本（CUSTOM_MODAL_SCRIPT）。 */
 const CUSTOM_BASE_STYLE =
-  "html,body{background:transparent!important}";
+  "html,body{background:transparent!important}" +
+  /* 隐藏 iframe 内页面按 lumen.css 自绘的光斑（body::before）：自适应高度后
+     iframe 文档盒可达数千 px，光斑按该尺寸拉伸渲染，与主面板按窗口尺寸渲染
+     的光斑叠加，iframe 边缘会出现明显的颜色断层。透明背景下主面板光斑本就
+     透出可见，无需 iframe 自绘。 */
+  "body::before{display:none!important}" +
+  /* ── 弹窗接管模式（html.lumen-modal-takeover，注入脚本随弹窗开/关切换）──
+     弹窗打开时主面板把 iframe 抬升为全屏 fixed 层并渲染唯一一层全屏遮罩，
+     页面内遮罩因此退化为纯定位/点击容器：fixed 全屏铺满（= 屏幕可视区，
+     卡片随之恒居中）、透明、无滤镜（否则与主面板遮罩叠加变黑出界差）。
+     !important 用于压过页面自身给遮罩写的内联定位样式。
+     全页隐身：body 一刀切 visibility:hidden——visibility 可继承亦可被
+     后代覆盖，配合下一条「弹窗强制可见」，一条规则即可隐去整页内容
+     与不透明外壳的底色（prune 式逐元素收拢存在死局：不透明外壳常是
+     弹窗的祖先，藏祖先必然连弹窗一起藏）。卡片作为弹窗后代继承
+     visible，正常显示。 */
+  "html.lumen-modal-takeover .modal-mask," +
+  "html.lumen-modal-takeover .modal-overlay{" +
+  "position:fixed!important;inset:0!important;" +
+  "top:0!important;left:0!important;right:0!important;bottom:0!important;" +
+  "width:auto!important;height:auto!important;" +
+  "visibility:visible!important;" +
+  "background:transparent!important;" +
+  "-webkit-backdrop-filter:none!important;backdrop-filter:none!important}" +
+  "html.lumen-modal-takeover{overflow:hidden!important}" +
+  "html.lumen-modal-takeover body{visibility:hidden!important;" +
+  "overflow:hidden!important;overscroll-behavior:contain!important}";
 (function initCustomFrameAutoHeight() {
   document.addEventListener("DOMContentLoaded", () => {
     const frame = document.getElementById("custom-frame");
@@ -735,6 +850,9 @@ const CUSTOM_BASE_STYLE =
         const s = doc.createElement("script");
         s.textContent = CUSTOM_AUTOHEIGHT_SCRIPT.replace(/__LUMEN_SEQ__/g, this.dataset.seq || "");
         (doc.head || doc.documentElement).appendChild(s);
+        const m = doc.createElement("script");
+        m.textContent = CUSTOM_MODAL_SCRIPT;
+        (doc.head || doc.documentElement).appendChild(m);
       } catch (e) { /* 跨域等异常：维持 CSS 兜底固定高度 */ }
     });
   });
@@ -756,6 +874,19 @@ function nav(page, customUrl, customTitle) {
     if (marketTaskTimer) { clearInterval(marketTaskTimer); marketTaskTimer = null; }
     if (frameworkUpdateTimer) { clearInterval(frameworkUpdateTimer); frameworkUpdateTimer = null; }
     closeTaskLogModal();
+  }
+  /* 离开自定义页时若子插件弹窗仍开着：页面 display:none 会连同遮罩与全屏
+     iframe 一起隐藏，但 body.subplugin-modal 的层级抬升与滚动锁还挂着——
+     在此释放主面板状态，并让 iframe 内注入脚本强制关闭弹窗（否则返回该页
+     时弹窗还开着而主面板已释放，接管状态不一致） */
+  if (currentPage === "custom" && target !== "custom" && _subModalOpen) {
+    subpluginModalClose();
+    try {
+      const f = document.getElementById("custom-frame");
+      if (f && f.contentWindow) {
+        f.contentWindow.postMessage({ type: "lumen-modal-force-close" }, window.location.origin);
+      }
+    } catch (e) { /* ignore */ }
   }
   // 离开任意页面时停掉扫码绑定轮询：模态框固定定位不随导航消失，
   // 不清理会一直轮询 /api/qqofficial/qr/poll 并在成功后弹出编辑框
@@ -818,9 +949,11 @@ async function loadDashboard() {
       ? `<span class="bot-profile-list">${profiles.map(profileRow).join("")}</span>`
       : "";
     const mainGroups = Array.isArray(d.main_groups) ? d.main_groups : [];
-    const groupsText = mainGroups.length
-      ? mainGroups.join("、")
-      : (d.main_group ? String(d.main_group) : t("common.not_set"));
+    // 主群：群号渲染为小芯片，单行横向滑动查看（多群号不再把卡片撑高）
+    const groupsHtml = mainGroups.length
+      ? '<span class="group-chips">' + mainGroups.map((g) =>
+          '<i class="group-chip">' + esc(g) + "</i>").join("") + "</span>"
+      : esc(d.main_group ? String(d.main_group) : t("common.not_set"));
     const modeLabel = d.mode_name || (d.mode === 0 || d.mode === "0"
       ? t("dashboard.forward_ws")
       : d.mode === 1 || d.mode === "1"
@@ -846,7 +979,7 @@ async function loadDashboard() {
     const cards = [
       [t("dashboard.onebot_connection"), connValue],
       [t("dashboard.connection_mode"), esc(modeLabel)],
-      [t("dashboard.main_group"), esc(groupsText)],
+      [t("dashboard.main_group"), groupsHtml],
       [t("dashboard.bot_profile"), botProfile],
       [t("dashboard.online_players"), onlinePlayers.length + " " + t("dashboard.players_unit")],
       [t("dashboard.whitelist_count"), d.whitelist_count + " " + t("dashboard.count_unit")],
@@ -4240,24 +4373,52 @@ function startDashboardRefresh() {
 }
 startDashboardRefresh();
 
-// 返回顶部点击后的"动画窗口期"：期间 scroll 监听器不干预按钮显隐。
-// 部分浏览器 smooth 滚动动画中途/结束不触发 scroll 事件，动画期间滚过
-// 300px 阈值时监听器会把刚隐藏的按钮重新唤出且无后续事件将其收回
-//（表现为"点击回顶后按钮不消失，要点第二次"）；窗口期兜底保证按钮
-// 必定消失，用户再次下滚时监听器恢复工作。
-let _scrollTopSuppressUntil = 0;
+// 返回顶部按钮：滚动超过 300px 显示，点击平滑回顶。
+// 显隐核心约束：回顶动画途中 scrollY 仍会经历 >300px 的区间，若仅按
+// scrollY>300 判显，动画中途的 scroll 事件会把刚隐藏的按钮重新唤出
+//（表现为"点击回顶后按钮不消失，要点第二次"）；固定时长的抑制窗口
+// 在移动端长页面（平滑滚动可远超 1.5s）过期后同样误显。
+// 改为状态驱动：_returningToTop 标记回顶进行中，期间只允许隐藏不允许
+// 唤出；进入顶部区间（≤300px）或用户主动滚动交互（滚轮/触摸/按键，
+// 含打断平滑滚动的场景）即清除标记；scrollend 事件与 4s 兜底超时双
+// 保险，防标记悬挂导致按钮长时间不出。
+let _returningToTop = false;
+let _returningTopTimer = null;
 
 window.addEventListener("scroll", () => {
   const btn = document.getElementById("back-to-top");
   if (!btn) return;
-  if (performance.now() < _scrollTopSuppressUntil) return;
-  btn.classList.toggle("show", window.scrollY > 300);
+  if (window.scrollY <= 300) {
+    // 已进入顶部区间：无论是否回顶中，直接隐藏并结束回顶状态
+    _returningToTop = false;
+    btn.classList.remove("show");
+    return;
+  }
+  if (_returningToTop) return; // 回顶途中（scrollY 仍 >300）：不重新唤出
+  btn.classList.add("show");
 }, { passive: true });
+
+// 用户主动滚动交互：立即结束"回顶中"状态（触摸打断平滑滚动是常见操作）
+["wheel", "touchstart", "keydown"].forEach((evt) =>
+  window.addEventListener(evt, () => { _returningToTop = false; }, { passive: true })
+);
+// 动画正式结束的权威事件（Chrome 114+）：结束回顶状态并按最终位置校准
+if ("onscrollend" in window) {
+  window.addEventListener("scrollend", () => {
+    _returningToTop = false;
+    const btn = document.getElementById("back-to-top");
+    if (btn) btn.classList.toggle("show", window.scrollY > 300);
+  });
+}
 
 function scrollToTop() {
   const btn = document.getElementById("back-to-top");
   if (btn) btn.classList.remove("show");
-  _scrollTopSuppressUntil = performance.now() + 1500;
+  _returningToTop = true;
+  clearTimeout(_returningTopTimer);
+  // 兜底：个别浏览器既不触发 scrollend、scroll 事件也未到达 ≤300 区间
+  //（如动画被布局变化打断），超时清除标记防按钮永久失效
+  _returningTopTimer = setTimeout(() => { _returningToTop = false; }, 4000);
   try {
     window.scrollTo({ top: 0, behavior: "smooth" });
   } catch (e) {

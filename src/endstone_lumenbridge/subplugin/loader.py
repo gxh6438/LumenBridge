@@ -902,9 +902,12 @@ class SubPluginManager:
                     preserved: dict[str, Path] = {}
                     for old in dest.rglob("*"):
                         # 代码与原生扩展不保留：旧二进制回填会覆盖新包二进制，
-                        # ABI 不匹配直接崩溃
+                        # ABI 不匹配直接崩溃；页面静态资源（html/css/js）同属
+                        # 代码——旧 page.html 回填会把升级后的自定义页面打回
+                        # 旧版（表现为"上传新包后页面没更新"）
                         if old.is_file() and old.suffix.lower() not in {
                             ".py", ".pyc", ".pyo", ".so", ".pyd", ".dll",
+                            ".html", ".htm", ".css", ".js", ".mjs",
                         }:
                             preserved[str(old.relative_to(dest))] = old
                     backup_dir = None

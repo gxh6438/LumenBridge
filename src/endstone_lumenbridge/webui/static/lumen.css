@@ -370,10 +370,19 @@ body:has(.modal-mask.show) .log-box {
    点击视为点击弹窗外区域（转发关闭给 iframe 内的弹窗）。
    关键：容器本身 pointer-events:none——容器铺满全屏，若可点击会盖在 iframe 上方，
    拦截 iframe 内所有点击（点输入框会被当成点击遮罩关闭弹窗）；仅 4 条遮罩条可点击 */
+/* 默认玻璃卡底：主面板历来以 .modal.glass 组合使用（背景由 .glass 提供），而共享层
+   文档只公开 .modal 单类——子插件照文档写会得到透明无边框的悬浮卡片。
+   在此补齐与 .glass 完全一致的默认底；.modal.glass 双重声明同值，无视觉差异。 */
 .modal {
   width: 100%; max-width: 720px; max-height: 86vh;
   display: flex; flex-direction: column;
   padding: 24px;
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(var(--blur)) saturate(var(--glass-saturate));
+  backdrop-filter: blur(var(--blur)) saturate(var(--glass-saturate));
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow), inset 0 1px 1px rgba(255,255,255,.3), inset 0 0 0 .5px rgba(255,255,255,.1);
   animation: pop .28s cubic-bezier(.3,1.3,.5,1);
 }
 @keyframes pop { from { transform: scale(.94); opacity: 0; } to { transform: scale(1); opacity: 1; } }
