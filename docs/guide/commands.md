@@ -137,6 +137,5 @@ LumenBridge 的命令分两层：**游戏内管理命令**（`/lumen` 系列，E
 
 ## 相关文档
 
-- **下一步**：[正则触发引擎](regex-engine.md)
-- [正则触发引擎](regex-engine.md)——下一步：消息自动化
+- **下一步**：[正则触发引擎](regex-engine.md)——免代码的消息自动化
 - [Web 管理面板](webui.md)——浏览器侧管理

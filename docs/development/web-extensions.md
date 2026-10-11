@@ -93,7 +93,31 @@ def on_load(lumen):
 | `title` | 页面显示名 |
 | `relative_path` | 相对子插件目录的文件路径，页面实际 URL 为 `/plugin-views/<子插件目录>/<relative_path>` |
 | `tab` | `True` 时额外注册为移动端底栏 tab；默认仅进「其它」面板与桌面侧栏 |
-| `icon` | 内置图标名（`trophy` `coin` `fire` `chart` `gear` 等 30+）或单个 emoji |
+| `icon` | 图标名 / emoji / 缺省，渲染规则见下 |
+
+### 内置图标库（34 个命名图标）
+
+`icon` 传入以下任一名称时，渲染与主面板 tab 同一套描线风格的 SVG 图标（深浅色主题自动跟随）：
+
+| | | | | |
+|---|---|---|---|---|
+| `model` | `bot` | `chat` | `shield` | `spark` |
+| `gear` | `chart` | `home` | `user` | `users` |
+| `server` | `database` | `map` | `box` | `gift` |
+| `trophy` | `crown` | `coin` | `fire` | `zap` |
+| `heart` | `star` | `bell` | `clock` | `calendar` |
+| `music` | `image` | `search` | `link` | `lock` |
+| `book` | `code` | `terminal` | `globe` | |
+
+### 渲染规则（三态）
+
+`icon` 参数按优先级依次匹配：
+
+1. **命名图标**：值命中上表 34 个名称之一 → 渲染对应 SVG；
+2. **emoji / 字符图标**：值包含任意非 ASCII 字符（emoji、中文等）→ 按字符渲染（建议单个 emoji）；值会经 HTML 转义，无法注入标记；
+3. **默认图标**：未传、或纯 ASCII 但不命中命名表（如拼写错误）→ 渲染默认四方块图标。
+
+> 纯 ASCII 的未知值**不会**按文本渲染——传错图标名时显示默认图标而非错误文本。子插件只能传图标名查表、不能直接传 SVG 字符串，这是主面板的防注入设计。
 
 页面约束（iframe 沙箱）：
 

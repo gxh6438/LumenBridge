@@ -147,6 +147,5 @@ LumenBridge 以 MONITOR 优先级观察两类事件，做**时间戳回溯**关�
 
 ## 相关文档
 
-- **下一步**：[白名单绑定](whitelist.md)
-- [白名单绑定](whitelist.md)——下一个高频功能
+- **下一步**：[白名单绑定](whitelist.md)——自助申请游戏白名单
 - [正则触发引擎](regex-engine.md)——消息自动化
