@@ -25,6 +25,8 @@
 | `poke(qq)` | `poke` | 戳一戳 |
 | `video(file)` | `video` | 视频 |
 | `record(file)` | `record` | 语音 |
+| `keyboard(payload)` | `keyboard` | **官方域扩展**：按钮键盘（互动菜单），见[按钮键盘](#按钮键盘官方域扩展) |
+| `button(label, data, ...)` | — | 按钮节点便捷构造，配合 `keyboard()` 使用 |
 
 `image()` 的 `file` 参数支持四种形态：
 
@@ -58,6 +60,46 @@ lumen.QClient.send_group_msg(123456, [
 ### decode_cq_entities
 
 `decode_cq_entities(raw)` 解码 OneBot `raw_message` 中的 HTML 实体（`&#91;` `&#93;` `&#44;` `&amp;`），供聊天转发链路还原原始文本。
+
+## 按钮键盘（官方域扩展）
+
+`keyboard` 消息段是 LumenBridge 的官方域扩展，用于发送**带按钮的互动消息**（入群答题验证、功能菜单等）。发送后用户点击按钮触发 `notice.interaction_create` 事件（官方原始载荷在 `raw` 字段），子插件监听即可实现点击交互——完整示例与回调结构见 [QQ 官方机器人开发专题](qqofficial-dev.md#按钮键盘互动消息)。
+
+```python
+kb = msg.keyboard([
+    [msg.button("A. 苦力怕", "ans_creeper")],
+    [msg.button("B. 末影人", "ans_enderman")],
+    [msg.button("跳过验证", "admin_skip", permission=1)],   # permission=1 仅管理员可点
+])
+lumen.QClient.send_group_msg(group_openid, [msg.text("新成员请作答：哪种生物会爆炸？"), kb])
+```
+
+`keyboard(payload)` 三种形态：
+
+| payload | 说明 |
+|---------|------|
+| `str` | 开放平台后台预配置的**按钮模板 ID**（`keyboard.template`） |
+| `list` | 便捷行列表 `[[button(...), ...], ...]`，自动包装为官方 `rows` 结构 |
+| `dict` | 完整官方 `keyboard.content` 结构原样透传（适合复杂键盘） |
+
+`button(label, data, ...)` 便捷构造：
+
+| 参数 | 说明 |
+|------|------|
+| `label` | 按钮文字 |
+| `data` | 点击回传数据（`action_type=1` 回调按钮的核心字段，`notice.interaction_create` 载荷里原样返回） |
+| `action_type` | `1` 回调按钮（默认，点击触发事件）/ `2` 指令按钮（点击自动以机器人身份发送 data 文本）/ `0` 跳转按钮（需 `url`） |
+| `style` | `1` 主实心（默认）/ `0` 次要线框 |
+| `permission` | 按钮可点范围：`int` 直接作为官方 permission type（如 `1` 仅管理员），`dict` 原样透传；语义取值以[官方按钮文档](https://bot.q.qq.com/wiki/)为准 |
+| `visited_label` | 点击后的按钮文字（如「已作答」） |
+| `id` / `url` | 按钮自定义 id / 跳转链接 |
+
+行为要点：
+
+- 仅官方域渲染按钮（`msg_type=2` markdown 载体 + `keyboard` 字段）；个人号域协议端会忽略该段，正文照常发送；
+- 单条消息**键盘与富媒体互斥**（首个命中生效）；
+- 正文自动做 markdown 转义；markdown 能力未开通的机器人降级纯文本（按钮丢弃、正文保留）；
+- 回调按钮的点击响应依赖被动凭据，群内主动推送可能因官方额度限制延迟入栈补发。
 
 ## 合并转发消息
 
@@ -173,6 +215,7 @@ QQ 官方机器人适配器（`qqofficial`）没有 OneBot 协议端：**事件�
 | 主动私聊 | 支持 | 受官方额度限制（被拒自动入补发栈，借下次被动回复补发） |
 | 合并转发 | `send_group_forward_msg` 原生支持 | 无官方接口，降级为逐条发送模拟（节点上限 3） |
 | 图片/视频/语音 | URL / base64 / 本地路径 | URL 或 base64 上传（单条消息单个媒体，语音映射 file） |
+| 按钮键盘（互动消息） | 无此段（协议端忽略） | **支持** `keyboard` 段：markdown 载体渲染按钮，点击回调 `notice.interaction_create`（见[按钮键盘](#按钮键盘官方域扩展)） |
 | 未翻译动作 | 任意动作透传（`build` + `call_api`） | 告警并回调 `None`（`call_api` 不透传，官方域无 OneBot 协议） |
 
 官方域已翻译动作的完整清单（端点、参数语义、回调返回、平台限制）见 [QQ 官方机器人开发专题](qqofficial-dev.md)的「API 翻译参考」一节；连接配置见 [连接与适配器](../guide/adapters.md)。
