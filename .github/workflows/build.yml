@@ -1,7 +1,8 @@
 # 自动构建发布：推送 v* 标签时构建 wheel 并创建 GitHub Release；
-# 也可在 Actions 页面手动触发（workflow_dispatch），指定 tag 更新已有
-# Release 的 .whl（--clobber 同名覆盖）；tag 不存在时在当前提交上创建。
-# Release 正文自动取 CHANGELOG.md 中该版本段落，缺失时回退自动生成。
+# 也可在 Actions 页面手动触发（workflow_dispatch）指定 tag：tag 已存在则
+# 检出该 tag 重建并以 --clobber 覆盖同名产物（保证产物与版本一致），不
+# 存在则在当前分支头提交上创建 tag 与 Release。Release 正文自动取构建
+# 提交上 CHANGELOG.md 的对应版本段落，缺失时回退自动生成。
 name: Build Release
 
 on:
@@ -10,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "目标 tag（如 v1.0.11；不存在时会在当前提交上创建）"
+        description: "目标 tag（如 v1.0.11；已存在则检出该 tag 重建并覆盖产物，不存在则在当前提交上创建）"
         required: true
         default: "v1.0.11"
 
@@ -21,8 +22,37 @@ jobs:
   build:
     name: Build wheel
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      sha: ${{ steps.sha.outputs.sha }}
     steps:
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # tag 触发默认检出 tag 指向提交；手动触发且 tag 已存在时改检该 tag，
+      # 防止把分支头新代码的 wheel 覆盖到旧版本 Release；tag 不存在则保持
+      # 分支头（tag 由 release 作业在该提交上创建）
       - uses: actions/checkout@v4
+
+      - name: Checkout tag if it exists
+        id: sha
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
+            && [ -n "$(git ls-remote --tags origin "refs/tags/$TAG")" ]; then
+            git fetch origin "refs/tags/$TAG:refs/tags/$TAG" --depth=1
+            git checkout -q "$TAG"
+            echo "已检出已有 tag：$TAG"
+          else
+            echo "在当前提交上构建，tag 由 release 作业按需创建"
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-python@v5
         with:
@@ -51,17 +81,10 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
-      - name: Determine tag
-        id: tag
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          fi
-
-      # 检出构建提交以读取 CHANGELOG.md（tag 触发=tag 指向提交，手动=触发分支头）
+      # 检出构建提交以读取同源 CHANGELOG.md（tag 已存在=tag 提交，否则分支头）
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.sha }}
 
       - uses: actions/download-artifact@v4
         with:
@@ -71,7 +94,7 @@ jobs:
       - name: Extract changelog
         id: notes
         run: |
-          VER="${{ steps.tag.outputs.tag }}"
+          VER="${{ needs.build.outputs.tag }}"
           VER="${VER#v}"
           # 提取 "## [版本号]" 到下一个 "## [" 之间的段落
           awk -v ver="## [$VER]" '
@@ -87,14 +110,15 @@ jobs:
 
       - name: Create or update release
         run: |
-          TAG="${{ steps.tag.outputs.tag }}"
+          TAG="${{ needs.build.outputs.tag }}"
+          SHA="${{ needs.build.outputs.sha }}"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release 已存在，复用并覆盖产物"
           elif [ -n "${{ steps.notes.outputs.fallback }}" ]; then
-            gh release create "$TAG" --target "${{ github.sha }}" \
+            gh release create "$TAG" --target "$SHA" \
               --title "$TAG" --generate-notes
           else
-            gh release create "$TAG" --target "${{ github.sha }}" \
+            gh release create "$TAG" --target "$SHA" \
               --title "$TAG" --notes-file body.md
           fi
           # 同名产物覆盖（替换旧版 .whl）

@@ -109,7 +109,7 @@ pytest 套件，按主题拆分（`test_onebot_*`、`test_subplugin_*`、`test_w
 | 触发方式 | 行为 |
 |------|------|
 | 推送 `v*` tag（如 `git tag v1.0.12 && git push origin v1.0.12`） | 构建 wheel → 创建对应 tag 的 Release |
-| Actions 页面手动触发（workflow_dispatch，输入 tag） | 构建 wheel → Release 已存在则覆盖产物（`--clobber`）；不存在则创建（tag 缺失时在当前提交上建 tag） |
+| Actions 页面手动触发（workflow_dispatch，输入 tag） | 构建 wheel → Release 已存在则覆盖产物（`--clobber`）；不存在则创建（tag 缺失时在当前提交上建 tag）。tag 已存在时按该 tag 的提交构建，保证产物与版本一致 |
 
 Release 正文自动取 CHANGELOG.md 中该版本段落（`## [版本号]` 到下一个版本标题之间），CHANGELOG 无对应段落时回退 GitHub 自动生成。因此发版前只需：更新 `pyproject.toml` 版本号 + CHANGELOG 追加段落 + 打 tag 推送，其余交给 CI。
 
