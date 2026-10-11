@@ -135,3 +135,8 @@ v1.0.4 已修复此问题。若仍出现，确认使用的是最新版 LumenBrid
 - 正则引擎 `admin_debug: true` 在命中规则时打印规则名
 - WebUI 实时日志页（SSE）观察全链路
 - 配置/规则/白名单文件写坏会被自动备份为 `.corrupt` / `.bak`，可人工恢复
+
+## 相关文档
+
+- **下一步**：[用户使用条例与免责声明](terms.md)
+- [架构总览](../development/architecture.md)——深入原理

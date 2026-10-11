@@ -239,3 +239,8 @@ def on_unload(lumen):
 | `mc.listen` 的 Endstone 原生监听 | 分发表清空（listener 保留但 no-op） |
 
 需要手工释放的只有：自建线程、数据库连接、文件句柄等外部资源——在 `on_unload` 里处理。
+
+## 相关文档
+
+- **下一步**：[事件系统参考](events.md)
+- [生命周期与热重载](lifecycle.md)——自动清理语义

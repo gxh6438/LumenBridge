@@ -120,5 +120,6 @@ WebUI 可能晚于子插件启动（配置里关闭后开启、初始化顺序�
 
 ## 相关文档
 
+- **下一步**：[清单与依赖](manifest-and-deps.md)——子插件发布前的依赖声明
 - [Context API 参考](context-api.md)：`lumen.web` 完整签名
 - [Web 管理面板](../guide/webui.md)：面板功能与安全

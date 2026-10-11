@@ -70,3 +70,9 @@ LumenBridge 把 QQ 与 Xbox 玩家名双向绑定，群成员自助完成游戏�
 ## WebUI 与 API
 
 WebUI 白名单页支持查看/添加/解绑（合并双域展示）。Web 侧操作使用同步事务 `run_allowlist_command_wait`：等待游戏命令完成（默认 6 秒超时）再返回结果，不阻塞游戏主线程。
+
+## 相关文档
+
+- **下一步**：[游戏内命令](commands.md)
+- [群服互通与聊天](chat.md)——互通与白名单的关系
+- [游戏内命令](commands.md)——下一步

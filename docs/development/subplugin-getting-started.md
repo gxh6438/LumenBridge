@@ -151,3 +151,8 @@ lumen.json 里声明，两种安装方式：
 - `lumen.logger` 输出到服务器日志（WebUI 实时日志页可见）
 - 加载失败时 `sp.error` 保存人类可读错误（自动识别 ModuleNotFoundError 并列出缺失模块）
 - `python` 用法与普通 Python 一致；标准库之外依赖一律走 `dependencies` 声明
+
+## 相关文档
+
+- **下一步**：[LumenContext API 参考](context-api.md)
+- [事件系统参考](events.md)——如何响应消息

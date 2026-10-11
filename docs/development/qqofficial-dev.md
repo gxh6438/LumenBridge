@@ -67,7 +67,21 @@ WS 关闭码语义：`4004` 鉴权失败（重取 token）；`4006` / `4009` / `
 - 群消息 → `message.group.normal`；单聊 → `message.private.friend`；
 - 成员进出 → `notice.group_increase/decrease`；机器人被移出群 → `notice.group_decrease`（kick_me）；
 - 入群申请 → `request.group.add`；
+- 频道撤回 → `group_recall`（私域私信 → `friend_recall`）；
 - **无 OneBot 语义的官方事件原样转发**为 `notice.<事件名小写>`（如 `notice.interaction_create`、`notice.forum_thread_create`），`raw` 字段为官方原始载荷——子插件可 `lumen.on("notice.interaction_create", handler)` 监听按钮回调。
+
+### 接收侧翻译能力
+
+入站消息的官方载荷元素与 OneBot 消息段映射：
+
+| 官方载荷 | OneBot 段 | 说明 |
+|----------|-----------|------|
+| `content` 文本 | `text` | `@机器人` 前缀剥离并置 `at_bot` 标记，`@成员` 就地转 `at` 段 |
+| `mentions` 数组 | `at` 段增强 | 补昵称、补齐 content 已剥离的 @ |
+| 引用消息（`reply` 载荷） | `reply` 段 | 附 `id` / `text` / `sender` / `user_id`（go-cqhttp 惯例字段，子插件可直接读） |
+| 聊天记录（`forward` 载荷） | `forward` 段 | 前置段形式 |
+| 图片 / 视频附件 | `image` / `video` 段 | 附件自带 `url`；缺失时经 media 接口补取带时效下载地址 |
+| 语音附件 | `record` 段 | 附 `wav_url`（WAV 直链，SILK 原始链多数播放器不可播）与 ASR 识别文本——识别文本同时追加一条 `[语音] 文本` text 段，游戏聊天侧唯一可读形态 |
 
 ## 被动回复窗口（核心限制）
 
@@ -107,19 +121,92 @@ WS 关闭码语义：`4004` 鉴权失败（重取 token）；`4006` / `4009` / `
 
 富媒体限制：官方 media 接口仅支持 image/video/file 三类（语音映射 file）；本地文件 base64 上传上限 8MB（官方限制约 10MB 留余量）。
 
-## 适配器特有 API
+## API 翻译参考（官方域全量动作）
 
-| 方法 | 说明 |
-|------|------|
-| `get_group_restrict_chat_setting` | 查群禁聊/开关状态 |
-| `get_group_bot_state` | 查机器人在群内的状态 |
-| `get_group_join_request_list` | 拉取入群申请列表 |
-| `set_group_add_request(flag, approve)` | 审批入群申请（对应 `request.group.add` 的 `flag`） |
-| `delete_msg(...)` | 官方域撤回（受平台限制） |
-| `remember_group / forget_group` | 运行期维护已知群列表 |
-| `broadcast_groups` | 全部已知群 openid 列表 |
+官方域没有 OneBot 协议端，**所有动作由适配器逐个翻译**为开放平台 REST 接口。以下是适配器已实现的全部动作——OneBot 语义调用、参数语义、回调返回与平台限制。子插件按 OneBot 语义编程，路由层按 openid 自动送达官方适配器（见 [消息收发](messaging.md)的路由规则）。
 
-查询类方法（`get_login_info`、`get_group_list`、`get_group_info`）以本地缓存/凭据合成 OneBot 兼容响应，不走 OneBot 协议端。
+### 消息发送
+
+**`send_group_msg(group_openid, message)` / `send_private_msg(openid, message)`**
+→ `POST /v2/groups/{openid}/messages` / `POST /v2/users/{openid}/messages`
+
+- 消息经 `extract_payload` 归一为 `(文本, 富媒体)`：`text` 段拼接、`at` 段转官方 `<qqbot-at-user id="..." />` 文本链（`@全体成员` 丢弃）、首个 `image` / `video` / `record` 段作富媒体（`reply` 段忽略）；文本截断 2000 字符；
+- 载体自动选择：纯文本 `msg_type=0`；含 @ 走 `msg_type=2` markdown（实测唯一可渲染真实 @ 的组合）；富媒体 `msg_type=7`；
+- 富媒体先 `POST /v2/{groups|users}/{openid}/files` 上传（URL 直传或本地 base64，上限 8MB）取 `file_info` 再发送，失败降级纯文本；
+- 凭据三级：被动 `msg_id`+`msg_seq`（不耗主动额度）→ 入群 `event_id` → 主动消息（可能被拒 22009 入补发栈）。
+
+### 消息撤回
+
+**`delete_msg(message_id, callback)`**
+→ `DELETE /v2/groups/{g}/messages/{id}` / `DELETE /v2/users/{u}/messages/{id}`
+
+- 群聊：机器人可撤自己的消息，管理员身份可撤群员消息；单聊：仅可撤机器人发给该用户自己的消息；
+- **2 分钟时限**，超时官方拒绝；
+- `message_id` 须为本适配器记录过的 id（发送回执 id 或收到的消息 id）——适配器维护 `消息 id → (kind, target)` 映射用于反查端点，未知 id 回调 `{"ok": False, "error": ...}`；
+- 回调返回 `{"ok": True}` 或 `{"ok": False, "error": "撤回失败：..."}`。
+
+### 禁言
+
+**`set_group_ban(group_openid, member_openid, duration, callback)`**
+→ `POST /v2/groups/{g}/restrict_chat_setting`，body `{"members": [{"op": "add"|"del", "member_openid", "mute_expire_at"}]}`
+
+- `duration=0` 解除禁言（op=del），`>0` 禁言至 `now+duration`；
+- 平台限制：最长 **30 天**（2592000 秒，超限自动截断并告警）、仅能禁言**普通成员**、需群管理员；
+- 参数非法（空 openid / 负数）直接回调 `None`；成功回调 `{"ok": True}`。
+
+**`set_group_ban_batch(group_openid, member_openids, duration, callback)`**（官方扩展）
+同上端点，`members` 数组一次提交：
+
+- 单次最多 **10 人**（超限截断并告警）；`duration` 必须 > 0；
+- 成功回调 `{"ok": True, "count": n}`。
+
+**`get_group_restrict_chat_setting(group_openid, callback)`**（官方扩展）
+→ `GET /v2/groups/{g}/restrict_chat_setting`，返回全员禁言规则 + 当前禁言成员列表。
+
+### 入群审批（群管理）
+
+**`set_group_add_request(flag, sub_type, approve, reason, callback)`**
+→ `POST /v2/groups/{g}/approval_join_request/{member_openid}`，body `{"op": "approve"|"decline", "join_request_id", "reject_reason"?}`
+
+- `flag` 即 `request.group.add` 事件下发的 `join_request_id`（适配器维护 flag → 群/成员映射）；
+- 需群管理员；拒绝理由截断 255 字符；
+- 回调 `{"ok": True}` / `{"ok": False, "error": ...}`。
+
+**`get_group_join_request_list(group_openid, cursor="", limit=20, callback)`**（官方扩展）
+→ `GET /v2/groups/{g}/join_request_list`（分页参数走 GET + JSON body），需群管理员。
+
+### 查询类
+
+| 方法 | 端点 / 实现 | 说明 |
+|------|-------------|------|
+| `get_group_info(group_openid, callback)` | `GET /v2/groups/{g}/info`（白名单接口） | 字段映射：`group_openid→group_id`、`group_name`、`group_member_num→member_count`、`group_finger_memo→group_memo`；无权限（常态）回退本地兜底 |
+| `get_group_list(callback)` | 本地合成 | 官方无群列表接口；配置 `main_group` + 动态发现（流入事件学习）的 openid 汇总 |
+| `get_login_info(callback)` | 本地合成 | `{user_id: bot_qq, nickname: READY 昵称, app_id}`——官方 API 不回传机器人 QQ 号 |
+| `get_group_bot_state(group_openid, callback)` | `GET /v2/groups/{g}/bot_state`（官方扩展） | 机器人群内角色 / 主动消息开关 / 收消息设置 |
+
+本地兜底语义：配置了 `main_group` 时，列表内的 openid 视为已互通群；未配置时对所有已发现的群生效。
+
+### 不支持的动作
+
+- **`call_api(pack)`**：官方域无 OneBot action 协议可透传，直接回调 `None`（个人号域的通用透传入口在官方域不可用）；
+- **`send_pack(pack)`**：OneBot 原始包与官方协议不兼容，忽略；
+- **其余未实现方法**（`__getattr__` 统一降级）：记 warning「不支持的官方域动作」并以 `None` 回调（末参为回调时）——不会抛 `AttributeError`，但功能不生效。典型不支持：踢人（`set_group_kick`）、设管（`set_group_admin`）、全体禁言（`set_group_whole_ban`）、好友点赞、群文件等。
+
+### 调用示例
+
+```python
+def on_load(lumen):
+    # 禁言 10 分钟（openid 域自动路由到官方适配器）
+    lumen.QClient.set_group_ban("ABCDEF...", "UVWXYZ...", 600)
+
+    # 撤回自己 2 分钟内发的消息（需持有发送回执 id）
+    lumen.QClient.delete_msg(sent_message_id, callback=lambda r: lumen.logger.info(r))
+
+    # 审批入群申请
+    lumen.QClient.set_group_add_request(flag, approve=True)
+```
+
+除上表外的**任何** OneBot 动作在官方域都会降级——子插件如需判断当前域，用事件包的 `domain` 字段（`"qq"` / `"official"` / `"guild"`）或在动作回调里检查 `None`。
 
 ## 连接卡片配置
 
@@ -148,3 +235,8 @@ WS 关闭码语义：`4004` 鉴权失败（重取 token）；`4006` / `4009` / `
 - **收不到群消息**：确认机器人已在群内、群消息开关开启（`get_group_bot_state` 可查）；
 - **回复失败 22009**：被动凭据过期后走了主动消息，等用户再发一条消息即可借道补发；
 - **连接间隔**：官方频控限制连接频率，`connect_interval` 不要调小。
+
+## 相关文档
+
+- **下一步**：[Web 扩展](web-extensions.md)
+- [消息收发](messaging.md)——双域差异总览

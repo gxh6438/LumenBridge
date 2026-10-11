@@ -83,9 +83,9 @@ lumen.QClient.send_group_forward_msg(123456, fwd)
 
 ## 动作包构建器
 
-`lumen.packbuilder`（即 `onebot.packets`）把每个 OneBot 动作封装为函数，返回 `{"action", "params", "echo"}` 结构。常用分组：
+`lumen.packbuilder`（即 `onebot.packets`）把 OneBot 动作封装为函数，返回 `{"action", "params", "echo"}` 结构。**这些函数只是参数拼装的便捷封装——OneBot v11 协议端的全部能力（含协议端私有扩展）都可直接调用，不需要 LumenBridge 逐个适配**，完整动作清单见 [OneBot v11 标准](https://github.com/botuniverse/onebot-11/blob/master/api/public.md) 及所用协议端（NapCat / Lagrange 等）的扩展文档。
 
-### 发送与消息管理
+### 发送类（最常用）
 
 | 函数 | 动作 | 说明 |
 |------|------|------|
@@ -96,32 +96,19 @@ lumen.QClient.send_group_forward_msg(123456, fwd)
 | `delete_message(message_id)` | `delete_msg` | 撤回消息 |
 | `get_message(message_id)` | `get_msg` | 取消息详情 |
 | `forward_message(message_id)` | `get_forward_msg` | 取合并转发内容 |
-| `mark_msg_as_read(message_id)` | `mark_msg_as_read` | 标记已读（NapCat 扩展） |
 
-### 群管理
+其余封装（群管理 `group_ban` / `group_kick`、查询 `group_member_list` / `friend_list`、群文件、加群审批等）命名规律一致：函数名 = 动作名转下划线，参数与 OneBot 规范一一对应，详见 `onebot/packets.py`。
 
-`group_ban`（禁言）、`group_whole_ban`（全体禁言）、`group_kick`（踢人）、`group_leave`（退群）、`group_name`（改群名）、`group_card`（群名片）、`group_admin`（设管）、`group_special_title`（专属头衔）、`group_anonymous_ban`（匿名禁言）、`essence_msg` / `delete_essence_msg`（精华消息）、`group_sign`（群打卡，扩展）、`group_poke` / `friend_poke`（戳一戳，扩展）、`group_msg_emoji_like`（贴表情，扩展）。
-
-### 查询类（需 callback 或 call_api）
-
-`group_member_list`、`group_member_info`、`stranger_info`、`friend_info`、`login_info`、`group_info`、`group_list`、`friend_list`、`group_honor_info`、`version_info`、`status_info`、`image_info`、`record_info`。
-
-### 好友/加群请求与点赞
-
-`group_add_request(flag, sub_type, approve, reason)`、`friend_add_request(flag, approve)`、`send_like(user_id, times)`。
-
-### 群文件
-
-`group_root_files`、`group_files_by_folder`、`group_file_url`、`group_file_system_info`、`upload_group_file`、`upload_private_file`、`delete_group_file`、`create_group_file_folder`、`delete_group_file_folder`。
-
-### 通用透传
+### 通用透传（任意动作）
 
 ```python
 pack = packets.build("set_input_status", {"user_id": 10086})
 lumen.QClient.call_api(pack)
 ```
 
-`build(action, params, echo=None)` 直接构造任意动作包，可调用协议端的私有/新增扩展 API，无需等待 LumenBridge 更新。
+`build(action, params, echo=None)` 直接构造任意动作包。协议端新增的私有 API（如 NapCat 的 `send_poke`）无需等待 LumenBridge 更新封装，直接透传即可——**这是个人号域调用协议端全量能力的标准入口**。
+
+> **个人号域与官方域的根本差异**：个人号域动作是「拼包→WS 发给协议端→协议端实现」，LumenBridge 只做路由不做翻译；官方域没有 OneBot 协议端，所有动作由适配器**逐个翻译**为 QQ 开放平台 REST 接口——因此官方域只有已翻译的动作可用（清单见下节），未翻译动作会告警并回调 `None`。
 
 ## 适配器发送接口
 
@@ -172,18 +159,23 @@ Hub 通过 `__getattr__` 把未显式实现的方法按上述语义代理到适�
 
 ## 双域与官方域差异
 
-QQ 官方机器人适配器（`qqofficial`）与个人号 OneBot 协议端在消息层有差异，发送时注意：
+QQ 官方机器人适配器（`qqofficial`）没有 OneBot 协议端：**事件被翻译成 OneBot v11 格式输入，动作被翻译成开放平台 REST 接口输出**。子插件面向 OneBot 语义编程，跨域自动生效，但两域能力面不同：
 
 | 差异点 | 个人号域 | 官方域 |
 |--------|----------|--------|
 | 目标标识 | QQ 号（数字） | openid（字符串） |
-| 支持 `at` 段 | 是 | 有限（仅 `at` 机器人自身，markdown 消息支持 @） |
-| 支持 `reply` 引用 | 是 | 否 |
-| 撤回/禁言/群管理 | 支持 | 不支持 |
-| 主动私聊 | 支持 | 受官方限制（主动消息额度） |
-| 图片发送 | URL/base64 | 仅支持官方域允许的形式（见官方机器人文档） |
+| 消息发送 | `send_group_msg` / `send_private_msg` | 同名方法可用（自动选被动 / 主动凭据，markdown @ 渲染） |
+| @ 段 | 任意成员 | 有限（markdown 载体渲染真实 @；`@全体成员` 丢弃） |
+| 引用回复 | `reply` 段构造 | **接收**翻译为 `reply` 段；**发送** `reply` 段被忽略，被动回复（msg_id 凭据）在客户端天然呈引用样式，主动消息无法构造引用 |
+| 撤回 | `delete_msg`（权限内任意） | **支持** `delete_msg`：群聊（管理员可撤群员消息）+ 单聊（仅撤机器人自己发出的），均限 2 分钟内 |
+| 禁言 | `set_group_ban` / `set_group_whole_ban` | **支持** `set_group_ban`（0=解除，最长 30 天，仅普通成员，需群管理员）+ `set_group_ban_batch` 批量（≤10 人）；全体禁言不支持 |
+| 群管理 | 踢人 / 设管 / 改群名 / 群名片等全套 | 仅入群审批 `set_group_add_request` + 申请列表查询；踢人 / 设管等不支持 |
+| 主动私聊 | 支持 | 受官方额度限制（被拒自动入补发栈，借下次被动回复补发） |
+| 合并转发 | `send_group_forward_msg` 原生支持 | 无官方接口，降级为逐条发送模拟（节点上限 3） |
+| 图片/视频/语音 | URL / base64 / 本地路径 | URL 或 base64 上传（单条消息单个媒体，语音映射 file） |
+| 未翻译动作 | 任意动作透传（`build` + `call_api`） | 告警并回调 `None`（`call_api` 不透传，官方域无 OneBot 协议） |
 
-官方域能力细节见 [QQ 官方机器人适配器](qqofficial-dev.md)（开发向）与 [连接与适配器](../guide/adapters.md)（使用向）。
+官方域已翻译动作的完整清单（端点、参数语义、回调返回、平台限制）见 [QQ 官方机器人开发专题](qqofficial-dev.md)的「API 翻译参考」一节；连接配置见 [连接与适配器](../guide/adapters.md)。
 
 ## 子插件中的推荐用法
 
@@ -211,4 +203,9 @@ def on_load(lumen):
     ])
 ```
 
-消息接收与 `reply` 快捷回复见 [事件系统](events.md)；存储与调度见 [Context API 参考](context-api.md)。
+## 相关文档
+
+- **下一步**：[QQ 官方机器人开发专题](qqofficial-dev.md)——官方域全量动作的端点与限制
+- 消息接收与 `reply` 快捷回复：[事件系统](events.md)
+- 存储与调度：[Context API 参考](context-api.md)
+- [Web 扩展](web-extensions.md)：扩展到面板

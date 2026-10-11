@@ -85,5 +85,6 @@ python -m pytest tests/ -q -k "whitelist"
 
 ## 相关文档
 
+- [文档中心首页](../index.md)：全部文档地图（本篇为开发文档末篇）
 - [项目结构](project-structure.md)：tests/ 与 scripts/ 清单
 - [架构总览](architecture.md)：被测模块的职责边界

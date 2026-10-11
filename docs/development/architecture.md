@@ -145,3 +145,8 @@ plugins/lumenbridge/
 | pip | 受保护包名单 + dry-run 冲突检测 + 安装路径串行锁 |
 | 正则 | ReDoS 启发式 + 长度截断 + pattern 负缓存 |
 | 群绑定密钥 | 内存态 + 一次性消费 + 5 分钟 TTL + 恒时比较 |
+
+## 相关文档
+
+- **下一步**：[子插件快速入门](subplugin-getting-started.md)
+- [项目结构](project-structure.md)——代码库地图
