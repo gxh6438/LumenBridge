@@ -69,7 +69,7 @@ lumen.QClient.send_group_msg(123456, [
 kb = msg.keyboard([
     [msg.button("A. 苦力怕", "ans_creeper")],
     [msg.button("B. 末影人", "ans_enderman")],
-    [msg.button("跳过验证", "admin_skip", permission=1)],   # permission=1 仅管理员可点
+    [msg.button("跳过验证", "admin_skip", permission=1)],   # permission=1 仅管理者可点
 ])
 lumen.QClient.send_group_msg(group_openid, [msg.text("新成员请作答：哪种生物会爆炸？"), kb])
 ```
@@ -78,28 +78,30 @@ lumen.QClient.send_group_msg(group_openid, [msg.text("新成员请作答：哪�
 
 | payload | 说明 |
 |---------|------|
-| `str` | 开放平台后台预配置的**按钮模板 ID**（`keyboard.template`） |
+| `str` | 开放平台后台预配置的**按钮模板 ID**（官方 `keyboard.id` 键） |
 | `list` | 便捷行列表 `[[button(...), ...], ...]`，自动包装为官方 `rows` 结构 |
 | `dict` | 完整官方 `keyboard.content` 结构原样透传（适合复杂键盘） |
 
-`button(label, data, ...)` 便捷构造：
+`button(label, data, ...)` 便捷构造（官方必填字段 `visited_label` / `data` / `permission` / `unsupport_tips` 缺省时自动补全）：
 
 | 参数 | 说明 |
 |------|------|
 | `label` | 按钮文字 |
-| `data` | 点击回传数据（`action_type=1` 回调按钮的核心字段，`notice.interaction_create` 载荷里原样返回） |
-| `action_type` | `1` 回调按钮（默认，点击触发事件）/ `2` 指令按钮（点击自动以机器人身份发送 data 文本）/ `0` 跳转按钮（需 `url`） |
-| `style` | `1` 主实心（默认）/ `0` 次要线框 |
-| `permission` | 按钮可点范围：`int` 直接作为官方 permission type（如 `1` 仅管理员），`dict` 原样透传；语义取值以[官方按钮文档](https://bot.q.qq.com/wiki/)为准 |
-| `visited_label` | 点击后的按钮文字（如「已作答」） |
-| `id` / `url` | 按钮自定义 id / 跳转链接 |
+| `data` | 点击回传数据（回调按钮的核心字段，`notice.interaction_create` 载荷 `raw.data.resolved.button_data` 原样返回） |
+| `action_type` | `1` 回调按钮（默认，点击触发互动事件）/ `2` 指令按钮（点击在**用户输入框**插入 `@机器人 data`，`enter=True` 直接送出、`reply=True` 引用本消息）/ `0` 跳转按钮（需 `url`） |
+| `style` | `1` 蓝色线框（默认）/ `0` 灰色线框 |
+| `permission` | 按钮可点范围：`int` 直接作为官方 permission type（`0` 指定用户 / `1` 仅管理者 / `2` 所有人（默认）/ `3` 指定身份组仅频道），`dict` 原样透传（可携带 `specify_user_ids`） |
+| `visited_label` | 点击后的按钮文字（默认与 `label` 相同，如「已作答」） |
+| `enter` / `reply` | 指令按钮专属（客户端 8983+）：直接发送 / 引用本消息 |
+| `id` / `url` | 按钮自定义 id（回调载荷 `button_id` 字段）/ 跳转链接 |
 
 行为要点：
 
 - 仅官方域渲染按钮（`msg_type=2` markdown 载体 + `keyboard` 字段）；个人号域协议端会忽略该段，正文照常发送；
 - 单条消息**键盘与富媒体互斥**（首个命中生效）；
 - 正文自动做 markdown 转义；markdown 能力未开通的机器人降级纯文本（按钮丢弃、正文保留）；
-- 回调按钮的点击响应依赖被动凭据，群内主动推送可能因官方额度限制延迟入栈补发。
+- 按钮点击后适配器**自动回应**官方互动接口（2.5 秒内子插件未自定义回应时补 `code=0`，保证客户端不转圈），并注册点击事件为被动回复凭据——点击后的回复消息不受主动额度限制；
+- 子插件可经 `call_action("respond_interaction", {"interaction_id": ..., "code": ...})` 抢先自定义回应（`code`：0 成功 / 1 操作失败 / 2 操作频繁 / 3 重复操作 / 4 没有权限 / 5 仅管理员操作；同一 `interaction_id` 仅可回应一次）。
 
 ## 合并转发消息
 

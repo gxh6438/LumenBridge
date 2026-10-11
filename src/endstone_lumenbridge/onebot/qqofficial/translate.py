@@ -16,6 +16,7 @@ from .constants import (
     CT_MEDIA_API,
     CT_SEGMENT_EXACT,
     CT_SEGMENT_PREFIX,
+    INTERACTION_ACK_TYPES,
     OFFICIAL_RAW_EVENTS,
     PASSIVE_MAX_SEQ_C2C,
     PASSIVE_MAX_SEQ_GROUP,
@@ -129,6 +130,10 @@ class EventTranslator:
         if event == "GROUP_JOIN_REQUEST":
             # 申请加群：OneBot request.group.add，flag=join_request_id 供审批回传
             self._emit_group_join_request(data)
+            return
+        if event == "INTERACTION_CREATE":
+            # 互动事件（按钮/快捷菜单点击）：凭据注册 + 兜底回应后原样转发
+            self._emit_interaction(data)
             return
         if event in ("GUILD_MEMBER_ADD", "GUILD_MEMBER_UPDATE", "GUILD_MEMBER_REMOVE"):
             # 频道成员进退/资料变更（1<<1 特权 intent）：进退映射 OneBot，变更走扩展转发
@@ -254,6 +259,28 @@ class EventTranslator:
             operator_id=openid,
         )
         self.ad._emit_pack(pack)
+
+    def _emit_interaction(self, data: dict[str, Any]) -> None:
+        """互动事件（INTERACTION_CREATE，1<<26）：按钮/快捷菜单点击等。
+
+        官方要求 type=11（消息按钮）/ 12（快捷菜单）的点击必须回应
+        （PUT /interactions/{id}），否则客户端一直 loading 到超时：
+        - 事件 id 注册为 event_id 被动凭据：点击后的回复消息不受主动额度限制；
+        - 调度兜底自动回应：子插件在宽限期内未自定义回应时补 code=0；
+        - 事件本体仍经 _emit_official_raw 以 notice.interaction_create 转发
+          （raw 含 scene/group_openid/group_member_openid/data.resolved 等）。
+        """
+        try:
+            itype = int(data.get("type") or 0)
+        except (TypeError, ValueError):
+            itype = 0
+        raw_id = str(data.get("id") or "")
+        if raw_id and itype in INTERACTION_ACK_TYPES:
+            target = str(data.get("group_openid") or data.get("user_openid") or "")
+            if target:
+                self.ad.credentials.cache_event_id(target, raw_id)
+            self.ad.schedule_interaction_ack(raw_id)
+        self._emit_official_raw("INTERACTION_CREATE", data)
 
     def _emit_official_raw(self, event: str, data: dict[str, Any], unknown: bool = False) -> None:
         """OneBot v11 无对应语义的官方事件 → 扩展 notice 转发。
