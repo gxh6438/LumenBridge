@@ -178,4 +178,4 @@ def on_group_message(pack, reply):
 
 ## 许可
 
-本项目采用 **MIT License**。
+本项目采用 **MIT License**。使用本插件前请阅读[用户使用条例与免责声明](docs/guide/terms.md)。
