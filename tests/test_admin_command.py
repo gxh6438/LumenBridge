@@ -30,7 +30,6 @@ def check(name: str, ok: bool) -> None:
         raise AssertionError(name)
 
 
-# ---------------------------------------------------------------- fakes
 class FakeLogger:
     def info(self, *a): pass
     def warning(self, *a): pass
@@ -109,7 +108,6 @@ class AdminFixture:
         return [str(a) for a in adapter["admin_qq"]]
 
 
-# ---------------------------------------------------------------- 1. @ 段解析
 def test_extract_at_ids() -> None:
     from endstone_lumenbridge.modules.admin_command import extract_at_ids
 
@@ -137,7 +135,6 @@ def test_extract_at_ids() -> None:
     check("解析：无 at 段返回空", extract_at_ids({"message": [], "raw_message": "hello"}) == [])
 
 
-# ---------------------------------------------------------------- 2. 权限与写入
 def test_permission_gate(tmp: Path) -> None:
     fix = AdminFixture(tmp)
     # 非管理员（10002 不在 admin_qq）→ 拒绝，无写入
@@ -200,7 +197,6 @@ def test_command_variants_and_official(tmp: Path) -> None:
     )
 
 
-# ---------------------------------------------------------------- 3. i18n
 def test_i18n_keys_complete() -> None:
     from endstone_lumenbridge.i18n import get_i18n
 

@@ -2,7 +2,7 @@
 
 **Endstone 群服互通框架 · OneBot v11 双向消息同步 · QQ 官方机器人 · 全平台中继**
 
-[插件市场](https://market.mxcraft.vip/) · [使用文档](https://lumen.mxcraft.vip/getting-started/usage) · [开发文档](https://lumen.mxcraft.vip/developers/plugin-development) · [MIT License](#许可)
+[插件市场](https://market.mxcraft.vip/) · [文档中心](docs/README.md) · [MIT License](#许可)
 
 ---
 
@@ -83,7 +83,7 @@ LumenBridge 的核心是一个**多适配器并行引擎**。每个适配器实�
 
 ### 安装
 
-将 `endstone_lumenbridge-1.0.0-py3-none-any.whl` 放入 Endstone 的 `plugins/` 目录，启动服务器即可。插件无任何外部 pip 依赖。
+将 `endstone_lumenbridge-1.0.11-py3-none-any.whl` 放入 Endstone 的 `plugins/` 目录，启动服务器即可。插件无任何外部 pip 依赖。
 
 ### 三步配置
 
@@ -93,7 +93,7 @@ LumenBridge 的核心是一个**多适配器并行引擎**。每个适配器实�
 
 ```text
 plugins/
-├── endstone_lumenbridge-1.0.0-py3-none-any.whl
+├── endstone_lumenbridge-1.0.11-py3-none-any.whl
 └── lumenbridge/
     ├── config.json          # 基础配置
     ├── connections.json     # 连接配置（适配器卡片）
@@ -134,18 +134,19 @@ def on_group_message(pack, reply):
 }
 ```
 
-详见 [子插件开发文档](https://lumen.mxcraft.vip/developers/plugin-development)。
+详见 [子插件快速入门](docs/development/subplugin-getting-started.md) 与 [Context API 参考](docs/development/context-api.md)。
 
 ---
 
 ## 文档
 
-| 文档 | 说明 |
+完整文档位于 [`docs/`](docs/README.md)，按「入门 → 使用 → 开发」三层组织，每篇独立成文：
+
+| 分区 | 内容 |
 | --- | --- |
-| [使用文档](https://lumen.mxcraft.vip/getting-started/usage) | 安装、配置、日常使用全指南 |
-| [子插件开发文档](https://lumen.mxcraft.vip/developers/plugin-development) | 子插件 API 完整参考与教程 |
-| [QQ 官方机器人适配指南](https://lumen.mxcraft.vip/qq-bot/adapter-guide) | QQ 官方 bot 配置与事件详解 |
-| [QQ 官方机器人 API 参考](https://lumen.mxcraft.vip/qq-bot/api-reference) | QQ 官方 bot 子插件 API 速查 |
+| [入门 getting-started/](docs/getting-started/introduction.md) | 项目介绍、安装与升级、三步快速上手 |
+| [使用指南 guide/](docs/guide/configuration.md) | 配置详解、适配器、命令、白名单、聊天互通、WebUI、正则引擎、插件市场、FAQ |
+| [开发文档 development/](docs/development/architecture.md) | 架构总览、子插件开发（入门 / API / 事件 / 消息 / Web 扩展 / 清单 / 生命周期 / i18n / 官方机器人）、项目结构、测试指南 |
 
 ---
 
@@ -153,7 +154,7 @@ def on_group_message(pack, reply):
 
 | 项目 | 规格 |
 | --- | --- |
-| 版本 | 1.0.0 |
+| 版本 | 1.0.11 |
 | 许可证 | MIT |
 | 语言 | Python 3.11+ |
 | 框架 | Endstone 0.11+ |

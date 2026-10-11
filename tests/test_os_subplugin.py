@@ -22,10 +22,6 @@ def check(name, cond, detail=""):
         raise AssertionError(f"{name} {detail}".strip())
 
 
-# ---------------------------------------------------------------------------
-# Fake lumen 上下文
-# ---------------------------------------------------------------------------
-
 class FakeLogger:
     def info(self, m):
         print(f"    [log] {m}")
@@ -136,19 +132,13 @@ class FakeLumen:
         self._bus.emit(event, *args)
 
 
-# ---------------------------------------------------------------------------
-# 测试
-# ---------------------------------------------------------------------------
-
 def _run():
     plugin_dir = ROOT / "examples_plugins" / "subplugins" / "os"
     print("==== os 子插件测试 ====")
 
-    # 清单校验
     manifest = json.loads((plugin_dir / "lumen.json").read_text("utf-8"))
     check("lumen.json 清单有效", manifest["name"] == "os" and manifest["load"] is True)
 
-    # 动态加载 main.py
     spec = importlib.util.spec_from_file_location("os_subplugin_main", plugin_dir / "main.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -158,18 +148,15 @@ def _run():
         lumen = FakeLumen(td)
         mod.on_load(lumen)
 
-        # 配置文件自动生成
         conf_file = Path(td) / "config.json"
         check("config.json 自动生成", conf_file.exists())
         conf = json.loads(conf_file.read_text("utf-8"))
         check("配置项完整", all(k in conf for k in mod.DEFAULT_CONFIG))
 
-        # 网页配置面板注册（全部项 + 中文标签）
         reg = FakeWeb.registered
         check("网页配置面板已注册", reg is not None and len(reg.items) == len(mod.DEFAULT_CONFIG))
         check("配置面板带中文标签", reg and all(it["label"] and it["label"] != it["key"] for it in reg.items))
 
-        # 状态查询：模拟群消息
         replies = []
 
         def reply(msg, at=False):
@@ -196,7 +183,6 @@ def _run():
         check("包含平均TPS", "平均TPS: 19.97" in text)
         check("包含在线人数", "在线2人" in text)
 
-        # 非主群消息不响应
         lumen.emit(
             "message.group.normal",
             {"group_id": 999, "raw_message": "服务器状态"},
@@ -204,7 +190,6 @@ def _run():
         )
         check("非主群不响应", len(replies) == 1)
 
-        # 其他消息不响应
         lumen.emit(
             "message.group.normal",
             {"group_id": 123456, "raw_message": "你好"},
@@ -212,7 +197,6 @@ def _run():
         )
         check("非关键字不响应", len(replies) == 1)
 
-        # 网页配置更新联动
         lumen.emit("config.update.os", "show_tps", False)
         conf2 = json.loads(conf_file.read_text("utf-8"))
         check("网页配置更新已持久化", conf2["show_tps"] is False)
@@ -225,7 +209,6 @@ def _run():
         )
         check("关闭项后不再显示TPS", replies and "平均TPS" not in replies[0])
 
-        # 自定义触发词
         lumen.emit("config.update.os", "trigger", "查状态")
         replies.clear()
         lumen.emit(
@@ -235,7 +218,6 @@ def _run():
         )
         check("自定义触发词生效", len(replies) == 1)
 
-        # on_unload 正常
         mod.on_unload(lumen)
         check("on_unload 正常", True)
 

@@ -100,9 +100,7 @@ MIME_TYPES = {
     ".ico": "image/x-icon",
 }
 
-# 允许 gzip 传输压缩的文本资源类型
 _GZIP_SUFFIXES = frozenset({".html", ".js", ".css", ".json", ".svg", ".txt", ".md"})
-# 静态资源 gzip 压缩缓存：path → (mtime_ns, size, compressed)
 _GZIP_CACHE: dict[Path, tuple[int, int, bytes]] = {}
 _GZIP_CACHE_MAX = 64
 _gzip_lock = threading.Lock()
@@ -119,7 +117,6 @@ def _gzip_static(path: Path, mtime_ns: int, size: int) -> bytes | None:
     except OSError:
         return None
     compressed = gzip.compress(data, 6)
-    # 压缩无收益（已压缩内容 / 极小文件）时回退原文直发
     if len(compressed) >= size:
         return None
     with _gzip_lock:
@@ -128,30 +125,25 @@ def _gzip_static(path: Path, mtime_ns: int, size: int) -> bytes | None:
         _GZIP_CACHE[path] = (mtime_ns, size, compressed)
     return compressed
 
-# 敏感键掩码集合：展示时统一替换为固定 6 个 *（不回显长度），保存时按纯星串自动还原
+# 敏感键：展示固定 6 个 *，保存时按纯星串还原
 SENSITIVE_KEYS = {
     "access_token", "password", "secret",
     "app_secret", "client_secret", "api_key", "token", "private_key",
 }
 
-# 上传/URL 下载的统一大小上限（16MB），防止全量读入内存导致 DoS
+# 上传大小上限 16MB，防内存 DoS
 _MAX_UPLOAD_BYTES = 16 * 1024 * 1024
 
-# 进程级密钥挂载在恒存的 sys 模块属性上：热重载重建实例后仍复用（不落盘）
+# 进程级密钥挂在 sys 属性上：热重载复用，不落盘
 _PROCESS_SECRET_ATTR = "_lumenbridge_webui_secret"
 
 EDITABLE_SUFFIXES = {".json", ".py", ".txt", ".md", ".yml", ".yaml", ".cfg", ".ini", ".html", ".css", ".js"}
 
-# ------------------------------------------------- URL 下载防护（按内网部署需求调整）
-# 面板主要部署于内网，需从私有源直装子插件，故不做内网/保留地址拦截；
-# 防护 = 仅 http(s) + 禁止跨主机重定向 + 大小/超时上限 + 可选 sha256/install_url_allow_hosts 校验。
+# 面板面向内网部署：不做内网地址拦截；防护 = 仅 http(s) + 禁跨主机重定向 + 大小/超时上限
 
 
 def _http_url_host(url: str) -> str:
-    """校验下载 URL 为 http(s) 且含主机名（语法级校验，不做 DNS 解析）。
-
-    返回小写主机名，供重定向目标比对；非法时抛 ValueError（消息仅用于日志）。
-    """
+    """校验 URL 为 http(s) 且含主机名，返回小写主机名；非法抛 ValueError。"""
     try:
         parsed = urllib.parse.urlparse(str(url or ""))
     except ValueError as exc:
@@ -178,11 +170,7 @@ class _SameHostRedirectHandler(urllib.request.HTTPRedirectHandler):
 def _fetch_url_bytes(
     url: str, max_bytes: int, timeout: float = 30.0, headers: dict[str, str] | None = None,
 ) -> bytes:
-    """按 URL 下载防护策略下载（协议白名单 + 禁止跨主机重定向 + 大小上限）。
-
-    任何失败统一抛 RuntimeError("下载失败")，原始异常挂在 __cause__ 供调用方记日志；
-    对外不回显 Connection refused / 404 等细节。
-    """
+    """按防护策略下载；失败统一抛 RuntimeError("下载失败")，不回显细节。"""
     expected_host = _http_url_host(url)
     req_headers = {"User-Agent": "LumenBridge-WebUI"}
     if headers:
@@ -191,7 +179,7 @@ def _fetch_url_bytes(
     try:
         req = urllib.request.Request(url, headers=req_headers)
         with opener.open(req, timeout=timeout) as resp:
-            # 纵深防御：即使重定向处理器被绕过，最终 URL 主机也必须一致
+            # 纵深防御：最终 URL 主机也须一致
             final_host = (urllib.parse.urlsplit(resp.geturl()).hostname or "").lower()
             if final_host != expected_host:
                 raise urllib.error.URLError("重定向到其它主机已被拒绝")
@@ -294,10 +282,9 @@ class WebUIServer:
         webui_conf = plugin.config_manager.data.get("webui", {})
         self.host: str = str(webui_conf.get("host") or "127.0.0.1")
         self.port: int = int(webui_conf.get("port") or 8300)
-        # ""/"*" 或空白视为未设置（生成随机密码）；支持哈希与明文格式（明文首次登录后自动迁移）
+        # ""/"*" 或空白视为未设置（随机密码）；明文首次登录后自动迁移
         raw_password = str(webui_conf.get("password") or "").strip()
         self.password: str = raw_password if raw_password else "*"
-        # 密码是否来自配置：随机生成的不落盘，不参与哈希自动迁移
         self._password_from_config: bool = bool(raw_password)
         self.secret: str = str(webui_conf.get("secret") or self._process_scoped_secret())
 
@@ -307,61 +294,49 @@ class WebUIServer:
             print(f"[WebUI] {_t('plugin.random_password', password=self.password)}", flush=True)
             self.logger.info("[WebUI] 随机管理员密码已打印至服务器控制台")
 
-        # 鉴权提供者：HMAC token + 版本号（改密/换钥后旧 token 立即失效）
         self.auth_provider = auth_util.AuthProvider(self.secret)
 
-        # 主线程长操作互斥锁：防止超时返回后后台任务仍在执行时又叠加新操作
+        # 主线程长操作互斥：防超时返回后后台任务仍在执行又叠加新操作
         self._main_op_lock = threading.Lock()
 
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
-        # 活跃连接注册表（setup 注册 / finish 注销）：shutdown() 只关 listen socket，
-        # keep-alive 僵尸连接仍由旧实例应答；stop() 须主动断开（防热重载后前端命中旧实例）
+        # 活跃连接注册表：shutdown 只关监听 socket，stop() 须主动断开防僵尸连接
         self._live_conns: set[_socket_mod.socket] = set()
         self._conn_lock = threading.Lock()
 
-        # 子插件扩展注册表（被请求处理线程读、子插件加载线程写，需加锁保护）
+        # 跨线程读写，须持 _ext_lock
         self.custom_apis: dict[tuple[str, str], tuple[Callable, bool]] = {}
         self.custom_pages: list[dict[str, str]] = []
         self.plugins_config_schema: dict[str, dict[str, Any]] = {}
         self._ext_lock = threading.RLock()
-        # 兼容旧字段（部分代码引用 _schema_lock），实际指向 _ext_lock
+        # 兼容旧引用
         self._schema_lock = self._ext_lock
         self.start_time = time.time()
 
-        # pip 安装任务表：task_id -> {status, log_lines, packages, start_time, done}
         self._pip_tasks: dict[str, dict[str, Any]] = {}
         self._pip_tasks_lock = threading.Lock()
-        # 复用 plugin._pip_serial_lock：WebUI 与 marketplace 共享串行锁，避免并发写 site-packages 损坏元数据。
+        # 与 marketplace 共享串行锁，防并发写坏 site-packages
         self._pip_serial_lock = plugin._pip_serial_lock
-        # pip list 结果短缓存（时间戳, 列表）：避免前端并发刷新刷出多个 pip 子进程
         self._pip_list_cache: tuple[float, list[dict[str, Any]]] | None = None
         self._pip_list_lock = threading.Lock()
         self._market_tasks: dict[str, dict[str, Any]] = {}
         self._market_tasks_lock = threading.Lock()
 
-        # QQ 官方机器人扫码绑定任务表：task_id -> {bind_key, created_at}
         self._qr_bind_tasks: dict[str, dict[str, Any]] = {}
         self._qr_bind_lock = threading.Lock()
 
-        # 登录限速：按客户端 IP 的失败计数/锁定 + 请求频率窗口，线程安全
         self._login_guard_lock = threading.Lock()
         self._login_guard: dict[str, dict[str, Any]] = {}
 
-        # /api/qqofficial/qr/create 限频（低危）：每 IP 30 秒 1 次，内存计数
         self._qr_create_lock = threading.Lock()
         self._qr_create_last: dict[str, float] = {}
 
         self.metrics_collector = ServerMetricsCollector(self.logger, interval=3.0)
 
     def _process_scoped_secret(self) -> str:
-        """获取进程级会话签名密钥（不落盘）。
-
-        webui.secret 未配置时：热重载经 sys 模块属性复用同一密钥（登录态保留）；
-        进程重启则重新生成，旧 token 全部失效须重新登录。
-        顺带清理旧版落盘的 data/webui_secret.txt。
-        """
+        """进程级签名密钥（不落盘）：热重载经 sys 属性复用，重启重生成。"""
         legacy = Path(self.plugin.data_folder) / "data" / "webui_secret.txt"
         try:
             if legacy.is_file():
@@ -404,17 +379,13 @@ class WebUIServer:
         )
         self._thread.start()
         self.metrics_collector.start()
-        # 按实际监听地址打印（0.0.0.0 如实显示），并补一条局域网访问提示
         self.logger.info(_t("plugin.webui_started", url=f"http://{self.host}:{self.port}"))
         if self.host == "0.0.0.0":
             self.logger.info(_t("plugin.webui_listening_all", port=self.port))
 
     @staticmethod
     def _install_sigpipe_ignore() -> None:
-        """将 SIGPIPE 设为忽略，避免 broken pipe 杀进程。
-
-        仅在仍是 SIG_DFL 时改写，不覆盖宿主刻意设置的处理器。
-        """
+        """SIGPIPE 设为忽略防 broken pipe 杀进程；仅在 SIG_DFL 时改写。"""
         try:
             import ctypes
             import ctypes.util
@@ -439,7 +410,7 @@ class WebUIServer:
                 if current == signal.SIG_DFL:
                     signal.signal(sigpipe, signal.SIG_IGN)
         except (ValueError, OSError, RuntimeError):
-            # 非主线程调用会抛 ValueError，C 层已设置，可忽略
+            # 非主线程抛 ValueError，可忽略
             pass
 
     @staticmethod
@@ -456,10 +427,9 @@ class WebUIServer:
             return False
 
     def stop(self) -> None:
-        # 先通知 SSE 请求线程退出，再停止主 HTTP 循环。
         self._stop_event.set()
         self.metrics_collector.stop()
-        # 先断开全部活跃连接再 shutdown()：防旧实例的 daemon 线程继续应答前端轮询
+        # 先断开活跃连接再 shutdown()：防旧实例 daemon 线程继续应答
         with self._conn_lock:
             conns = list(self._live_conns)
             self._live_conns.clear()
@@ -484,21 +454,18 @@ class WebUIServer:
     def is_running(self) -> bool:
         return self._httpd is not None
 
-    # --------------------------------------------------------- 登录限速（H1）
-    # 每 IP 10 秒内最多 10 次登录请求；连续 5 次失败锁定 60s * 2^(超出次数-1)，上限 900s
     LOGIN_MAX_ATTEMPTS_PER_WINDOW = 10
     LOGIN_WINDOW_SECONDS = 10.0
     LOGIN_FAIL_THRESHOLD = 5
     LOGIN_LOCK_BASE_SECONDS = 60.0
     LOGIN_LOCK_MAX_SECONDS = 900.0
-    # 失败计数衰减窗口：超时未再失败即清零，避免“连续”退化为“累计”导致永久锁定
+    # 超时未再失败即清零，避免“连续”退化为“累计”导致永久锁定
     LOGIN_FAIL_DECAY_SECONDS = 300.0
 
     def _login_check_allowed(self, ip: str) -> tuple[bool, str]:
-        """登录前置检查：锁定状态与请求频率窗口（H1）。返回 (是否放行, 提示消息)。"""
+        """登录前置检查：锁定状态与请求频率窗口。返回 (是否放行, 提示消息)。"""
         now = time.time()
         with self._login_guard_lock:
-            # 顺带清理长期无活动的条目，防止字典无限增长
             if len(self._login_guard) > 4096:
                 stale = [
                     key for key, state in self._login_guard.items()
@@ -517,7 +484,6 @@ class WebUIServer:
             elif now - state["window_start"] >= self.LOGIN_WINDOW_SECONDS:
                 state["window_start"] = now
                 state["attempts"] = 0
-            # 失败计数衰减：实现注释声明的“连续失败”语义
             if state["fails"] and now - state.get("last_fail", 0.0) >= self.LOGIN_FAIL_DECAY_SECONDS:
                 state["fails"] = 0
             if state["attempts"] >= self.LOGIN_MAX_ATTEMPTS_PER_WINDOW:
@@ -526,7 +492,7 @@ class WebUIServer:
             return True, ""
 
     def _login_record_result(self, ip: str, success: bool) -> None:
-        """登录结果回写（H1）：失败累计并按指数退避锁定，成功清零计数。"""
+        """登录结果回写：失败累计并指数退避锁定，成功清零。"""
         now = time.time()
         with self._login_guard_lock:
             state = self._login_guard.get(ip)
@@ -543,10 +509,7 @@ class WebUIServer:
                 state["locked_until"] = now + lock
 
     def _upgrade_password_storage(self, plain: str) -> None:
-        """把配置中的明文密码迁移为哈希存储（密码本身不变，token 不失效）。
-
-        首次用明文密码成功登录即回写 pbkdf2 哈希；随机生成（未落盘）的密码不参与迁移。
-        """
+        """首次明文登录成功后迁移为 pbkdf2 哈希；随机密码不参与。"""
         try:
             hashed = auth_util.hash_password(plain)
             cm = self.plugin.config_manager
@@ -556,19 +519,13 @@ class WebUIServer:
             self._password_from_config = True
             self.logger.info("[WebUI] 管理员密码已自动迁移为哈希存储")
         except Exception:
-            # 迁移失败（只读配置等）不影响登录：保持明文，下次再试
+            # 失败不影响登录，下次再试
             pass
 
-    # 控制台密码长度上限：命令参数不适合承载超长口令
     MAX_CONSOLE_PASSWORD_LENGTH = 128
 
     def set_webui_password(self, plain: str) -> None:
-        """重置管理员密码（/lumen password 控制台命令调用，仅限控制台）。
-
-        哈希后落盘（配置文件不出现明文）、运行时立即生效，并使所有已签发
-        token 失效——旧会话必须用新密码重新登录。无效输入（空白/超长）
-        抛 ValueError，由命令层转为用法提示；配置写入失败原样抛出。
-        """
+        """控制台重置密码：哈希落盘并使全部 token 失效；无效输入抛 ValueError。"""
         pw = str(plain).strip()
         if not pw:
             raise ValueError("empty password")
@@ -583,13 +540,7 @@ class WebUIServer:
         self.auth_provider.invalidate_tokens()
 
     def clear_webui_password(self) -> str:
-        """清除管理员密码并转入随机模式（/lumen password 无参数时调用）。
-
-        配置写回 "*" 哨兵（空串会被校验拒绝），此后每次启动生成随机密码；
-        当前运行期立即生成一个随机密码并返回，由调用方打印到服务器控制台
-        stdout（不走 logger，避免明文进入 WebUI 日志缓冲/SSE 被回看）。
-        所有已签发 token 同步失效。
-        """
+        """清除密码转随机模式：配置写回 "*"，新密码打印到控制台（不走 logger，防回看）；token 全部失效。"""
         cm = self.plugin.config_manager
         if cm is not None:
             cm.apply_patch({"webui": {"password": "*"}})
@@ -600,21 +551,13 @@ class WebUIServer:
         return new_pw
 
     def refresh_config(self) -> None:
-        """按最新配置刷新运行参数（供 /lumen reload 调用，不整体重建实例）。
-
-        - password / secret 变化：更新属性并使既有登录 token 失效，
-          HTTP 服务不中断，浏览器端重新登录即可
-        - host / port 变化：重启 HTTP 监听 socket；扩展注册表（custom_apis、
-          custom_pages、plugins_config_schema）与运行中任务状态全部保留
-        - 配置留空的项保持现值：避免 reload 把已生成的随机密码/密钥悄悄换掉
-        """
+        """按最新配置刷新运行参数：密码/密钥变更失效 token，host/port 变更重启监听；留空项保持现值。"""
         conf: dict[str, Any] = {}
         if self.plugin.config_manager:
             raw = self.plugin.config_manager.data.get("webui", {})
             if isinstance(raw, dict):
                 conf = raw
 
-        # 空白密码视同未设置（保持现值）；格式变更直接采纳，明文由首次登录迁移
         new_password = str(conf.get("password") or "").strip()
         if new_password and new_password != "*" and new_password != self.password:
             self.password = new_password
@@ -643,14 +586,7 @@ class WebUIServer:
             self.start()
 
     def _schedule_config_hot_apply(self, plugin: Any) -> None:
-        """外部手改 config.json 后的热生效调度（由 GET /api/config 检测到指纹变化时调用）。
-
-        - 语言：_init_i18n()（须主线程，访问 Endstone server 对象）
-        - WebUI 监听地址/端口/密码/密钥：refresh_config()（host/port 变化时重启监听）
-        - pip 镜像配置：失效缓存，下次使用时按新配置重建 manager
-        全部异步调度且不等待：本轮 GET 响应先返回（延迟 2 tick 让响应先发完，
-        避免重启监听掐断正在传输的连接）。
-        """
+        """外部手改 config.json 后热生效（语言/监听地址/pip 配置）；延迟 2 tick 让本轮响应先发完。"""
         def _apply() -> None:
             init_i18n = getattr(plugin, "_init_i18n", None)
             if callable(init_i18n):
@@ -672,7 +608,7 @@ class WebUIServer:
         try:
             plugin.run_on_main(_apply, delay=2)
         except Exception:
-            # 调度失败（如测试替身无 scheduler）：退化为后台定时器，同样避开本轮响应
+            # 调度失败退化为后台定时器
             try:
                 threading.Timer(1.0, _apply).start()
             except Exception:
@@ -703,8 +639,7 @@ class WebUIServer:
             "success": False,
             "msg": "",
             "subplugin_name": subplugin_name,
-            # 子插件依赖安装任务在安装成功后自动热重载（reload_after_install）；
-            # reload_required 仅为兼容旧前端字段保留（现在恒为 False）。
+            # reload_required 仅为兼容旧前端字段保留（恒为 False）
             "reload_required": bool(subplugin_name and not reload_after_install),
             "reload_after_install": bool(reload_after_install),
             "action": action,
@@ -713,7 +648,6 @@ class WebUIServer:
         with self._pip_tasks_lock:
             if len(self._pip_tasks) >= 20:
                 now = time.time()
-                # 低危：仅淘汰 5 分钟前已完成的任务，保留近期结果供前端轮询
                 done_tasks = [
                     (tid, t) for tid, t in self._pip_tasks.items()
                     if t.get("done") and now - float(t.get("start_time", 0) or 0) > 300
@@ -733,18 +667,15 @@ class WebUIServer:
             with self._pip_tasks_lock:
                 t = self._pip_tasks.get(task_id)
                 if t:
-                    # 限制日志条数，避免内存膨胀
                     if len(t["log_lines"]) < 500:
                         t["log_lines"].append(line)
 
         def run_install() -> None:
-            # 任务须等"依赖安装 +（如需要）主线程重载"均完成才结束。
             install_success = False
             install_msg = ""
             reload_success: bool | None = None
             reload_error = ""
             if action == "uninstall":
-                # 卸载与安装共用任务框架：请求线程只拿 task_id 轮询，不同步等待子进程
                 try:
                     with self._pip_serial_lock:
                         install_success, install_msg = mgr.uninstall(packages[0] if packages else "")
@@ -761,19 +692,17 @@ class WebUIServer:
                             "msg": install_msg or ("卸载完成" if install_success else "卸载失败"),
                             "status": "success" if install_success else "failed",
                         })
-                # 环境已变更：失效 pip list 缓存
                 with self._pip_list_lock:
                     self._pip_list_cache = None
                 return
             try:
-                # pip/uv 非线程安全：串行化所有安装操作，避免并发写 site-packages 损坏元数据
                 with self._pip_serial_lock:
                     install_success, install_msg = mgr.install(packages, on_log=on_log)
             except Exception as exc:  # noqa: BLE001
                 install_msg = str(exc)
 
             if install_success:
-                # 失效 import 缓存，使后续 reload 能发现新增的 dist-info/顶层模块。
+                # 失效 import 缓存以便 reload 发现新装模块
                 try:
                     import importlib
                     importlib.invalidate_caches()
@@ -791,7 +720,6 @@ class WebUIServer:
 
                     def do_reload() -> None:
                         try:
-                            # loader._load_one 会 invalidate_caches，确保刚装依赖能立刻被识别。
                             reload_ok[0] = bool(plugin.subplugin_manager.reload_one(subplugin_name))
                             if not reload_ok[0]:
                                 with plugin.subplugin_manager._lock:
@@ -819,7 +747,7 @@ class WebUIServer:
                         if reload_success else _t("pip.auto_reload_failed", name=subplugin_name, error=reload_error or "load failed")
                     )
 
-            # 拆分安装/重载状态，避免依赖写入成功但加载失败时误导为"安装成功"。
+            # 安装与重载状态分离，防依赖写入成功但加载失败时误导
             overall_success = bool(install_success and reload_success is not False)
             if not install_success:
                 final_message = install_msg or "依赖安装失败"
@@ -840,7 +768,6 @@ class WebUIServer:
                         "msg": final_message,
                         "status": "success" if overall_success else "failed",
                     })
-            # 环境已变更：失效 pip list 缓存
             with self._pip_list_lock:
                 self._pip_list_cache = None
 
@@ -848,12 +775,7 @@ class WebUIServer:
         return task_id
 
     def _start_market_task(self, action: str, runner: Callable[[Callable[[str], None], Callable[[int, str], None]], dict[str, Any]]) -> str | None:
-        """启动市场异步任务；市场网络和 pip 安装不可阻塞 WebUI 请求线程。
-
-        runner 接收两个回调：
-        - ``log(line)``：追加一行进度日志到任务面板（前端实时轮询展示）
-        - ``progress(percent, label)``：更新进度条（0-100）与标签
-        """
+        """启动市场异步任务；runner 接收 log 与 progress 两个回调，不阻塞请求线程。"""
         import uuid
         task_id = uuid.uuid4().hex[:12]
         task = {
@@ -892,7 +814,6 @@ class WebUIServer:
         def execute() -> None:
             try:
                 result = runner(on_log, on_progress)
-                # runner 可能返回非 dict（如 list/str/None），安全提取 message
                 msg = result.get("message", "") if isinstance(result, dict) else str(result) if result else ""
                 with self._market_tasks_lock:
                     current = self._market_tasks.get(task_id)
@@ -909,16 +830,11 @@ class WebUIServer:
 
     @property
     def url(self) -> str:
-        # 如实反映监听地址（0.0.0.0 = 所有接口）；IPv6 地址需加方括号
         host = f"[{self.host}]" if ":" in self.host else self.host
         return f"http://{host}:{self.port}"
 
     def _debug_log(self, key: str, **kwargs: Any) -> None:
-        """调试日志：仅在 config 开启 debug 时经 debug 级别输出。
-
-        用于注册类提示（已注册插件 API/配置表单/自定义页面）——数量多且
-        属于排障信息，默认静默，避免刷屏；WebUI 日志页按 DEBUG 级别可回看。
-        """
+        """仅在 config.debug 开启时输出（注册类提示默认静默防刷屏）。"""
         try:
             enabled = bool(self.plugin.config_manager.debug)
         except Exception:
@@ -955,16 +871,10 @@ class WebUIServer:
         tab: bool = False,
         icon: str = "",
     ) -> None:
-        """挂载子插件自定义页面（静态资源经 /plugin-views/ 服务）。
-
-        tab=True 时页面在移动端注册为底栏 tab，否则进「其它」面板；
-        桌面端侧栏两种都展示。icon 为内置图标名（渲染同风格 SVG），
-        emoji/非 ASCII 字符按字符渲染，其它值回退默认 SVG 图标。
-        """
+        """挂载子插件自定义页面；tab=True 进移动端底栏，icon 支持内置名/emoji/默认回退。"""
         url = f"/plugin-views/{folder}/{relative_path}"
         with self._ext_lock:
             if not any(p["url"] == url for p in self.custom_pages):
-                # 用 uuid 防同毫秒多页面 ID 冲突
                 import uuid as _uuid
                 self.custom_pages.append({
                     "id": f"{plugin_name}_{_uuid.uuid4().hex[:8]}",
@@ -995,18 +905,17 @@ class _RequestHandler(BaseHTTPRequestHandler):
         """低危：Server 头固定为 LumenBridge，不暴露 Python/BaseHTTP 版本。"""
         return "LumenBridge"
 
-    # 屏蔽默认 stderr 访问日志
     def log_message(self, fmt: str, *args: Any) -> None:
         pass
 
-    # 客户端中途断开触发的 socket 异常必须吞掉：避免 SIGPIPE 杀 BDS 进程，且写操作经 _safe_write 兜底，绝不影响游戏主进程。
+    # 断连 socket 异常必须吞掉：防 SIGPIPE 杀 BDS 进程
     _NETWORK_ERRORS = (
         ConnectionResetError,
         ConnectionAbortedError,
         BrokenPipeError,
         TimeoutError,
     )
-    # 同样需要吞掉的 OSError errno 集合（部分 Python 版本不映射到上面子类）
+    # 部分 Python 版本不映射为上面子类的 errno
     _SWALLOW_ERRNOS = {32, 103, 104, 110, 113}
 
     @classmethod
@@ -1063,13 +972,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
     def setup(self) -> None:  # type: ignore[override]
         """把 wfile 包装为带 MSG_NOSIGNAL 的写，是抵御 SIGPIPE 杀进程的根本手段（即便宿主重置全局 SIGPIPE）。"""
         super().setup()
-        # 注册到活跃连接表，stop() 时统一断开（见 WebUIServer.__init__ 注释）
         try:
             with self.webui._conn_lock:
                 self.webui._live_conns.add(self.connection)
         except Exception:  # noqa: BLE001
             pass
-        # 设置 socket 超时，防止 Slowloris 慢速攻击耗尽线程池
+        # 防 Slowloris 耗尽线程池
         try:
             self.connection.settimeout(30)
         except OSError:
@@ -1077,7 +985,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         try:
             self.wfile = _NosigWFile(self.wfile, self.connection)  # type: ignore[assignment]
         except Exception:  # noqa: BLE001
-            pass  # 包装失败时退回原始 wfile，由外层 try/except 兜底
+            pass
 
     @property
     def plugin(self) -> Any:
@@ -1089,13 +997,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         return parsed.path, query
 
     def _read_body_with_deadline(self, length: int) -> bytes | None:
-        """按总时限分块读取请求体（Slowloris dribble 防护）。
-
-        socket 超时只约束单次 recv：攻击者以每 29 秒 1 字节的速度 dribble
-        可无限期占用连接线程。read1 每次至多一次底层 recv，配合总时限
-        （按体积给足慢速上传余量，下限 30s）把线程占用时间从无限收敛到
-        有界。超时/中断即断连，防残留字节污染下一请求。
-        """
+        """按总时限分块读取请求体（Slowloris dribble 防护），把线程占用收敛到有界。"""
         # 最低 16KB/s 吞吐给足余量：16MB 上限 → 256s；小 body → 30s 下限
         deadline = time.monotonic() + max(30.0, min(300.0, length / 16384.0))
         chunks: list[bytes] = []
@@ -1109,7 +1011,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             except OSError:
                 self.close_connection = True
                 return None
-            if not chunk:  # EOF：对端提前断开
+            if not chunk:
                 break
             chunks.append(chunk)
             remaining -= len(chunk)
@@ -1119,14 +1021,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
-            # 畸形 Content-Length（如 "abc"）不应导致 500
             self.close_connection = True
             return None
         if length <= 0:
             return None
-        # 限制请求体大小，防止恶意大 body 导致内存耗尽 DoS
-        if length > 16 * 1024 * 1024:  # 16MB
-            # 必须关闭连接：未读 body 会在 keep-alive 下污染下一请求解析
+        if length > 16 * 1024 * 1024:
+            # 未读 body 会污染 keep-alive 下一请求
             self.close_connection = True
             return None
         raw = self._read_body_with_deadline(length)
@@ -1139,11 +1039,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             return None
 
     def _drain_request_body(self, limit: int = _MAX_UPLOAD_BYTES + 64 * 1024) -> None:
-        """尽量消费请求体（按 Content-Length 分块读取，请求走私防护）。
-
-        读取上限受 limit 约束：过大的声明长度不做全量消费（本身即攻击面），
-        由调用方配合 close_connection 关闭连接兜底。
-        """
+        """尽量消费请求体（请求走私防护）；声明长度超上限由调用方断连兜底。"""
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
@@ -1164,7 +1060,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         """解析 multipart/form-data 中的第一个文件字段，返回 (文件名, 内容)"""
         ctype = self.headers.get("Content-Type", "")
         if "multipart/form-data" not in ctype:
-            # 前置失败须关闭连接并消费请求体，防 keep-alive 请求走私
+            # 前置失败须断连并消费 body，防 keep-alive 请求走私
             self.close_connection = True
             self._drain_request_body()
             return None
@@ -1173,15 +1069,13 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             self._drain_request_body()
             return None
-        # boundary 值先去空白再去引号，兼容 boundary="..." 与边界空白写法
         boundary = m.group(1).strip().strip('"').encode()
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
-            # 畸形 Content-Length（如 "abc"）不应导致 500；长度未知无法消费，直接断连
+            # 长度未知无法消费，直接断连
             self.close_connection = True
             return None
-        # 上传上限 16MB：body 全量读入内存，过大的上限会被用于内存耗尽 DoS
         if length <= 0 or length > _MAX_UPLOAD_BYTES:
             self.close_connection = True
             if length > 0:
@@ -1229,7 +1123,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
         if not file_path.is_file():
             self._send_json({"code": 404, "msg": _t("webui.msg.not_found")}, 404)
             return
-        # 低危：大文件防护——超过 8MB 直接 413
         try:
             st = file_path.stat()
         except OSError:
@@ -1241,7 +1134,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
             return
         suffix = file_path.suffix.lower()
         mime = MIME_TYPES.get(suffix, "application/octet-stream")
-        # 强 ETag（大小+mtime）：重验证命中回 304，升级后 mtime 变化自动失效
         etag = f'"{size:x}-{st.st_mtime_ns:x}"'
         cache_hdr = self._static_cache_header(suffix)
         if self.headers.get("If-None-Match") == etag:
@@ -1260,7 +1152,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
         ]
         headers.append(("Cache-Control", cache_hdr))
 
-        # 文本资源按 Accept-Encoding 协商 gzip，结果按 (mtime, size) 缓存
         gz_body: bytes | None = None
         if (
             suffix in _GZIP_SUFFIXES
@@ -1277,7 +1168,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
         if gz_body is not None:
             self._safe_write(gz_body)
             return
-        # 二进制资源分块发送（64KB），避免一次性把整个文件读入内存
         try:
             with file_path.open("rb") as fh:
                 while True:
@@ -1292,8 +1182,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
     @staticmethod
     def _static_cache_header(suffix: str) -> str:
         if suffix == ".html":
-            # HTML 不长缓存，保证升级后页面骨架及时更新。
-            # 内网部署下 CSP/X-Frame-Options 头会拦截跨域背景图与 iframe 自定义页。
+            # 全部 no-cache：保证升级后及时生效
             return "no-cache"
         if suffix in (".png", ".ico", ".svg"):
             return "public, max-age=86400"
@@ -1310,8 +1199,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self._send_json({"code": 401, "msg": _t("webui.msg.unauthorized")}, 401)
 
     def do_OPTIONS(self) -> None:
-        # 仅同源访问：405 且不回 Access-Control-Allow-* 头，预检必然失败。
-        # 带 body 的 OPTIONS 也要消费/断连（_route 的 finally 兜底不覆盖本方法）
+        # 仅同源：不回 CORS 头；带 body 时消费并断连（finally 兜底不覆盖此处）
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
@@ -1339,10 +1227,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     def _route(self, method: str) -> None:
         path, query = self._parse()
-        # keep-alive 连接同一 handler 实例会串行处理多个请求，逐请求重置消费标志
+        # keep-alive 下同一 handler 串行处理多请求，逐请求重置消费标志
         self._body_consumed = False
         try:
-            # 公共 API：固定白名单 + 全部 /api/i18n/ 语言包路由
             if method == "GET" and (
                 path in ("/api/health", "/api/i18n/languages", "/api/i18n/current", "/api/public/background")
                 or path.startswith("/api/i18n/")
@@ -1355,7 +1242,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 handler, need_auth = hit
                 if need_auth and not self._check_auth(query):
                     return self._unauthorized()
-                # multipart 请求解析第一个文件字段，传入 handler 的 "file" 键
                 ctype = self.headers.get("Content-Type", "")
                 file_info = None
                 if "multipart/form-data" in ctype:
@@ -1376,18 +1262,17 @@ class _RequestHandler(BaseHTTPRequestHandler):
             if path.startswith("/plugin-views/"):
                 if not self._check_auth(query):
                     return self._unauthorized()
-                # 先百分号解码：文件名含空格/中文时不解码将匹配不到磁盘文件
+                # 文件名可含空格/中文，先百分号解码
                 rel = urllib.parse.unquote(path[len("/plugin-views/"):])
                 base = (Path(self.plugin.data_folder) / "plugins").resolve()
                 target = (base / rel).resolve()
-                # 防目录穿越：用 relative_to 做路径组件匹配（startswith 不安全）
+                # 防目录穿越：relative_to 组件匹配（startswith 不安全）
                 try:
                     target.relative_to(base)
                 except ValueError:
                     return self._send_json({"code": 403, "msg": _t("webui.msg.forbidden_path")}, 403)
                 return self._send_file(target)
 
-            # 静态资源路径同样先做百分号解码（自定义页面文件名可含空格/中文）
             rel = urllib.parse.unquote(path.lstrip("/")) or "index.html"
             static_base = STATIC_DIR.resolve()
             target = (STATIC_DIR / rel).resolve()
@@ -1404,7 +1289,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         except ConnectionResetError:
             pass
         except Exception as e:
-            # 记录完整 traceback 到日志；响应只返回通用错误，不泄漏内部路径/模块名。
+            # 响应只返回通用错误，不泄漏内部路径/模块名
             try:
                 import traceback as _tb
                 self.webui.logger.error(
@@ -1420,11 +1305,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._drain_leftover_body()
 
     def _drain_leftover_body(self) -> None:
-        """兜底消费未被路由读取的请求体（M3 请求走私防护）。
-
-        keep-alive 下残留 body 会被当作下一请求行解析导致 400 并断连；
-        声明长度超出消费上限时直接关闭连接兜底。
-        """
+        """兜底消费未读取的请求体（请求走私防护）；声明长度超上限直接断连。"""
         if getattr(self, "_body_consumed", True):
             return
         try:
@@ -1439,12 +1320,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self._drain_request_body()
 
     def _acquire_main_op(self, done: threading.Event) -> tuple[Callable[[], None], Callable[[], None]] | tuple[None, None]:
-        """主线程长操作互斥入口。返回 (finish, defer_release)；acquire 失败返回 (None, None)。
-
-        - finish()：调用方完成全部后续处理（如依赖卸载）后调用，幂等释放互斥锁
-        - defer_release()：等待超时放弃响应时调用——起守护线程等任务完成后兜底释放，
-          防止超时返回后后台任务仍在执行时又叠加新的主线程操作
-        """
+        """主线程长操作互斥入口，返回 (finish, defer_release)；超时由 defer 起守护线程兜底释放。"""
         if not self.webui._main_op_lock.acquire(blocking=False):
             return None, None
         released = threading.Event()
@@ -1468,7 +1344,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
     def _route_public_api(self, method: str, path: str, query: dict[str, str]) -> None:
         """公共 API（无需鉴权）：i18n 语言包与背景图配置，供登录页加载。"""
         if method == "GET" and path == "/api/health":
-            # 无需鉴权的存活探测：前端热重载期间轮询，面板恢复后自动刷新
             return self._send_json({"code": 200, "data": {
                 "ok": True,
                 "version": str(getattr(self.plugin, "VERSION", "")),
@@ -1514,12 +1389,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         return self._send_json({"code": 404, "msg": _t("webui.msg.api_not_found")}, 404)
 
     def _compute_uninstall_deps(self, plugin: "LumenBridgePlugin", name: str) -> tuple[list[str], list[str]]:
-        """计算卸载子插件时可顺带移除的 pip 依赖。
-
-        返回 (可移除, 需保留)：
-        - 可移除：已安装、且不被其它已装子插件声明同名的依赖；
-        - 需保留：仍被其它子插件使用（或未安装，无需卸载的直接忽略）。
-        """
+        """计算卸载子插件时可连带移除的 pip 依赖，返回 (可移除, 需保留)。"""
         mgr = plugin.subplugin_manager
         with mgr._lock:
             sp = mgr.subplugins.get(name)
@@ -1554,16 +1424,11 @@ class _RequestHandler(BaseHTTPRequestHandler):
         return removable, kept
 
     def _run_zip_install(self, tmp_zip: str) -> tuple[tuple[dict[str, Any], int] | None, tuple[bool, str, str]]:
-        """主线程执行子插件 ZIP 安装：统一互斥、超时与临时文件清理。
-
-        返回 (错误响应, (ok, msg, name))：错误响应非 None 时表示流程
-        已失败（互斥冲突 / 调度异常 / 超时），调用方直接发送给客户端。
-        """
+        """主线程执行 ZIP 安装：统一互斥、超时与临时文件清理。"""
         plugin = self.plugin
         result: list[Any] = [False, _t("webui.msg.install_timeout"), ""]
         done = threading.Event()
-        # 安装与 reload/uninstall 同为主线程长操作：必须经 _main_op_lock
-        # 串行化，否则并发读写 subplugins 字典与插件目录会产生半安装状态
+        # 主线程长操作串行化：并发读写 subplugins 会产生半安装状态
         finish, defer = self._acquire_main_op(done)
         if finish is None:
             return ({"code": 409, "msg": "另一主线程操作正在执行，请稍后再试"}, 409), tuple(result)
@@ -1588,11 +1453,11 @@ class _RequestHandler(BaseHTTPRequestHandler):
             try:
                 plugin.run_on_main(do_install)
             except Exception as e:  # noqa: BLE001
-                # 调度失败时 do_install 不会执行，须在此清理临时文件
+                # 调度失败时 do_install 未执行，须清理临时文件
                 _cleanup()
                 return ({"code": 500, "msg": _t("webui.msg.install_exception", error=e)}, 500), tuple(result)
             if not done.wait(timeout=30):
-                # 超时路径锁交由 defer 守护线程兜底释放，不能被 finally 的 finish() 覆盖
+                # 超时路径锁由 defer 守护线程兜底释放
                 defer()
                 deferred = True
                 return ({"code": 400, "msg": _t("webui.msg.install_timeout")}, 400), tuple(result)
@@ -1615,10 +1480,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
     def _route_api(self, method: str, path: str, query: dict[str, str]) -> None:
         if method == "POST" and path == "/api/auth/login":
             body = self._read_body() or {}
-            # JSON 合法但非对象（如数组/字符串）时 body.get 会抛 AttributeError
             if not isinstance(body, dict):
                 return self._send_json({"code": 400, "msg": _t("webui.msg.invalid_body")}, 400)
-            # 限速 + 恒定时间密码比较
             ip = str(self.client_address[0]) if self.client_address else ""
             ok, gmsg = self.webui._login_check_allowed(ip)
             if not ok:
@@ -1627,7 +1490,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
             if auth_util.verify_password(input_pw, self.webui.password):
                 self.webui._login_record_result(ip, True)
                 token = self.webui.auth_provider.issue_token()
-                # 旧明文密码登录成功后自动迁移为哈希；随机生成（未落盘）的不迁移
                 if (self.webui._password_from_config
                         and not auth_util.is_hashed_password(self.webui.password)):
                     self.webui._upgrade_password_storage(input_pw)
@@ -1642,7 +1504,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         cm = plugin.config_manager
 
         if method == "GET" and path == "/api/overview":
-            adapter = plugin.adapter  # AdapterHub 门面
+            adapter = plugin.adapter
             primary = adapter.primary() if hasattr(adapter, "primary") else adapter
             # 在线玩家必须从游戏主线程读取，否则非主线程访问 BDS 数据会导致崩溃。
             players_box: list[list[str]] = [[]]
@@ -1660,7 +1522,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 plugin.run_on_main(fetch_players)
             except Exception:
                 players_box[0] = []
-                # 调度失败时任务不会执行，必须手动置位，否则必然等满 2 秒
+                # 调度失败任务不会执行，手动置位免等满超时
                 done.set()
             done.wait(timeout=2.0)
             players = players_box[0]
@@ -1671,7 +1533,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
             if getattr(plugin, "regex_module", None):
                 rules_count = len(getattr(plugin.regex_module, "rules", []))
             sub_mgr = getattr(plugin, "subplugin_manager", None)
-            # 多账号机器人资料：每个启用的适配器一条；bot_profile 为首个（兼容）
             profiles: list[dict[str, Any]] = []
             if hasattr(plugin, "bot_profiles_snapshot"):
                 profiles = plugin.bot_profiles_snapshot()
@@ -1684,8 +1545,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             # QQ 官方适配器未知属性返回桩函数，ws_type 须校验为 int 才可 JSON 序列化
             raw_mode = getattr(primary, "ws_type", None) if primary else None
             mode_value = raw_mode if isinstance(raw_mode, int) and not isinstance(raw_mode, bool) else -1
-            # 主群展示用全部适配器群标识并集（含官方域 group_openid 字符串）；
-            # cm.main_groups 仅统计 WebSocket 数字群号，官方机器人会永远显示"未设置"
+            # 用并集：cm.main_groups 仅统计数字群号，官方域会漏
             connections = getattr(plugin, "connections", None)
             group_keys: list[Any] = connections.all_group_keys() if connections is not None else []
             return self._send_json({"code": 200, "data": {
@@ -1719,15 +1579,14 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
         if path == "/api/config":
             if method == "GET":
-                # 外部手改 config.json 热重载：指纹变化才重读磁盘，
-                # 使 WebUI 无需手动刷新浏览器即可看到最新配置（后端同时热生效语言/监听地址）
+                # 外部手改 config.json 热重载（指纹检测）
                 try:
                     if cm is not None and cm.file_changed_on_disk():
                         cm.load()
                         self.webui._schedule_config_hot_apply(plugin)
                 except Exception:
                     pass
-                # 序列化前先取快照，避免与保存线程并发修改导致迭代异常
+                # 先取快照，避免与保存线程并发修改
                 snapshot = cm.snapshot() if hasattr(cm, "snapshot") else copy.deepcopy(cm.data)
                 data = json.loads(json.dumps(snapshot))
 
@@ -1735,7 +1594,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     if isinstance(obj, dict):
                         for k, v in obj.items():
                             if k in SENSITIVE_KEYS and v:
-                                # 低危：固定 6 个 * 掩码，不再按值长度回显（防长度侧信道）
+                                # 固定 6 个 *，防长度侧信道
                                 obj[k] = "******"
                             else:
                                 mask(v)
@@ -1763,7 +1622,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
                 unmask(body, cm.data)
 
-                # 新密码（非掩码回传）落盘前转为哈希，配置不存明文
                 body_webui = body.get("webui")
                 if isinstance(body_webui, dict) and isinstance(body_webui.get("password"), str):
                     typed_pw = body_webui["password"].strip()
@@ -1771,7 +1629,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
                             and not auth_util.is_hashed_password(typed_pw)):
                         body_webui["password"] = auth_util.hash_password(typed_pw)
 
-                # 由 ConfigManager 统一校验并原子合并/保存，避免未知键/错误类型/危险范围值落盘后在 reload 时失败。
                 old_language = str(cm.data.get("language", "auto"))
                 try:
                     cm.apply_patch(body)
@@ -1780,8 +1637,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                         "code": 400,
                         "msg": _t("webui.msg.invalid_config") + f": {exc}",
                     }, 400)
-                # 语言变更热生效：_init_i18n 的自动检测会访问 Endstone server 对象，
-                # 须调度到主线程执行（与 /api/reload 同款安全路径）
+                # 自动检测须访问 server 对象，调度到主线程
                 new_language = str(body.get("language", old_language))
                 init_i18n = getattr(plugin, "_init_i18n", None)
                 if callable(init_i18n) and new_language != old_language:
@@ -1798,13 +1654,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     try:
                         plugin.run_on_main(_apply_language)
                     except Exception:
-                        # 调度失败任务不会执行，手动置位避免等满超时
                         done.set()
                     done.wait(timeout=2.0)
-                # 修改 WebUI 密码/密钥后立即生效并使旧 token 全部失效（token 版本 +1）
                 try:
                     new_webui_conf = cm.data.get("webui", {}) or {}
-                    # 空白密码/密钥视同未设置，不生效（保持现值）
                     new_password = str(new_webui_conf.get("password") or "").strip()
                     new_secret = str(new_webui_conf.get("secret") or "").strip()
                     if new_password and new_password != self.webui.password and set(new_password) != {"*"}:
@@ -1822,7 +1675,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     "msg": _t("webui.msg.config_saved"),
                 })
 
-        # ------------------------------------------------ 连接配置
         if path == "/api/connections":
             connections = getattr(plugin, "connections", None)
             if connections is None:
@@ -1891,7 +1743,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return self._send_json({"code": 500, "msg": str(exc)}, 500)
             return self._send_json({"code": 200, "msg": _t("connections.reloaded")})
 
-        # 密钥二次查看：返回指定适配器指定密钥字段的明文（需已登录 WebUI）
         if method == "POST" and path == "/api/connections/reveal":
             connections = getattr(plugin, "connections", None)
             if connections is None:
@@ -1904,7 +1755,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             adapter = connections.get(adapter_id)
             if adapter is None:
                 return self._send_json({"code": 404, "msg": _t("connections.not_found", id=adapter_id)}, 404)
-            # 敏感值明文查看属高危操作，返回前记录审计日志（操作 / 来源 IP / 目标适配器）
+            # 高危操作，返回前记审计日志
             reveal_ip = str(self.client_address[0]) if self.client_address else "unknown"
             reveal_at = int(time.time())
             self.webui.logger.warning(
@@ -1912,7 +1763,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
             )
             return self._send_json({"code": 200, "data": {"value": str(adapter.get(key, "") or ""), "reveal_at": reveal_at}})
 
-        # 群绑定密钥：一次性明文返回，5 分钟过期，新签发即销毁旧密钥
         if method == "POST" and path == "/api/connections/bindkey":
             connections = getattr(plugin, "connections", None)
             group_bind = getattr(plugin, "group_bind_module", None)
@@ -1925,15 +1775,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return self._send_json({"code": 404, "msg": _t("connections.not_found", id=adapter_id)}, 404)
             return self._send_json({"code": 200, "data": info})
 
-        # ---------------- QQ 官方机器人扫码登录（q.qq.com lite 绑定接口）
         if method == "POST" and path == "/api/qqofficial/qr/create":
-            # 低危：扫码创建接口限频（每 IP 30 秒 1 次），防止滥用拉起大量绑定任务
             qr_ip = str(self.client_address[0]) if self.client_address else "unknown"
             with self.webui._qr_create_lock:
                 qr_now = time.time()
                 if qr_now - self.webui._qr_create_last.get(qr_ip, 0.0) < 30:
                     return self._send_json({"code": 429, "msg": "请求过于频繁，请 30 秒后再试"}, 429)
-                # 顺带清理过期项，防止字典无限增长
                 if len(self.webui._qr_create_last) > 1024:
                     self.webui._qr_create_last = {
                         k: v for k, v in self.webui._qr_create_last.items() if qr_now - v < 30
@@ -1946,7 +1793,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 return self._send_json({"code": 502, "msg": _t("connections.qr_create_failed", error=exc)}, 502)
             with self.webui._qr_bind_lock:
-                # 清理 10 分钟前的过期任务，避免表无限增长
                 now = time.time()
                 for stale in [
                     tid for tid, info in self.webui._qr_bind_tasks.items()
@@ -1983,7 +1829,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 if connections is None:
                     return self._send_json({"code": 500, "msg": _t("connections.unavailable")}, 500)
                 try:
-                    # 扫码成功即视为要登录：强制启用并立即 reload 建连，免用户手动保存
+                    # 扫码成功即强制启用并 reload 建连
                     connections.update(adapter_id, {
                         "app_id": str(result.get("appid") or ""),
                         "app_secret": str(result.get("secret") or ""),
@@ -1997,7 +1843,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     pass
                 with self.webui._qr_bind_lock:
                     self.webui._qr_bind_tasks.pop(task_id, None)
-                # AppSecret 不回传前端，仅回执 AppID 与密钥长度（供前端渲染等长掩码）
+                # Secret 不回传前端，仅回执长度
                 return self._send_json({"code": 200, "data": {
                     "status": "created",
                     "appid": result.get("appid"),
@@ -2008,7 +1854,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         if path == "/api/rules":
             regex = plugin.regex_module
             if method == "GET":
-                # 序列化前先取快照，避免与规则保存线程的并发替换竞态
+                # 先取快照，避免与规则保存线程竞态
                 if regex:
                     rules_snapshot = (
                         regex.snapshot_rules() if hasattr(regex, "snapshot_rules")
@@ -2026,7 +1872,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return self._send_json({"code": 200, "msg": _t("webui.msg.rules_saved")})
 
         if method == "POST" and path == "/api/rules/image":
-            # 规则图片上传存到 rules_images/（image() 本地白名单内，可直接按路径发送）
+            # 图片存 rules_images/（image() 白名单内）
             file_info = self._read_multipart_file()
             if not file_info:
                 return self._send_json({"code": 400, "msg": _t("webui.msg.rules_image_invalid")}, 400)
@@ -2055,23 +1901,18 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return self._send_json({"code": 200, "data": data})
 
         if method == "GET" and path == "/api/whitelist/domains":
-            # 白名单域状态：按适配器启用/连接情况给出默认展示域
             statuses = plugin.hub.status() if getattr(plugin, "hub", None) else []
             enabled_qq = any(s.get("type") != "qqofficial" and s.get("enabled") for s in statuses)
             enabled_official = any(s.get("type") == "qqofficial" and s.get("enabled") for s in statuses)
             connected_qq = any(s.get("type") != "qqofficial" and s.get("connected") for s in statuses)
             connected_official = any(s.get("type") == "qqofficial" and s.get("connected") for s in statuses)
             if not enabled_official:
-                # 仅个人号（或无官方适配器）：QQ 号域
                 default = "qq"
             elif not enabled_qq:
-                # 仅官方 bot：openid 域
                 default = "official"
             elif connected_qq:
-                # 双开：个人号已连接（含双连接）默认 QQ 号域
                 default = "qq"
             elif connected_official:
-                # 双开但仅官方连接成功：openid 域
                 default = "official"
             else:
                 default = "qq"
@@ -2137,7 +1978,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return self._send_json({"code": 400, "msg": str(exc)}, 400)
 
         if method == "GET" and path == "/api/market/cover":
-            # 封面代理：<img> 带不了 Authorization 头（token 走 query）；直连市场站点会因混合内容/防盗链失败
+            # 封面代理：<img> 带不了鉴权头，直连有混合内容/防盗链问题
             client = getattr(plugin, "marketplace", None)
             if client is None or not client.enabled:
                 return self._send_json({"code": 403, "msg": "插件市场未配置或未启用"}, 403)
@@ -2145,7 +1986,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 ctype, raw = client.fetch_cover(query.get("url", ""))
             except Exception as exc:  # noqa: BLE001
                 return self._send_json({"code": 400, "msg": str(exc)}, 400)
-            # SVG 可内嵌脚本构成 XSS，代理层强制拒绝（与 fetch_cover 白名单互补）
+            # SVG 可内嵌脚本构成 XSS，强制拒绝
             if "svg" in ctype.lower():
                 return self._send_json({"code": 403, "msg": "不允许的封面图片类型"}, 403)
             if self._safe_send_headers(200, [
@@ -2270,7 +2111,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return self._send_json({"code": 429, "msg": "任务数过多，请稍后再试"}, 429)
             return self._send_json({"code": 200, "data": {"task_id": task_id}})
 
-        # 插件级强制依赖（requires）补装：子插件依赖从市场自动安装（像 pip 依赖那样）
         m = re.fullmatch(r"/api/subplugins/([A-Za-z0-9_\-]+)/install-requirements", path)
         if m and method == "POST":
             client = getattr(plugin, "marketplace", None)
@@ -2296,7 +2136,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
         m = re.fullmatch(r"/api/market/task/([\w-]+)", path)
         if m and method == "GET":
-            # 锁内深拷贝任务快照：result 内的嵌套结构可能与后台线程共享引用
+            # 锁内深拷贝：result 嵌套结构可能与后台线程共享引用
             import copy as _copy
             with self.webui._market_tasks_lock:
                 task = self.webui._market_tasks.get(m.group(1))
@@ -2333,8 +2173,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             def _run_apply(log, progress):
                 log(_t("task_log.applying_framework"))
                 progress(20, _t("task_log.downloading"))
-                # apply_framework_update 只下载校验并暂存 wheel，绝不重载：
-                # 后台线程内 Server.reload() 会崩服；热重载由控制台命令触发
+                # 只暂存 wheel 绝不重载：后台线程 Server.reload() 会崩服
                 result = client.apply_framework_update(log=log, progress=progress)
                 log(_t("task_log.framework_staged_hint"))
                 progress(100, _t("task_log.done"))
@@ -2351,7 +2190,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return self._send_json({"code": 403, "msg": "框架更新功能已关闭"}, 403)
             if client is None:
                 return self._send_json({"code": 500, "msg": "更新客户端不可用"}, 500)
-            # 同步校验暂存回执（失败立即返回）；热重载放后台任务执行
             try:
                 staged = client.staged_framework_update()
             except Exception:  # noqa: BLE001
@@ -2362,8 +2200,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             def _run_reload(log, progress):
                 log(_t("task_log.framework_reloading", version=str(staged.get("to_version") or "?")))
                 progress(10, _t("task_log.waiting_tasks"))
-                # "幽灵所有者"两阶段安全触发 server.reload()；期间 WebUI 实例
-                # 会被重建，任务结果多半无人消费，前端等 /api/health 恢复后自刷
+                # 两阶段触发 reload；期间 WebUI 实例重建，前端轮询 /api/health 自刷
                 result = client.safe_framework_reload(log=log)
                 progress(100, _t("task_log.done"))
                 return result
@@ -2382,7 +2219,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return self._send_json({"code": 500, "msg": "更新客户端不可用"}, 500)
             try:
                 data = client.framework_update_info()
-                # 附带暂存回执：前端据此显示"执行 /lumen update"提示而非下载按钮
                 try:
                     staged = client.staged_framework_update()
                 except Exception:  # noqa: BLE001
@@ -2398,7 +2234,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             market_updates = market_client.cached_updates() if market_client else {}
             data = []
             if mgr:
-                # 字段提取全部在锁内转为纯 dict，避免锁外被并发 reload/install 改写
+                # 锁内转纯 dict，避免锁外被并发改写
                 with mgr._lock:
                     for name, sp in mgr.subplugins.items():
                         manifest = sp.manifest if isinstance(sp.manifest, dict) else {}
@@ -2461,7 +2297,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             try:
                 plugin.run_on_main(do_reload)
             except Exception as e:  # noqa: BLE001
-                # 调度失败时任务未入队，须立即释放互斥锁，否则主线程操作接口永久 409
+                # 调度失败任务未入队，立即释放锁，否则接口永久 409
                 finish()
                 return self._send_json({"code": 500, "msg": _t("webui.msg.reload_failed", error=e)}, 500)
             done.wait(timeout=10)
@@ -2498,7 +2334,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
             try:
                 plugin.run_on_main(do_reload_one)
             except Exception as e:  # noqa: BLE001
-                # 调度失败：任务未入队，立即释放互斥锁（同上，防永久 409）
                 finish()
                 return self._send_json({"code": 500, "msg": _t("webui.msg.reload_failed", error=e)}, 500)
             done.wait(timeout=15)
@@ -2525,10 +2360,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 try:
                     plugin.config_manager.load()
                     plugin._init_i18n()
-                    # 失效 pip manager 缓存使新配置生效；加锁避免与 _get_pip_manager 双检锁竞态。
+                    # 失效 pip manager 缓存；加锁避免双检锁竞态
                     with plugin._pip_manager_lock:
                         plugin._pip_manager = None
-                    # 连接参数只在适配器重建后生效。
                     plugin.reload_onebot_connection()
                     if plugin.regex_module:
                         plugin.regex_module.reload_rules()
@@ -2542,7 +2376,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
             try:
                 plugin.run_on_main(do_framework_reload)
             except Exception as e:  # noqa: BLE001
-                # 调度失败：任务未入队，立即释放互斥锁（同上，防永久 409）
                 finish()
                 return self._send_json({"code": 500, "msg": _t("webui.msg.reload_failed", error=e)}, 500)
             done.wait(timeout=20)
@@ -2563,7 +2396,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             packages = body.get("packages", [])
             if not packages or not isinstance(packages, list):
                 return self._send_json({"code": 400, "msg": _t("pip.no_packages_specified")}, 400)
-            # 校验包参数防 pip 选项/URL/路径注入：字符串、不以 - 开头、无 git+/://、路径分隔符与空白
+            # 防 pip 选项/URL/路径注入
             def _valid_pkg(p: Any) -> bool:
                 if not isinstance(p, str) or not p or not p.strip():
                     return False
@@ -2591,7 +2424,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
             mgr = plugin.subplugin_manager
             if not mgr:
                 return self._send_json({"code": 500, "msg": _t("webui.msg.subplugin_manager_unavailable")}, 500)
-            # 在锁内拷贝 deps，避免锁外访问 sp.manifest
             with mgr._lock:
                 sp = mgr.subplugins.get(name)
                 deps = list(sp.manifest.get("dependencies", []) or []) if sp else []
@@ -2626,7 +2458,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return self._send_json({"code": 500, "msg": _t("pip.manager_unavailable")}, 500)
             if not mgr.enable:
                 return self._send_json({"code": 403, "msg": _t("pip.disabled")}, 403)
-            # 走异步任务：避免请求线程同步等待串行锁 + pip 子进程而长时间挂起
             task_id = self.webui._start_pip_task(mgr, [package], "uninstall")
             if task_id is None:
                 return self._send_json({"code": 429, "msg": "任务数过多，请稍后再试"}, 429)
@@ -2638,7 +2469,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return self._send_json({"code": 500, "msg": _t("pip.manager_unavailable")}, 500)
             if not mgr.enable:
                 return self._send_json({"code": 403, "msg": _t("pip.disabled")}, 403)
-            # pip list 为同步子进程（1-3s）：10s 缓存防并发刷新刷出多个进程
+            # 10s 缓存防并发 pip 子进程
             now = time.time()
             with self.webui._pip_list_lock:
                 cached = self.webui._pip_list_cache
@@ -2647,7 +2478,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 else:
                     pkgs = mgr.list_packages()
                     self.webui._pip_list_cache = (now, pkgs)
-            # 标记受保护包（不修改原对象，构造新 dict）
             from ..pip_manager import PROTECTED_PACKAGES, _normalize
             protected_norm = {_normalize(p) for p in PROTECTED_PACKAGES}
             result = []
@@ -2668,7 +2498,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/pip/task/([\w-]+)", path)
         if m and method == "GET":
             task_id = m.group(1)
-            # 在锁内拷贝字段，避免 on_log 并发 append 导致序列化异常
+            # 锁内拷贝，避免 on_log 并发 append
             with self.webui._pip_tasks_lock:
                 task = self.webui._pip_tasks.get(task_id)
                 if not task:
@@ -2702,7 +2532,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 if method == "GET":
                     if not schema:
                         return self._send_json({"code": 404, "msg": _t("webui.msg.plugin_no_config")}, 404)
-                    # 深拷贝 schema 避免外部修改影响内部对象
                     schema_snapshot = json.loads(json.dumps(schema))
                 else:
                     schema_snapshot = schema
@@ -2712,7 +2541,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 if not schema:
                     return self._send_json({"code": 404, "msg": _t("webui.msg.plugin_no_config")}, 404)
                 body = self._read_body() or {}
-                # 非 dict JSON 会让 body.items() 抛 AttributeError；与其他端点口径一致返回 400
                 if not isinstance(body, dict):
                     return self._send_json({"code": 400, "msg": _t("webui.msg.invalid_body")}, 400)
 
@@ -2736,27 +2564,25 @@ class _RequestHandler(BaseHTTPRequestHandler):
                                 o.get("value") if isinstance(o, dict) else o for o in options
                             }
                             if t == "multiselect":
-                                # 多选：必须是列表且每个值都在可选项内
                                 return isinstance(v, list) and all(x in allowed for x in v)
                             return v in allowed
                         return True
                     if t in ("array",):
                         return isinstance(v, list)
-                    # text / textarea 及未知类型按字符串处理
                     return isinstance(v, str)
 
-                # 加锁保护共享 schema，防止并发 POST 修改时迭代异常
+                # 加锁防并发 POST 迭代异常
                 applied: list[tuple[str, Any]] = []
                 with self.webui._ext_lock:
                     for item in list(schema["items"]):
                         if item.get("type") == "section":
-                            continue  # 分组标题不参与配置读写
+                            continue
                         if item["key"] in body:
                             value = body[item["key"]]
                             if _type_ok(item, value):
                                 item["val"] = value
                                 applied.append((item["key"], value))
-                # 只广播真正写入的键值：校验失败的值未落盘，广播会下发非法值
+                # 只广播真正写入的键值
                 for key, value in applied:
                     plugin.bus.emit(f"config.update.{name}", key, value)
                 return self._send_json({"code": 200, "msg": _t("webui.msg.plugin_config_saved")})
@@ -2780,7 +2606,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             error, (ok, msg, name) = self._run_zip_install(tmp_zip)
             if error is not None:
                 return self._send_json(*error)
-            # ZIP 落盘与可运行是两个状态：加载失败也要刷新列表展示可诊断错误
+            # ZIP 落盘与可运行是两个状态：加载失败也要展示可诊断错误
             return self._send_install_result(ok, msg, name)
 
         if method == "POST" and path == "/api/subplugins/install/url":
@@ -2793,8 +2619,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             parsed = urllib.parse.urlparse(url)
             if not parsed.hostname:
                 return self._send_json({"code": 400, "msg": _t("webui.msg.invalid_hostname")}, 400)
-            # 完整性锚点（可选）：带 sha256 则下载后强校验；配置 install_url_allow_hosts
-            # 白名单则强制主机校验；皆未提供时放行并记 warning 留痕
+            # 可选完整性锚点：sha256 强校验 / 主机白名单；皆无则放行并记 warning
             sha256 = str(body.get("sha256", "") or "").strip().lower()
             if sha256 and not re.fullmatch(r"[a-f0-9]{64}", sha256):
                 return self._send_json({"code": 400, "msg": "sha256 字段必须是 64 位十六进制字符串"}, 400)
@@ -2815,17 +2640,14 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     "msg": "该主机不在 webui.install_url_allow_hosts 白名单内；请在配置中调整白名单或移除该限制",
                 }, 403)
             if not sha256:
-                # 无哈希安装留痕，便于事后审计
                 self.webui.logger.warning(
                     f"[WebUI] 子插件 URL 直装（无 sha256 校验）url={url} ip={client_ip}"
                 )
             import tempfile
 
             try:
-                # SSRF 防护：禁止跨主机重定向 + 大小上限（见 _fetch_url_bytes）
                 data = _fetch_url_bytes(url, _MAX_UPLOAD_BYTES, timeout=30)
             except Exception as e:  # noqa: BLE001
-                # 对外统一“下载失败”，不回显 Connection refused / 404 等细节
                 self.webui.logger.warning(
                     f"[WebUI] 子插件 URL 直装下载失败 url={url} ip={client_ip} error={e.__cause__ or e!r}"
                 )
@@ -2847,7 +2669,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
         m = re.fullmatch(r"/api/subplugins/([A-Za-z0-9_\-]+)/uninstall-preview", path)
         if m and method == "GET":
-            # 卸载预检：返回可连带卸载的依赖与反向依赖，供前端弹窗确认/警告
             try:
                 removable, kept = self._compute_uninstall_deps(plugin, m.group(1))
             except Exception as exc:  # noqa: BLE001
@@ -2870,10 +2691,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
             finish, defer = self._acquire_main_op(done3)
             if finish is None:
                 return self._send_json({"code": 409, "msg": "另一主线程操作正在执行，请稍后再试"}, 409)
-            # 超时路径锁交由 defer 守护线程兜底释放，不能被 finally 的 finish() 覆盖
             deferred = False
             try:
-                # with_deps=1 连带卸载闲置 pip 依赖（须卸载前算好，卸载后 manifest 不可得）
+                # with_deps=1 连带卸载闲置 pip 依赖（须卸载前算好）
                 with_deps = str(query.get("with_deps", "")).strip().lower() in ("1", "true", "yes")
                 removable: list[str] = []
                 if with_deps:
@@ -2894,13 +2714,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 try:
                     plugin.run_on_main(do_uninstall)
                 except Exception as e:  # noqa: BLE001
-                    # 调度失败：任务未入队，done3 永不置位，立即释放锁（防永久 409）
                     return self._send_json({"code": 500, "msg": _t("webui.msg.uninstall_exception", error=e)}, 500)
                 if not done3.wait(timeout=15):
                     defer()
                     deferred = True
                     return self._send_json({"code": 504, "msg": _t("webui.msg.uninstall_timeout")}, 504)
-                # pip 卸载走子进程可在 HTTP 线程执行；须持串行锁防并发写坏 site-packages
+                # 持串行锁防并发写坏 site-packages
                 if result3[0] and removable:
                     removed: list[str] = []
                     pip_mgr = self.webui._get_pip_manager_for_plugin(plugin)
@@ -2924,7 +2743,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 if not deferred:
                     finish()
 
-        # 注意：插件名仅允许字母数字下划线连字符（禁止 . 防路径穿越，如 "..")
+        # 插件名禁止 . 防路径穿越
         m = re.fullmatch(r"/api/subplugins/([A-Za-z0-9_\-]+)/files", path)
         if m and method == "GET":
             mgr = plugin.subplugin_manager
@@ -2932,7 +2751,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return self._send_json({"code": 500, "msg": _t("webui.msg.subplugin_manager_unavailable")}, 500)
             plugins_base = mgr.plugins_dir.resolve()
             folder = (mgr.plugins_dir / m.group(1)).resolve()
-            # 二次校验：folder 必须仍在 plugins_dir 之下（防符号链接绕过）
+            # 防符号链接绕过
             try:
                 folder.relative_to(plugins_base)
             except ValueError:
@@ -2941,7 +2760,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return self._send_json({"code": 404, "msg": _t("webui.msg.subplugin_not_found")}, 404)
             files = []
             for p in sorted(folder.rglob("*")):
-                # 不跟随符号链接，避免目录外文件名泄漏
+                # 不跟随符号链接，防目录外文件泄漏
                 if p.is_symlink():
                     continue
                 if p.is_file() and "__pycache__" not in p.parts:
@@ -2969,7 +2788,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             except ValueError:
                 return self._send_json({"code": 403, "msg": _t("webui.msg.forbidden_path")}, 403)
             rel = query.get("path", "")
-            # 防路径穿越：用 relative_to 而非字符串前缀匹配
+            # 防路径穿越：relative_to 而非前缀匹配
             if not rel:
                 return self._send_json({"code": 403, "msg": _t("webui.msg.forbidden_path")}, 403)
             try:
@@ -2990,7 +2809,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     stat = target.stat()
                 except OSError as e:
                     return self._send_json({"code": 400, "msg": _t("webui.msg.read_failed", error=e)}, 400)
-                # 文件大小限制：禁止读取超过 1MB 的文本文件
                 if stat.st_size > 1024 * 1024:
                     return self._send_json({"code": 400, "msg": _t("webui.msg.file_too_large_edit")}, 400)
                 try:
@@ -3003,7 +2821,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 content = body.get("content")
                 if not isinstance(content, str):
                     return self._send_json({"code": 400, "msg": _t("webui.msg.missing_content")}, 400)
-                # 写入大小限制：禁止写入超过 1MB 的文本
                 if len(content) > 1024 * 1024:
                     return self._send_json({"code": 400, "msg": _t("webui.msg.file_too_large_edit")}, 400)
                 if target.suffix.lower() not in EDITABLE_SUFFIXES:
@@ -3022,7 +2839,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 pages_snapshot = list(self.webui.custom_pages)
             return self._send_json({"code": 200, "data": pages_snapshot})
 
-        # ── 聊天屏蔽：配置/词条读写 + 词库导入 ──
         chat_filter = getattr(plugin, "chat_filter", None)
         if method == "GET" and path == "/api/chat_filter":
             if chat_filter is None:
@@ -3055,7 +2871,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 "data": chat_filter.snapshot(),
             })
         if method == "POST" and path == "/api/chat_filter/import_text":
-            # 一键导入第三方词库文本：兼容“每行一个”与“中英文逗号分隔”两种格式
+            # 兼容“每行一个”与“逗号分隔”两种格式
             if chat_filter is None:
                 return self._send_json({"code": 500, "msg": _t("webui.msg.module_unavailable")}, 500)
             payload = self._read_body()
@@ -3082,22 +2898,17 @@ class _RequestHandler(BaseHTTPRequestHandler):
         return self._send_json({"code": 404, "msg": _t("webui.msg.api_not_found")}, 404)
 
     def _sse_logs(self) -> None:
-        """SSE 实时日志流（线程安全 + 异常隔离 + 连接泄漏防护）
-
-        SSE 线程不得调用 Endstone 底层 logger/Server API（replxx 跨线程访问会崩溃）；
-        写已关闭 socket 的 SIGPIPE 会杀 BDS 进程，故先屏蔽本线程 SIGPIPE；
-        socket 超时 30s + 最大连接 10min 防连接泄漏与线程堆积。
-        """
+        """SSE 实时日志流：本线程屏蔽 SIGPIPE 防 kill BDS；socket 超时 30s + 最大连接 10min。"""
         import queue
         import signal as _signal
 
-        # 仅屏蔽本线程的 SIGPIPE（Linux/macOS 有效；Windows 无此信号）
+        # 仅屏蔽本线程 SIGPIPE（Windows 无此信号）
         try:
             _signal.pthread_sigmask(_signal.SIG_BLOCK, {_signal.SIGPIPE})
         except (ValueError, AttributeError, OSError):
             pass
 
-        # 设置 socket 超时，防止 send() 在客户端接收窗口满时无限阻塞
+        # 防 send() 在接收窗口满时无限阻塞
         try:
             self.connection.settimeout(30.0)
         except (AttributeError, OSError):
@@ -3105,21 +2916,19 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
         q: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=200)
         stopped = self.webui._stop_event
-        # 最大连接时长 10 分钟，防止客户端无限挂起
         deadline = time.monotonic() + 600.0
 
         def on_log(entry: dict[str, Any]) -> None:
             try:
                 q.put_nowait(entry)
             except queue.Full:
-                # 慢客户端只丢弃最旧一条，避免日志线程阻塞或无限占用内存。
+                # 慢客户端丢最旧一条，防阻塞或内存膨胀
                 try:
                     q.get_nowait()
                     q.put_nowait(entry)
                 except (queue.Empty, queue.Full):
                     pass
 
-        # 订阅前先取一个稳定的服务器句柄，避免后续主线程关闭时引发悬空访问。
         if not self.webui.log_buffer.subscribe(on_log):
             return self._send_json(
                 {"code": 503, "msg": _t("webui.msg.sse_limit_reached")},
@@ -3152,7 +2961,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return
 
             while not stopped.is_set():
-                # 连接时长超限：主动关闭，释放线程资源
                 if time.monotonic() >= deadline:
                     return
                 try:
@@ -3161,16 +2969,15 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 except queue.Empty:
                     payload = ": keepalive\n\n"
                 if not self._safe_write(payload.encode("utf-8")):
-                    return  # 客户端断开，退出 SSE 循环
+                    return
                 try:
                     self.wfile.flush()
                 except self._NETWORK_ERRORS:
                     return
         except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
-            # 客户端关闭连接 / 主线程关闭服务 / wfile 已关闭，均吞掉
             pass
         except Exception:
-            # 兜底：任何意外异常都不得把 SSE 线程的异常传播到主线程
+            # 任何意外异常不得传播到主线程
             pass
         finally:
             try:

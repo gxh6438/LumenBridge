@@ -90,7 +90,6 @@ class ChatAbsorptionProbe:
                 return self._recent.pop(i)[1]
         return None
 
-    # ---------------------------------------------------------------- 兼容层
     # 旧版 open/close 接口保留为空操作，避免外部调用报错
     def open(self) -> None:  # noqa: D102 - 兼容空操作
         return None

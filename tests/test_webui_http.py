@@ -173,7 +173,6 @@ class WebUiHttpTests(unittest.TestCase):
         status, _headers, response = self.request("POST", "/api/config", full_config, token)
         self.assertEqual(status, 200, response)
         self.assertEqual(response["code"], 200)
-        # 掩码 ****** 回传时应被还原为真实密钥，而非把掩码写入配置
         self.assertEqual(self.plugin.config_manager.data["webui"]["secret"], "super-secret")
         # 掩码还原的是已迁移的哈希串，而非明文
         self.assertEqual(self.plugin.config_manager.data["webui"]["password"], stored_pw)

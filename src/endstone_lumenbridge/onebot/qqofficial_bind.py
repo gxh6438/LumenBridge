@@ -26,7 +26,6 @@ STATUS_COMPLETED = 2
 STATUS_EXPIRED = 3
 
 
-# ---------------------------------------------------------------- AES-256（仅加密方向）
 def _build_sbox() -> list[int]:
     """生成 AES S 盒（GF(2^8) 逆元 + 仿射变换，标准生成算法）。"""
     sbox = [0] * 256
@@ -174,7 +173,6 @@ def aes256_gcm_decrypt(key: bytes, nonce: bytes, ciphertext: bytes, tag: bytes) 
     return bytes(plain)
 
 
-# ---------------------------------------------------------------- 绑定接口
 def generate_bind_key() -> str:
     """生成 base64 编码的 AES-256 绑定密钥。"""
     return base64.b64encode(secrets.token_bytes(32)).decode("ascii")

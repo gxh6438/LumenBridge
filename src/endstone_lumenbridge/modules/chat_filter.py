@@ -91,7 +91,6 @@ class ChatFilterModule:
         self._load()
         self._recompile()
 
-    # ------------------------------------------------------------------ 加载
     def _load(self) -> None:
         """读取 words.json（不存在则落盘默认结构）。"""
         try:
@@ -143,7 +142,6 @@ class ChatFilterModule:
         )
         temp.replace(self._words_path)
 
-    # ------------------------------------------------------------------ 编译
     def _recompile(self) -> None:
         """把词条编译为合并正则元组；异常词条跳过并记日志。"""
         plains: list[str] = []
@@ -179,7 +177,6 @@ class ChatFilterModule:
         # 原子引用置换：读侧永不持锁
         self._compiled = (tuple(merged), tuple(regexes), exempt)
 
-    # ------------------------------------------------------------------ 过滤
     def check(
         self, text: str, *, direction: str, player: str = "", qq: str = ""
     ) -> tuple[str, bool]:
@@ -249,7 +246,6 @@ class ChatFilterModule:
         out.append(text[pos:])
         return "".join(out), True
 
-    # ------------------------------------------------------------------ 词库
     def list_wordbanks(self) -> list[dict[str, Any]]:
         """发现 wordbanks/ 下的 *.txt 词库（名称、词条数、已导入状态）。"""
         banks: list[dict[str, Any]] = []
@@ -315,7 +311,6 @@ class ChatFilterModule:
                 self._recompile()
         return added
 
-    # ------------------------------------------------------------------ WebUI
     def snapshot(self) -> dict[str, Any]:
         """GET /api/chat_filter 的数据快照。"""
         with self._lock:

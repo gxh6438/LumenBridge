@@ -196,7 +196,6 @@ class PasswordCommandTests(unittest.TestCase):
         assert plugin.config_manager is not None
         return str(plugin.config_manager.data["webui"]["password"])
 
-    # ------------------------------------------------------------ 控制台硬门
 
     def test_non_console_sender_rejected(self):
         webui = _FakeWebUI()
@@ -236,7 +235,6 @@ class PasswordCommandTests(unittest.TestCase):
         self.assertEqual(len(console.messages), 1)
         self.assertIn("配置", console.messages[0])
 
-    # ------------------------------------------------------------ 设置密码
 
     def test_console_sets_password(self):
         webui = _FakeWebUI()
@@ -264,7 +262,6 @@ class PasswordCommandTests(unittest.TestCase):
             )
         self.assertEqual(webui.set_calls, ["pass word 42"])
 
-    # ------------------------------------------------------------ 清除密码
 
     def test_console_clears_password_and_prints_random_to_stdout(self):
         webui = _FakeWebUI()
@@ -284,7 +281,6 @@ class PasswordCommandTests(unittest.TestCase):
         self.assertIn("Rnd0mPassw0rd", captured.getvalue())
         self.assertNotIn("Rnd0mPassw0rd", console.messages[0])
 
-    # ------------------------------------------------------------ 无效输入
 
     def test_whitespace_only_password_rejected(self):
         webui = _FakeWebUI()
@@ -308,7 +304,6 @@ class PasswordCommandTests(unittest.TestCase):
         self.assertEqual(len(console.messages), 1)
         self.assertIn("失败", console.messages[0])
 
-    # ------------------------------------------------------------ WebUI 未启用
 
     def test_webui_disabled_stages_password_to_config(self):
         plugin = self._plugin(None)

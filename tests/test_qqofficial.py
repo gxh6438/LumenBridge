@@ -20,6 +20,7 @@ import sys
 import tempfile
 import threading
 import time
+import unittest
 from pathlib import Path
 from typing import Any
 
@@ -91,7 +92,6 @@ def run_async(coro: Any) -> Any:
     return asyncio.new_event_loop().run_until_complete(coro)
 
 
-# ---------------------------------------------------------------- 入站翻译
 def test_inbound_group_message() -> None:
     ad = make_adapter()
     data = {
@@ -221,7 +221,6 @@ def test_inbound_mention_position() -> None:
     )
 
 
-# ---------------------------------------------------------------- 被动凭据
 def test_passive_seq() -> None:
     from endstone_lumenbridge.onebot.qqofficial_adapter import _PASSIVE_WINDOW_GROUP
 
@@ -268,7 +267,6 @@ def test_passive_pool() -> None:
     check("凭据池容量上限", len(ad._passive["CAP"]) == _PASSIVE_POOL_MAX)
 
 
-# ---------------------------------------------------------------- event_id 凭据
 def test_event_id_credential() -> None:
     """入群 event_id：缓存→复用→过期。"""
     from endstone_lumenbridge.onebot.qqofficial_adapter import _EVENT_ID_WINDOW
@@ -286,7 +284,6 @@ def test_event_id_credential() -> None:
     check("过期 event_id 返回空串", ad._take_event_id("GRPOPENID1") == "")
 
 
-# ---------------------------------------------------------------- 发送可靠性
 def test_biz_code() -> None:
     from endstone_lumenbridge.onebot.qqofficial_adapter import ApiHTTPError, _biz_code
 
@@ -404,7 +401,6 @@ def test_active_stack() -> None:
     check("无凭据时不补发", len(sent) == 0)
 
 
-# ---------------------------------------------------------------- 出站富媒体
 def test_extract_payload() -> None:
     from endstone_lumenbridge.onebot.qqofficial_adapter import _extract_payload
 
@@ -660,7 +656,6 @@ def test_upload_media_body() -> None:
     check("base64 上传请求体", body2["file_type"] == 3 and body2["file_data"] == "YWJj")
 
 
-# ---------------------------------------------------------------- notice 翻译
 def test_notice_events() -> None:
     ad = make_adapter()
     ad._emit_robot_added({"group_openid": "GRP9", "op_member_openid": "OP1"})
@@ -748,7 +743,6 @@ def test_robot_removed_cleanup() -> None:
     check("配置 groups 不被移群改动", list(ad2.groups) == ["GRPOPENID1"])
 
 
-# ---------------------------------------------------------------- 全事件分发
 def test_full_event_dispatch() -> None:
     """官方全事件矩阵：OneBot 有语义的翻译，无语义的按官方名（小写）扩展转发。"""
     ad = make_adapter()
@@ -932,7 +926,6 @@ def test_extra_intents() -> None:
             check("extra_intents 布尔被拒", True)
 
 
-# ---------------------------------------------------------------- 本地兜底
 def test_local_fallbacks() -> None:
     ad = make_adapter()
     box: list[Any] = []
@@ -946,7 +939,6 @@ def test_local_fallbacks() -> None:
     check("get_group_info 未命中返回 None", box == [None])
 
 
-# ---------------------------------------------------------------- connections 校验
 def test_connections_validation() -> None:
     from endstone_lumenbridge.connections import ConnectionManager, ConnectionValidationError
 
@@ -1001,7 +993,6 @@ def test_connections_validation() -> None:
         check("all_admin_keys 含官方 openid", "ADMINOPENID_Y" in keys)
 
 
-# ---------------------------------------------------------------- hub 双域路由
 class FakeAdapter:
     def __init__(self, adapter_type: str, groups: list[str], connected: bool = True) -> None:
         self.adapter_type = adapter_type
@@ -1048,7 +1039,6 @@ def test_hub_dual_domain_routing() -> None:
     )
 
 
-# ---------------------------------------------------------------- 白名单双域
 def test_whitelist_dual_store() -> None:
     from endstone_lumenbridge.modules.whitelist import WhitelistModule
 
@@ -1090,7 +1080,6 @@ def test_whitelist_dual_store() -> None:
         check("QQ 域不受影响", wl.snapshot("qq") == [{"qid": "10001", "xbox": "Steve"}])
 
 
-# ---------------------------------------------------------------- 2026-09 新载荷
 def test_inbound_reference_reply() -> None:
     """引用消息（message_type=103）：被引用内容在 msg_elements，须转 reply 段。"""
     ad = make_adapter()
@@ -1357,7 +1346,6 @@ def main() -> int:
     return 1 if FAILED else 0
 
 
-# ---------------------------------------------------------------- 群管理 API
 def _start_bg_loop() -> tuple[Any, Any]:
     """后台线程运行事件循环，供 _run_official_api 提交协程。返回 (loop, thread)。"""
     loop = asyncio.new_event_loop()
@@ -1514,6 +1502,186 @@ def test_get_group_info_official_fallback() -> None:
         )
     finally:
         loop.call_soon_threadsafe(loop.stop())
+
+
+class OfficialDocAlignmentTests(unittest.TestCase):
+    """QQ 官方文档对齐：被动回复窗口与次数（bot.q.qq.com 发送消息页）。
+
+    - 群聊被动消息有效期 5 分钟、每条消息最多回复 5 次；
+    - 单聊被动消息有效期 60 分钟、最多回复 4 次（2026/01/10 由 5 次调整为 4 次）；
+    - msg_seq 不填默认 1：序号从 1 起、相同 (msg_id, msg_seq) 重复发送失败。
+    """
+
+    def test_passive_limits_match_official(self) -> None:
+        from endstone_lumenbridge.onebot.qqofficial.constants import (
+            PASSIVE_MAX_SEQ_C2C,
+            PASSIVE_MAX_SEQ_GROUP,
+            PASSIVE_WINDOW_C2C,
+            PASSIVE_WINDOW_GROUP,
+        )
+
+        assert PASSIVE_MAX_SEQ_GROUP == 5
+        assert PASSIVE_MAX_SEQ_C2C == 4
+        # 本地窗口略短于官方上限，留安全余量（4.5min / 55min）
+        assert PASSIVE_WINDOW_GROUP < 5 * 60
+        assert PASSIVE_WINDOW_C2C < 60 * 60
+
+    def test_msg_seq_starts_at_one_and_exhausts(self) -> None:
+        from endstone_lumenbridge.onebot.qqofficial.credentials import CredentialsStore
+
+        cs = CredentialsStore()
+        cs.cache_passive("g", "mid", window=60, max_seq=5)
+        seqs = [cs.take_passive("g") for _ in range(5)]
+        assert [s[1] for s in seqs] == [1, 2, 3, 4, 5]
+        assert cs.take_passive("g") is None
+
+
+class ResumeReplayDedupTests(unittest.TestCase):
+    """网关 Resume 重放已处理 seq 必须丢弃，防消息重复下发。"""
+
+    def test_replayed_dispatch_filtered_by_seq(self) -> None:
+        ad = make_adapter(adapter_id="qo_dedup", adapter_name="dedup")
+        dispatched: list[int] = []
+
+        async def fake_dispatch(msg: dict) -> None:
+            dispatched.append(msg["s"])
+
+        ad._on_dispatch = fake_dispatch  # type: ignore[method-assign]
+
+        def feed(seq: int) -> None:
+            raw = json.dumps({"op": 0, "s": seq, "t": "GROUP_MESSAGE_CREATE", "d": {}})
+            run_async(ad._on_gateway_message(raw))
+
+        feed(1)
+        feed(2)
+        feed(3)
+        self.assertEqual(dispatched, [1, 2, 3])
+        feed(2)
+        feed(1)
+        self.assertEqual(dispatched, [1, 2, 3])
+        feed(4)
+        self.assertEqual(dispatched, [1, 2, 3, 4])
+
+    def test_invalid_session_resets_seq(self) -> None:
+        ad = make_adapter(adapter_id="qo_reset", adapter_name="reset")
+        ad._last_seq = 42
+        ad._session_id = "sess"
+
+        # op=OP_INVALID_SESSION(9)：会话失效，seq 归零后重连走全新 Identify
+        ad._last_seq = 42
+        raw = json.dumps({"op": 9, "d": {}})
+        result = run_async(ad._on_gateway_message(raw))
+        self.assertTrue(result)
+        self.assertEqual(ad._last_seq, 0)
+        self.assertEqual(ad._session_id, "")
+
+
+class MsgIdExpiredTests(unittest.TestCase):
+    """msg_id 过期（40034005）：剥离凭据改走主动通道并清理池条目。"""
+
+    def test_purge_passive_removes_entry(self) -> None:
+        from endstone_lumenbridge.onebot.qqofficial.credentials import CredentialsStore
+
+        store = CredentialsStore()
+        store.cache_passive("T1", "m1", window=60.0)
+        store.cache_passive("T1", "m2", window=60.0)
+
+        store.purge_passive("T1", "m1")
+        ids = set()
+        for _ in range(4):
+            entry = store.take_passive("T1")
+            if entry:
+                ids.add(entry[0])
+        self.assertEqual(ids, {"m2"})
+
+        # 清空后池条目整体移除
+        store.purge_passive("T1", "m2")
+        self.assertIsNone(store.take_passive("T1"))
+        self.assertNotIn("T1", store.passive)
+
+    def test_sender_expired_msg_id_retries_without_credential(self) -> None:
+        from endstone_lumenbridge.onebot.qqofficial.credentials import CredentialsStore
+        from endstone_lumenbridge.onebot.qqofficial.sender import MessageSender
+        from endstone_lumenbridge.onebot.qqofficial.utils import ApiHTTPError
+
+        store = CredentialsStore()
+        store.cache_passive("T1", "m1", window=60.0)
+
+        requests: list[dict] = []
+
+        class FakeAdapter:
+            logger = FakeLogger()
+            credentials = store
+            suppress_connection_log = True
+
+            def _retry_params(self):
+                return (3, 0.0, 0.0)
+
+            def remember_msg_scope(self, message_id, kind, target) -> None:
+                pass
+
+            async def _api_request(self, method: str, path: str, body: dict) -> dict:
+                requests.append(dict(body))
+                if len(requests) == 1:
+                    # 首次：官方判定 msg_id 已过期
+                    raise ApiHTTPError(400, '{"code":40034005}')
+                return {"id": "OK"}
+
+        sender = MessageSender(FakeAdapter())
+        body = {"msg_type": 0, "content": "hi", "msg_id": "m1", "msg_seq": 1}
+        result = run_async(sender.post_message("group", "T1", body, False))
+
+        self.assertEqual(result, "ok")
+        # 第二次请求必须已剥离过期凭据字段（改走主动通道）
+        self.assertIn("msg_id", requests[0])
+        self.assertNotIn("msg_id", requests[1])
+        self.assertNotIn("msg_seq", requests[1])
+        # 池中过期凭据必须被清理，后续消息不再反复取到
+        self.assertIsNone(store.take_passive("T1"))
+
+    def test_session_reset_codes_constants(self) -> None:
+        from endstone_lumenbridge.onebot.qqofficial.constants import (
+            AUTH_FAIL_CODES,
+            SESSION_RESET_CODES,
+        )
+
+        # 会话失效（需全新 Identify）：4006 seq 无效 / 4009 会话过期 /
+        # 9001 心跳超时 / 9005 服务端强制断开
+        for code in (4006, 4009, 9001, 9005):
+            self.assertIn(code, SESSION_RESET_CODES, f"missing reset code {code}")
+        # 4004 鉴权失败：需重取 token，与会话重置集区分
+        self.assertIn(4004, AUTH_FAIL_CODES)
+        # 可 Resume 的常规重连码不得误入重置集（否则每次断线都丢会话）
+        for code in (4000, 4001, 4003, 4007):
+            self.assertNotIn(code, SESSION_RESET_CODES)
+
+
+def test_qr_bind_crypto() -> None:
+    """扫码绑定 AES-256-GCM 解密：NIST 测试向量 + 篡改拒绝 + 密钥与链接生成。"""
+    from endstone_lumenbridge.onebot.qqofficial_bind import (
+        aes256_gcm_decrypt, generate_bind_key, connect_url,
+    )
+
+    # NIST GCM 测试向量（AES-256）：key=0^32, IV=0^12, 空 AAD
+    key = bytes(32)
+    nonce = bytes(12)
+    plain = bytes(16)
+    ct = bytes.fromhex("cea7403d4d606b6e074ec5d3baf39d18")
+    tag = bytes.fromhex("d0d1c8a799996bf0265b98b5d48ab919")
+    assert aes256_gcm_decrypt(key, nonce, ct, tag) == plain
+
+    # 错误 tag 必须被校验拒绝
+    try:
+        aes256_gcm_decrypt(key, nonce, ct, bytes(16))
+    except Exception:
+        pass
+    else:
+        raise AssertionError("篡改 tag 必须被拒绝")
+
+    bk = generate_bind_key()
+    assert isinstance(bk, str) and len(bk) >= 40
+    url = connect_url("task123")
+    assert "task123" in url and url.startswith("http")
 
 
 if __name__ == "__main__":

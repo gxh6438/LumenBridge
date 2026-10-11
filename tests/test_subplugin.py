@@ -207,15 +207,12 @@ def _main_flow(data_dir: Path):
     plugins_dir = data_dir / "plugins"
     plugins_dir.mkdir(parents=True)
 
-    # 1. 复制示例子插件
     example_src = Path(__file__).parent.parent / "examples_plugins" / "subplugins" / "example_greeter"
     shutil.copytree(example_src, plugins_dir / "example_greeter")
 
-    # 2. 坏插件（验证隔离）
     (plugins_dir / "broken_one").mkdir()
     (plugins_dir / "broken_one" / "main.py").write_text(BROKEN_PLUGIN, encoding="utf-8")
 
-    # 3. priority 排序验证插件（pre 与 post）
     for name, prio in [("z_pre_plugin", "pre"), ("a_post_plugin", "post")]:
         d = plugins_dir / name
         d.mkdir()
@@ -254,32 +251,26 @@ def _main_flow(data_dir: Path):
 
     mgr = plugin.subplugin_manager
 
-    # T1: 发现与隔离
     record("子插件发现与坏插件隔离",
            mgr.subplugins.get("example_greeter") and mgr.subplugins["example_greeter"].loaded
            and mgr.subplugins.get("broken_one") is not None
            and not mgr.subplugins["broken_one"].error == "")
 
-    # T2: 清单自动生成
     record("缺失清单自动生成",
            (plugins_dir / "broken_one" / "lumen.json").is_file())
 
-    # T3: priority 排序（pre 先于 post）
     order = plugin.env_pool.get("load_order")
     record("priority 三段加载顺序", order == ["z_pre_plugin", "a_post_plugin"], str(order))
 
-    # T4: storage 自动生成私有配置
     record("storage 私有配置生成",
            (plugins_dir / "example_greeter" / "config.json").is_file())
 
-    # T5: env 动态映射
     record("env 共享池 main_group 映射",
            plugin.env_pool.get("main_group") == MAIN_GROUP)
 
     wait_for(lambda: plugin.adapter.is_connected, desc="WS 连接")
     time.sleep(0.5)
 
-    # T6: 子插件订阅群消息并回复
     n0 = len(group_msgs())
     push_event(make_group_msg(1111, "你好"))
     try:
@@ -288,7 +279,6 @@ def _main_flow(data_dir: Path):
     except TimeoutError as e:
         record("子插件订阅群消息并回复", False, str(e))
 
-    # T7: 子插件 runcmdEx（"在线人数" -> list 命令）
     n0 = len(group_msgs())
     push_event(make_group_msg(1111, "在线人数"))
     try:
@@ -297,7 +287,6 @@ def _main_flow(data_dir: Path):
     except TimeoutError as e:
         record("子插件 runcmdEx 执行命令", False, str(e))
 
-    # T8: mc.listen onJoin -> QClient 群通知
     n0 = len(group_msgs())
     plugin.bus.emit("mc.player_join", "Steve")
     try:
@@ -306,15 +295,12 @@ def _main_flow(data_dir: Path):
     except TimeoutError as e:
         record("mc.listen 游戏事件桥接", False, str(e))
 
-    # T9: 正则引擎自定义动作已注册
     record("register_regex_action 注册",
            "greet" in getattr(plugin.regex_module, "custom_actions", {}))
 
-    # T10: 热重载
     count = mgr.reload_all()
     record("reload_all 热重载", count >= 3, f"加载 {count} 个")
 
-    # T11: 卸载后事件清理（不再回复）
     mgr.unload_all()
     n0 = len(group_msgs())
     push_event(make_group_msg(1111, "你好"))
@@ -342,6 +328,94 @@ def test_subplugin_e2e():
     results = main()
     failed = [name for name, ok in results if not ok]
     assert not failed, f"子插件测试失败项: {failed}"
+
+
+class _CtxLogger:
+    def info(self, m): pass
+    def warning(self, m): pass
+    def error(self, m): pass
+    def debug(self, m): pass
+
+
+class _CtxScheduler:
+    def run_task(self, plugin, fn, delay=0, period=0):
+        fn()
+        class _T: task_id = 1
+        return _T()
+
+
+class _CtxServer:
+    def __init__(self):
+        self.online_players = []
+        self.scheduler = _CtxScheduler()
+        self.dispatched = []
+        self.command_sender = object()
+    def dispatch_command(self, sender, cmd):
+        self.dispatched.append(cmd); return True
+    def broadcast_message(self, msg): pass
+
+
+class _CtxPlugin:
+    VERSION = "test"
+    def __init__(self, tmp: Path):
+        self.logger = _CtxLogger()
+        self._tee_logger = None
+        self.server = _CtxServer()
+        self.bus = EventBus()
+        self.adapter = None
+        self.config_manager = type("CM", (), {"data": {}, "main_group": 123, "debug": False})()
+        self.data_folder = str(tmp)
+        self.webui_server = None
+        self.regex_module = None
+        self.whitelist_module = None
+        self.env_pool = EnvPool(self)
+        self._pip_serial_lock = __import__("threading").Lock()
+    def run_on_main(self, fn, delay=0): fn()
+
+
+def test_context_full_api():
+    """LumenContext 完整 Endstone API 透传与任务跟踪。"""
+    from endstone_lumenbridge.subplugin.context import LumenContext
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        plugin = _CtxPlugin(tmp)
+        data_dir = tmp / "plugins" / "demo"
+        data_dir.mkdir(parents=True)
+        ctx = LumenContext(plugin, "demo", data_dir)
+        assert ctx.plugin is plugin
+        assert ctx.server is plugin.server
+        # scheduler 为任务跟踪代理：run_task* 返回的 task 记入
+        # _scheduled_tasks，_cleanup 时统一 cancel，防热重载残留
+        sched = ctx.scheduler
+        raw = plugin.server.scheduler
+        assert sched is raw or getattr(sched, "_scheduler", None) is raw
+        ran = []
+        task = sched.run_task(plugin, lambda: ran.append(1))
+        assert ran == [1] and getattr(task, "task_id", None) == 1
+        assert task in ctx._scheduled_tasks
+        import endstone
+        assert ctx.endstone is endstone
+        mod = ctx.import_module("endstone.event")
+        assert hasattr(mod, "PlayerJoinEvent")
+        # mc 桥接
+        assert hasattr(ctx.mc, "runcmd") or hasattr(ctx.mc, "run_command")
+        assert hasattr(ctx.mc, "listen")
+        run = getattr(ctx.mc, "runcmd", None) or getattr(ctx.mc, "run_command")
+        run("say test")
+        assert "say test" in plugin.server.dispatched
+        # QQ 客户端桥接（adapter 为 None 时属性仍可访问）
+        assert hasattr(ctx, "QClient")
+        # 消息与包构建器透传
+        assert hasattr(ctx.msgbuilder, "at") or hasattr(ctx.msgbuilder, "text")
+        assert hasattr(ctx.packbuilder, "build")
+        # run_on_main / 存储
+        ran = []
+        ctx.run_on_main(lambda: ran.append(1))
+        assert ran == [1]
+        assert hasattr(ctx, "storage")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -310,7 +310,6 @@ class ConnectionManager:
         self._group_keys_cache = None
         self._admin_keys_cache = None
 
-    # ------------------------------------------------------------------ load
     def _read_items(self, fpath: Path) -> list[Any]:
         """读取单个存储文件里的 adapters 列表；损坏/缺失返回空列表。"""
         if not fpath.is_file():
@@ -495,7 +494,6 @@ class ConnectionManager:
                 pass
             self._legacy_layout = False
 
-    # ------------------------------------------------------------------ CRUD
     @staticmethod
     def is_masked(value: Any) -> bool:
         """值是否为密钥掩码（纯 * 字符串，长度与原值一致）。"""
@@ -639,7 +637,6 @@ class ConnectionManager:
                     _t("connections.port_conflict", name=other.get("name"), port=port)
                 )
 
-    # ------------------------------------------------------------------ views
     def adapters_view(self) -> list[dict[str, Any]]:
         """持锁返回适配器列表浅拷贝，供外部安全迭代（防并发 CRUD 变更列表）。"""
         with self._lock:

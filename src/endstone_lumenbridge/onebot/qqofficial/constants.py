@@ -7,14 +7,12 @@ https://bot.q.qq.com/wiki/develop/api-v2/
 
 from __future__ import annotations
 
-# ---------------------------------------------------------------- REST 接入
 # 官方统一请求地址：https://api.bot.qq.com（旧域名 api.sgroup.qq.com 已弃用）
 API_DOMAIN = "api.bot.qq.com"
 SANDBOX_DOMAIN = "sandbox.api.bot.qq.com"
 TOKEN_URL = "https://api.bot.qq.com/app/getAppAccessToken"
 HTTP_TIMEOUT = 20.0
 
-# ---------------------------------------------------------------- 断线重连
 RECONNECT_BASE_DELAY = 2.0
 RECONNECT_MAX_DELAY = 60.0
 # 连接间隔默认值（毫秒）：两次网关连接尝试之间的最小等待时间
@@ -41,10 +39,8 @@ OP_INVALID_SESSION = 9
 OP_HELLO = 10
 OP_HEARTBEAT_ACK = 11
 
-# ---------------------------------------------------------------- Intents
 # Intents（官方文档「事件订阅」）：默认订阅群聊+C2C、群成员事件、公域频道@、
 # 频道私信、频道变更（GUILDS）、互动事件（INTERACTION）。
-#
 # 注意 GROUP_MEMBER_ADD/REMOVE 的订阅位官方文档存在双版本（CDN 不一致）：
 #   - 事件订阅总表与多数事件页：GROUP_MEMBER_EVENT (1<<24)
 #   - 部分 autogen 事件页（7/21 更新）：GROUP_AND_C2C_EVENT (1<<25)
@@ -126,7 +122,6 @@ OFFICIAL_RAW_EVENTS = frozenset({
     # （频道群消息 / group_recall，见 translate.py），不在此 raw 转发集内
 })
 
-# ---------------------------------------------------------------- 被动回复
 # 被动回复窗口与每条消息可回复次数（官方 2026-06 文档「消息收发概述」）：
 #   群聊：5 分钟内最多回复 5 次；单聊：60 分钟内最多回复 4 次（2026-01-10 起）。
 # 各留时间余量避免边界失效。
@@ -139,7 +134,6 @@ PASSIVE_POOL_MAX = 8
 # 机器人入群事件 event_id 可作被动回复凭据（不消耗主动额度）的窗口
 EVENT_ID_WINDOW = 30 * 60.0
 
-# ---------------------------------------------------------------- 发送可靠性
 # 主动消息被拒（22009）补发栈：每目标上限 / 每次借道补发条数
 # （过多会挤占正常回复额度，Gensokyo 建议不超过 3）
 ACTIVE_STACK_MAX = 5
@@ -156,7 +150,6 @@ BIZ_ACTIVE_REJECTED = 22009       # 主动消息被拒（额度用尽 / 用户�
 BIZ_EVENT_ID_INVALID = 40034025   # event_id 无效
 BIZ_MSG_ID_EXPIRED = 40034005     # 被动回复 msg_id 已过期
 
-# ---------------------------------------------------------------- 富媒体
 # 富媒体：OneBot 段类型 → 官方 file_type（1 图 2 视频 3 语音）
 MEDIA_FILE_TYPE = {"image": 1, "video": 2, "record": 3}
 # 富媒体：官方附件 content_type → OneBot 段类型。

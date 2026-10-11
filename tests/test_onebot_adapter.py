@@ -1,6 +1,6 @@
 """OneBot v11 适配器专项测试
 
-针对 v1.0.1 修复的 OneBotAdapter 关键 bug 编写独立验证用例：
+针对 OneBotAdapter 关键历史 bug 编写独立验证用例：
 1. _requeue_head 将失败包压回队首，保持消息顺序
 2. _dispatch_raw 非 dict JSON 包被忽略不崩溃
 3. echo 键统一字符串类型（int / str 都能匹配）
@@ -146,9 +146,6 @@ def stop_loop_thread(adapter: Any, t: threading.Thread) -> None:
         loop.close()
 
 
-# ======================================================================
-# Bug #4: _requeue_head 将失败包压回队首，保持消息顺序
-# ======================================================================
 def test_requeue_head_preserves_order():
     print("== Bug #4: _requeue_head 压回队首，保持消息顺序 ==")
     adapter, _, _ = make_adapter()
@@ -189,9 +186,6 @@ def test_requeue_head_no_queue():
         check("无队列不崩溃", False, repr(e))
 
 
-# ======================================================================
-# Bug #5: _dispatch_raw 非 dict JSON 包被忽略
-# ======================================================================
 def test_dispatch_raw_non_dict():
     print("== Bug #5: 非 dict JSON 包被忽略不崩溃 ==")
     adapter, logger, bus = make_adapter()
@@ -218,9 +212,6 @@ def test_dispatch_raw_invalid_json():
           f"logs={logger.lines[before:]}")
 
 
-# ======================================================================
-# Bug #6: echo 键统一字符串类型
-# ======================================================================
 def test_echo_key_string_consistency():
     print("== Bug #6: echo 键统一字符串类型（int echo 也能匹配）==")
     adapter, _, bus = make_adapter()
@@ -245,9 +236,6 @@ def test_echo_key_string_consistency():
     adapter._loop.close()
 
 
-# ======================================================================
-# Bug #7: 反向 WS 多客户端广播单客户端故障不阻塞其他
-# ======================================================================
 def test_reverse_broadcast_single_client_failure():
     print("== Bug #7: 反向 WS 多客户端广播单客户端故障不阻塞其他 ==")
     # 驱动真实 adapter._sender_loop（不再内联重写发送循环）：
@@ -321,9 +309,6 @@ def test_reverse_broadcast_single_client_failure():
     adapter2._loop.close()
 
 
-# ======================================================================
-# Bug #8: stop() 清理所有状态
-# ======================================================================
 def test_stop_clears_state():
     print("== Bug #8: stop() 清理所有残留状态 ==")
     adapter, _, _ = make_adapter()
@@ -382,9 +367,6 @@ def test_stop_then_start_state_clean():
     t.join(timeout=3)
 
 
-# ======================================================================
-# Bug #11: send_pack 队列满时丢弃最旧包不崩溃
-# ======================================================================
 def test_send_pack_full_queue():
     print("== Bug #11: send_pack 队列满时丢弃最旧包不崩溃 ==")
     adapter, _, _ = make_adapter()
@@ -428,9 +410,6 @@ def test_send_pack_not_running():
         check("未运行时 send_pack 不崩溃", False, repr(e))
 
 
-# ======================================================================
-# Bug #12: call_api 超时回调 None 并清理 _pending
-# ======================================================================
 def test_call_api_timeout():
     print("== Bug #12: call_api 超时回调 None 并清理 _pending ==")
     adapter, logger, _ = make_adapter()
@@ -466,9 +445,6 @@ def test_call_api_not_running_callback_none():
     check("未运行时立即回调 None", results == [None], f"got {results}")
 
 
-# ======================================================================
-# Bug #13: is_connected / mode_name 属性
-# ======================================================================
 def test_properties():
     print("== Bug #13: is_connected / mode_name 属性正确 ==")
     # 正向模式
@@ -476,7 +452,6 @@ def test_properties():
     check("正向模式 mode_name", adapter_fwd.mode_name == "正向 WebSocket")
     check("正向模式未连接", adapter_fwd.is_connected is False)
 
-    # 模拟 WS 已连接
     fake_ws = FakeWS()
     adapter_fwd._ws = fake_ws
     check("正向模式已连接", adapter_fwd.is_connected is True)
@@ -493,9 +468,7 @@ def test_properties():
     check("反向模式有客户端已连接", adapter_rev.is_connected is True)
 
 
-# ======================================================================
 # Bug #15: 反向 WS 异常被记录（不再被静默吞掉）
-# ======================================================================
 def test_reverse_handler_logs_exception():
     print("== Bug #15: 反向 WS 接收循环异常被记录（不静默吞掉）==")
 
@@ -505,7 +478,6 @@ def test_reverse_handler_logs_exception():
     adapter._connected_event = asyncio.Event()
     adapter._send_queue = asyncio.Queue(maxsize=10)
 
-    # 构造一个会抛异常的 FakeWS（async for 时抛错）
     class ExplodingWS:
         def __aiter__(self): return self
         async def __anext__(self):
@@ -525,9 +497,6 @@ def test_reverse_handler_logs_exception():
     adapter._loop.close()
 
 
-# ======================================================================
-# 综合: send_pack + call_api 并发不互相阻塞
-# ======================================================================
 def test_send_pack_and_call_api_concurrent():
     print("== 综合: send_pack 与 call_api 并发不互相阻塞 ==")
     adapter, _, _ = make_adapter()
@@ -563,6 +532,47 @@ def test_send_pack_and_call_api_concurrent():
               f"got {callback_results}")
     finally:
         stop_loop_thread(adapter, t)
+
+
+def test_adapter_high_level_api():
+    print("== 适配器高层 API 与通用透传 ==")
+    adapter, _, _ = make_adapter()
+    sent: list[dict] = []
+    adapter.send_pack = lambda pkt: sent.append(pkt)  # 拦截发送
+    adapter.call_api = lambda pack, callback=None, timeout=15: sent.append(pack)
+
+    for name, args in [
+        ("set_group_card", (1, 2, "x")), ("set_group_kick", (1, 2)),
+        ("set_group_whole_ban", (1, True)), ("set_group_admin", (1, 2, True)),
+        ("set_group_name", (1, "n")), ("set_group_leave", (1,)),
+        ("group_poke", (1, 2)), ("friend_poke", (2,)), ("send_like", (2,)),
+        ("set_msg_emoji_like", (5, "128077")), ("delete_msg", (5,)),
+        ("set_group_ban", (1, 2, 60)), ("set_group_special_title", (1, 2, "t")),
+        ("send_group_sign", (1,)), ("set_essence_msg", (5,)),
+        ("mark_msg_as_read", (5,)),
+    ]:
+        check(f"存在动作方法 {name}", hasattr(adapter, name))
+        getattr(adapter, name)(*args)
+
+    # 异步查询类（回调式）
+    cb = lambda d: None  # noqa: E731
+    for name, args in [
+        ("get_group_member_info", (1, 2, cb)), ("get_group_member_list", (1, cb)),
+        ("get_stranger_info", (2, cb)), ("get_group_info", (1, cb)),
+        ("get_group_list", (cb,)), ("get_msg", (123, cb)),
+        ("get_login_info", (cb,)), ("get_version_info", (cb,)),
+        ("get_friend_list", (cb,)), ("get_status", (cb,)),
+        ("get_group_honor_info", (1, cb)),
+    ]:
+        check(f"存在查询方法 {name}", hasattr(adapter, name))
+        getattr(adapter, name)(*args)
+
+    # 通用透传
+    adapter.call_action("some_new_api", {"a": 1})
+    adapter.call_action("some_query_api", {"b": 2}, callback=cb)
+    check("高层 API 全部投递动作包", len(sent) >= 29, f"仅投递 {len(sent)} 个包")
+    check("动作包均含 action 键", all("action" in p for p in sent))
+    check("call_action 透传自定义动作", any(p["action"] == "some_new_api" for p in sent))
 
 
 def main():

@@ -68,7 +68,6 @@ class EventTranslator:
     def __init__(self, adapter: Any) -> None:
         self.ad = adapter
 
-    # ------------------------------------------------------------ 分发入口
     async def on_dispatch(self, msg: dict[str, Any]) -> None:
         event = str(msg.get("t") or "")
         data = msg.get("d") or {}
@@ -148,7 +147,6 @@ class EventTranslator:
         # 兜底：官方新增/未枚举事件同样转发，保证子插件永远能收到全量事件
         self._emit_official_raw(event, data, unknown=True)
 
-    # ------------------------------------------------------------ 基础包装
     def _base_pack(self, **extra: Any) -> dict[str, Any]:
         """OneBot v11 事件包公共字段。"""
         pack: dict[str, Any] = {
@@ -172,7 +170,6 @@ class EventTranslator:
         )
         self.ad._emit_pack(pack)
 
-    # ------------------------------------------------------------ notice 翻译
     def _emit_robot_added(self, data: dict[str, Any]) -> None:
         """机器人被添加到群：打印 group_openid 供管理员抄录配置。"""
         group_openid = str(data.get("group_openid") or "")
@@ -297,7 +294,6 @@ class EventTranslator:
             pack["group_id"] = group_key
         self.ad._emit_pack(pack)
 
-    # ------------------------------------------------------------ 消息翻译
     # msg_elements 携带正文的消息类型（官方 2026-09 载荷）：
     # 101=并行消息 102=聊天记录（合并转发）103=引用消息（content 可为空）
     _ELEMENT_TEXT_TYPES = frozenset({101, 102, 103})
@@ -529,7 +525,6 @@ class EventTranslator:
         )
         self.ad._emit_pack(pack)
 
-    # ------------------------------------------------------------ 频道事件
     async def _emit_guild_message(self, data: dict[str, Any]) -> None:
         """频道消息（AT_MESSAGE_CREATE 1<<30 / 私域 MESSAGE_CREATE 1<<9）→ OneBot 群消息。
 

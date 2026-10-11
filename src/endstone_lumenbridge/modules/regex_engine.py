@@ -375,6 +375,20 @@ class RegexEngineModule:
                 return at_qq if at_qq else str(pack.get("user_id", ""))
             if var == "nickname":
                 return str((pack.get("sender") or {}).get("nickname", ""))
+            if var == "rawMessage":
+                return str(pack.get("raw_message", "") or "")
+            if var == "card":
+                # 群名片为空（官方域/未设名片）时回退昵称，与客户端显示逻辑一致
+                sender = pack.get("sender") or {}
+                return str(sender.get("card") or sender.get("nickname") or "")
+            if var == "role":
+                return str((pack.get("sender") or {}).get("role", "") or "member")
+            if var == "messageId":
+                return str(pack.get("message_id", "") or "")
+            if var == "selfId":
+                return str(pack.get("self_id", "") or "")
+            if var == "domain":
+                return str(pack.get("domain", "") or "qq")
             if var in context:
                 return str(context[var])
             return match.group(0)

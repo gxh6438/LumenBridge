@@ -75,7 +75,6 @@ class AdapterHub:
         # "无已启用适配器" 告警只提示一次（WebUI 保存会反复触发 sync）
         self._warned_no_adapters = False
 
-    # ------------------------------------------------------------- 实例管理
     def _create(self, cfg: dict[str, Any]) -> OneBotAdapter | QQOfficialAdapter:
         adapter_type = str(cfg.get("type", "websocket") or "websocket")
         if adapter_type == "qqofficial":
@@ -183,7 +182,6 @@ class AdapterHub:
         self.stop_all()
         self.sync_from_manager()
 
-    # ------------------------------------------------------------- 查询视图
     def get(self, adapter_id: str) -> OneBotAdapter | None:
         with self._lock:
             return self._adapters.get(str(adapter_id))
@@ -257,7 +255,6 @@ class AdapterHub:
             )
         return result
 
-    # ------------------------------------------------------------- API 门面
     @staticmethod
     def _is_official(adapter: Any) -> bool:
         """QQ 官方适配器判定（个人号协议端无法投递 openid 目标）。"""

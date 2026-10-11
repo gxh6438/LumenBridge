@@ -920,7 +920,6 @@ class LumenContext:
         except Exception:
             return None
 
-    # -------------------------------------------------------------- 白名单
     @staticmethod
     def domain_of(pack: dict[str, Any]) -> str:
         """事件包所属消息域："official"（QQ 官方机器人，user_id 为 openid）

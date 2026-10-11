@@ -47,7 +47,6 @@ class ChatSyncModule:
 
         self.bus.on("message.group.normal", self._on_group_message)
 
-    # ------------------------------------------------------------------ 配置
     def _sync_config(self, pack: dict[str, Any] | None = None) -> dict[str, Any]:
         """取来源适配器（无来源时取主适配器）的群服互通配置。
 
@@ -72,7 +71,6 @@ class ChatSyncModule:
         避免两份分叉实现在同一事件上判定相反。"""
         return self.plugin.group_allowed(pack)
 
-    # ------------------------------------------------------------------ 入站
     def _format_segments(
         self, segments: Any, conf: dict[str, Any], pack: dict[str, Any] | None = None
     ) -> str:
@@ -162,7 +160,6 @@ class ChatSyncModule:
 
         self.plugin.run_on_main(broadcast)
 
-    # ------------------------------------------------------------------ 出站
     def _broadcast(self, enable_key: str, fmt_key: str, fallback: str, *args: Any) -> None:
         """按各适配器自己的群服互通配置广播游戏事件。"""
         connections = getattr(self.plugin, "connections", None)

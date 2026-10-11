@@ -1,6 +1,6 @@
 """安全漏洞专项测试
 
-针对 v1.0.1 修复的安全漏洞编写独立验证用例：
+针对历史修复的安全漏洞编写独立验证用例：
 1. ZIP 安装包路径穿越（loader.install_from_zip）
 2. WebUI plugin-views 路径穿越（/plugin-views/../../）
 3. WebUI SPA 静态资源路径穿越（/../../etc/passwd）
@@ -45,9 +45,7 @@ def check(name: str, cond: bool, detail: str = "") -> None:
         raise AssertionError(f"{name} {detail}".strip())
 
 
-# ======================================================================
 # Fake 环境（复用 test_webui.py 的最小可用 Plugin 替身）
-# ======================================================================
 
 class FakeLogger:
     def info(self, m): pass
@@ -170,9 +168,7 @@ class FakePlugin:
         return {"qq": 12345, "nickname": "bot", "avatar_url": "", "source": "config"}
 
 
-# ======================================================================
 # HTTP 工具
-# ======================================================================
 
 BASE = "http://127.0.0.1:18301"
 TOKEN = ""
@@ -231,9 +227,6 @@ def login():
     TOKEN = res["data"]["token"]
 
 
-# ======================================================================
-# Bug #14: ZIP 安装包路径穿越
-# ======================================================================
 def test_zip_path_traversal():
     print("== Bug #14: ZIP 安装包路径穿越被拒绝 ==")
     from endstone_lumenbridge.subplugin.loader import SubPluginManager
@@ -279,9 +272,6 @@ def test_zip_path_traversal():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-# ======================================================================
-# Bug #16/#17/#18: WebUI 路径穿越（3处）
-# ======================================================================
 def test_webui_plugin_views_traversal():
     print("== Bug #16: WebUI plugin-views 路径穿越被拦截 ==")
     tmp = Path(tempfile.mkdtemp())
@@ -357,9 +347,7 @@ def test_webui_subplugin_file_traversal():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-# ======================================================================
 # Bug #19: install/url 校验（SSRF 内网拦截已按需求撤销，仅保留协议校验）
-# ======================================================================
 def test_ssrf_defense():
     print("== Bug #19: install/url 协议校验 + 内网地址放行（内网部署场景）==")
     tmp = Path(tempfile.mkdtemp())
@@ -427,9 +415,7 @@ def test_ssrf_defense():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-# ======================================================================
 # Bug #20: 密码时序攻击防御
-# ======================================================================
 def test_password_timing_safe():
     print("== Bug #20: 密码比较使用 hmac.compare_digest（恒定时间）==")
     tmp = Path(tempfile.mkdtemp())
@@ -490,9 +476,7 @@ def test_password_timing_safe():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-# ======================================================================
 # Bug #21: 子插件 loader 路径穿越（额外防御）
-# ======================================================================
 def test_loader_symlink_defense():
     print("== Bug #21: 子插件目录发现跳过符号链接（额外防御）==")
     from endstone_lumenbridge.subplugin.loader import SubPluginManager

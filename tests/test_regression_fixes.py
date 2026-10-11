@@ -229,7 +229,6 @@ def test_list_translation_and_stop_success():
 
 
 def test_bot_profile_cache():
-    # v1.3.0：机器人资料按适配器卡片维护，_update_bot_profile(adapter, data)
     class ProfileHarness:
         _qq_avatar_url = staticmethod(LumenBridgePlugin._qq_avatar_url)
 

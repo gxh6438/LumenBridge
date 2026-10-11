@@ -55,7 +55,6 @@ class MessageSender:
         self.queue: asyncio.Queue | None = None
         self.task: asyncio.Task | None = None
 
-    # ------------------------------------------------------------ 生命周期
     def start(self) -> None:
         """在适配器事件循环内创建发送队列与消费任务（_main 开头调用）。"""
         self.queue = asyncio.Queue(maxsize=100)
@@ -64,7 +63,6 @@ class MessageSender:
             name=f"LumenBridge-QQOfficial-Sender-{self.ad.adapter_id or 'default'}",
         )
 
-    # ------------------------------------------------------------ 富媒体上传
     async def upload_media(self, kind: str, target: str, media: dict[str, Any]) -> str:
         """上传富媒体到官方 files 接口，返回 file_info（用于 media 字段）。
 
@@ -91,7 +89,6 @@ class MessageSender:
             raise RuntimeError("files api returned no file_info")
         return file_info
 
-    # ------------------------------------------------------------ 单条发送
     async def post_message(
         self, kind: str, target: str, body: dict[str, Any], has_media: bool
     ) -> str:
@@ -183,7 +180,6 @@ class MessageSender:
             await asyncio.sleep(delay_media if has_media else delay_text)
         return "failed"
 
-    # ------------------------------------------------------------ 补发栈
     async def flush_active_stack(self, target: str) -> None:
         """借被动凭据补发该目标栈内的主动消息（AtoP 机制）。
 
@@ -231,7 +227,6 @@ class MessageSender:
                 self.ad.logger.warning(_t("qqofficial.active_flush_failed", target=target, error=e))
             await asyncio.sleep(0.2)
 
-    # ------------------------------------------------------------ 发送队列
     async def _sender_loop(self) -> None:
         """发送队列消费：逐条调用官方 REST 接口，保持顺序。"""
         while self.ad._running:
@@ -301,7 +296,6 @@ class MessageSender:
                 # 轻微限速，避免触发平台 QPS 限制
                 await asyncio.sleep(0.2)
 
-    # ------------------------------------------------------------ 入队
     def enqueue(self, kind: str, target: Any, message: Any) -> None:
         """消息入队（任意线程可调）：提取文本/富媒体并投递到事件循环。"""
         loop = self.ad._loop
