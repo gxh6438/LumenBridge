@@ -138,15 +138,17 @@ WS 关闭码语义：`4004` 鉴权失败（重取 token）；`4006` / `4009` / `
 点击回调按钮触发 `notice.interaction_create`（1<<26 互动事件），`raw` 为官方原始载荷：
 
 ```python
-def on_interaction(event):
-    raw = event["raw"]
+def on_interaction(pack):
+    raw = pack["raw"]
     # 群聊点击：raw.group_openid / raw.group_member_openid / raw.data.resolved.button_data
     # 单聊点击：raw.user_openid / raw.data.resolved.button_data
     if raw["data"]["resolved"]["button_data"] == "ans_creeper":
-        event.ctx.send_group_msg(raw["group_openid"], "回答正确，验证通过！")
+        lumen.QClient.send_group_msg(raw["group_openid"], "回答正确，验证通过！")
 
 lumen.on("notice.interaction_create", on_interaction)
 ```
+
+> 注意：notice 事件的 handler 只收 `(pack)`（无 reply 参数，pack 也没有 ctx 属性）——回复用 `lumen.QClient`（按 openid 自动路由官方域）。完整可运行的入群验证示例见[子插件示例](subplugin-getting-started.md)。
 
 官方载荷关键字段（type=11 消息按钮）：
 
