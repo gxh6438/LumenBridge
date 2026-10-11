@@ -100,7 +100,7 @@ HomeAPI = https://cdn.example.com/homeapi.whl
 | Endstone 插件依赖 | 链接下载（requirements.txt 提供才显示）· 手动上传 .whl / .zip | 服务器根目录 `plugins/`（非 LumenBridge 子插件目录） | 询问是否全服热重载（等同 `/reload`，期间网页短暂离线后自动刷新；也可暂不重载，稍后手动执行） |
 
 - 文件损坏或缺失时按无链接处理，不影响其它补全方式；
-- 链接下载沿用 WebUI 安装链接的安全约束（`webui.install_url_allow_hosts` 白名单与可选 sha256 校验）；
+- 链接下载沿用 WebUI 安装链接的安全约束：初始链接需在 `webui.install_url_allow_hosts` 白名单内（未配置则不限制），可选 sha256 校验；链接 30x 跳转到其它地址（如 CDN）不受初始白名单限制；
 - 市场方式会补装**全部**可从市场获取的缺失依赖；个别依赖装不齐时任务结果会如实标注缺失清单，不会假报成功。
 
 ## 加载顺序

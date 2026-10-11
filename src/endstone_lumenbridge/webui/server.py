@@ -139,50 +139,30 @@ _PROCESS_SECRET_ATTR = "_lumenbridge_webui_secret"
 
 EDITABLE_SUFFIXES = {".json", ".py", ".txt", ".md", ".yml", ".yaml", ".cfg", ".ini", ".html", ".css", ".js"}
 
-# 面板面向内网部署：不做内网地址拦截；防护 = 仅 http(s) + 禁跨主机重定向 + 大小/超时上限
+# 面板面向内网部署：不做内网地址拦截；防护 = 仅 http(s) + 初始 URL 白名单
+# （调用侧）+ 重定向次数上限 + 大小/超时上限，允许 30x 跳转到其它主机
 
 
-def _http_url_host(url: str) -> str:
-    """校验 URL 为 http(s) 且含主机名，返回小写主机名；非法抛 ValueError。"""
-    try:
-        parsed = urllib.parse.urlparse(str(url or ""))
-    except ValueError as exc:
-        raise ValueError("下载地址格式非法") from exc
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise ValueError("下载地址必须是 http(s)")
-    host = (parsed.hostname or "").lower()
-    if not host:
-        raise ValueError("下载地址缺少主机名")
-    return host
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """允许跨主机重定向（如链接跳转到 CDN），但仍由 urllib 内置的
+    次数上限（10 次）与协议约束兜底；初始 URL 的白名单校验在调用侧。"""
 
-
-class _SameHostRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """禁止跨主机重定向：重定向目标 host 与原 host 不同则抛异常。"""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
-        old_host = (urllib.parse.urlsplit(req.full_url).hostname or "").lower()
-        new_host = (urllib.parse.urlsplit(str(newurl)).hostname or "").lower()
-        if not new_host or new_host != old_host:
-            raise urllib.error.URLError("重定向到其它主机已被拒绝")
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+    max_redirections = 10
 
 
 def _fetch_url_bytes(
     url: str, max_bytes: int, timeout: float = 30.0, headers: dict[str, str] | None = None,
 ) -> bytes:
-    """按防护策略下载；失败统一抛 RuntimeError("下载失败")，不回显细节。"""
-    expected_host = _http_url_host(url)
+    """按防护策略下载；失败统一抛 RuntimeError("下载失败")，不回显细节。
+
+    允许 30x 跳转到其它主机（初始 URL 白名单由调用方校验）。"""
     req_headers = {"User-Agent": "LumenBridge-WebUI"}
     if headers:
         req_headers.update(headers)
-    opener = urllib.request.build_opener(_SameHostRedirectHandler)
+    opener = urllib.request.build_opener(_SafeRedirectHandler)
     try:
         req = urllib.request.Request(url, headers=req_headers)
         with opener.open(req, timeout=timeout) as resp:
-            # 纵深防御：最终 URL 主机也须一致
-            final_host = (urllib.parse.urlsplit(resp.geturl()).hostname or "").lower()
-            if final_host != expected_host:
-                raise urllib.error.URLError("重定向到其它主机已被拒绝")
             data = resp.read(max_bytes + 1)
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError("下载失败") from exc

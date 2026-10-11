@@ -5264,28 +5264,42 @@ async function refreshDepsSources(name) {
   body.innerHTML = html.join("");
 }
 
+/* 补全方式卡片图标（与「选择更新方式」弹窗同风格：彩色渐变圆底 + 白描边图标） */
+const DEPS_SVG_MARKET = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9 4 4h16l1 5"/><path d="M5 9v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9"/><path d="M9 20v-6h6v6"/></svg>';
+const DEPS_SVG_LINK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>';
+const DEPS_SVG_UPLOAD = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>';
+
 function renderDepsRow(dep, kind) {
+  const card = (way, icon, svg, label, desc) =>
+    `<button class="update-choice-option deps-way-btn" data-way="${esc(way)}" data-kind="${esc(kind)}" data-dep="${esc(dep.name || "")}" data-url="${esc(dep.url || "")}">` +
+    `<span class="update-choice-icon ${icon}">${svg}</span>` +
+    `<span class="update-choice-info"><span class="update-choice-name">${esc(label)}</span>` +
+    `<span class="update-choice-desc">${esc(desc)}</span></span></button>`;
   const ways = [];
-  const btn = (way, label, cls) =>
-    `<button class="btn small ${cls} deps-way-btn" data-way="${esc(way)}" data-kind="${esc(kind)}" data-dep="${esc(dep.name || "")}" data-url="${esc(dep.url || "")}">${esc(label)}</button>`;
-  if (kind === "subplugin" && dep.in_market) ways.push(btn("market", t("subplugins.deps_via_market"), ""));
-  if (dep.url) ways.push(btn("link", t("subplugins.deps_via_link"), "white"));
-  ways.push(btn("upload", t("subplugins.deps_via_upload"), "ghost"));
-  let status = "";
-  if (kind === "subplugin") {
-    if (!dep.installed) status = t("subplugins.deps_status_missing");
-    else if (!dep.loaded) status = t("subplugins.deps_status_not_loaded", { version: dep.local_version || "?" });
-    else status = t("subplugins.deps_status_version", { version: dep.local_version || "?" });
-  } else if (dep.local_version) {
-    status = t("subplugins.deps_status_version", { version: dep.local_version });
+  if (kind === "subplugin" && dep.in_market) {
+    ways.push(card("market", "market", DEPS_SVG_MARKET,
+      t("subplugins.deps_via_market"), t("subplugins.deps_via_market_desc")));
   }
-  return `<div class="deps-row" style="display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--border,#2a2f3a);border-radius:10px;margin-bottom:8px;flex-wrap:wrap">
-    <div style="flex:1;min-width:180px">
-      <div style="font-weight:600">${esc(dep.display || dep.name || "?")}</div>
-      ${status ? `<div style="color:var(--muted);font-size:12px;margin-top:2px">${esc(status)}</div>` : ""}
-    </div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap">${ways.join("")}</div>
-  </div>`;
+  if (dep.url) {
+    ways.push(card("link", "link", DEPS_SVG_LINK,
+      t("subplugins.deps_via_link"), t("subplugins.deps_via_link_desc")));
+  }
+  ways.push(card("upload", "manual", DEPS_SVG_UPLOAD,
+    t("subplugins.deps_via_upload"), t("subplugins.deps_via_upload_desc")));
+  // 状态徽标：未安装（红）/ 已装未加载（灰）/ 已加载（绿）
+  let chip;
+  if (kind === "subplugin" && !dep.installed) {
+    chip = `<span class="deps-chip missing">${esc(t("subplugins.deps_status_missing"))}</span>`;
+  } else if (kind === "subplugin" && !dep.loaded) {
+    chip = `<span class="deps-chip muted">${esc(t("subplugins.deps_status_not_loaded", { version: dep.local_version || "?" }))}</span>`;
+  } else if (kind === "endstone" && !dep.local_version) {
+    chip = `<span class="deps-chip missing">${esc(t("subplugins.deps_status_missing"))}</span>`;
+  } else {
+    chip = `<span class="deps-chip ok">${esc(t("subplugins.deps_status_version", { version: dep.local_version || "?" }))}</span>`;
+  }
+  return `<div class="deps-item">` +
+    `<div class="deps-item-head"><span class="deps-item-name">${esc(dep.display || dep.name || "?")}</span>${chip}</div>` +
+    `${ways.join("")}</div>`;
 }
 
 async function dispatchDepsWay(way, kind, dep, url, btnEl) {
