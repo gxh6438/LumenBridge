@@ -14,7 +14,8 @@ Lumenbridge/
 ├── src/endstone_lumenbridge/ # 插件源码（核心）
 ├── tests/                    # pytest 测试套件
 ├── scripts/                  # 运维与调试脚本
-└── examples_plugins/         # 子插件示例（example_greeter / os）
+├── examples_plugins/         # 子插件示例（example_greeter / os）
+└── .github/workflows/        # CI（build.yml：自动构建 wheel 并发 Release）
 ```
 
 ## src/endstone_lumenbridge/
@@ -86,7 +87,7 @@ Lumenbridge/
 
 ## tests/
 
-pytest 套件，按主题拆分（`test_onebot_*`、`test_subplugin_*`、`test_webui*`、`test_qqofficial*`、版本回归 `test_v*_*.py` 等）。运行方式与编写约定见 [测试指南](testing.md)。
+pytest 套件，按主题拆分（`test_onebot_*`、`test_subplugin_*`、`test_webui*`、`test_qqofficial*` 等；禁止版本号命名，见 [测试指南](testing.md)）。运行方式与编写约定见 [测试指南](testing.md)。
 
 ## scripts/
 
@@ -97,6 +98,17 @@ pytest 套件，按主题拆分（`test_onebot_*`、`test_subplugin_*`、`test_w
 | `audit_config_i18n.py` | 审计配置项与 i18n 键完整性 |
 | `update_marketplace_i18n.py` | 同步市场 i18n 词条 |
 | `endstone_*_probe.py` | Endstone API 兼容性探测（适配新版本） |
+
+## CI 自动构建发版（.github/workflows/build.yml）
+
+两种触发方式，产物均为 wheel 并自动附加到 GitHub Release：
+
+| 触发方式 | 行为 |
+|------|------|
+| 推送 `v*` tag（如 `git tag v1.0.12 && git push origin v1.0.12`） | 构建 wheel → 创建对应 tag 的 Release |
+| Actions 页面手动触发（workflow_dispatch，输入 tag） | 构建 wheel → Release 已存在则覆盖产物（`--clobber`）；不存在则创建（tag 缺失时在当前提交上建 tag） |
+
+Release 正文自动取 CHANGELOG.md 中该版本段落（`## [版本号]` 到下一个版本标题之间），CHANGELOG 无对应段落时回退 GitHub 自动生成。因此发版前只需：更新 `pyproject.toml` 版本号 + CHANGELOG 追加段落 + 打 tag 推送，其余交给 CI。
 
 ## 运行期数据（服务器侧）
 
