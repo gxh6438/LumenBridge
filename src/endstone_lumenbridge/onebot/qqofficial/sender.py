@@ -32,14 +32,29 @@ from .utils import (
 )
 
 
-def _payload_body(content: str, file_info: str) -> dict[str, Any]:
+def _payload_body(
+    content: str, file_info: str, keyboard: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """按内容选择官方消息载体。
 
+    - 按钮键盘：msg_type=2，正文走 markdown 载体（官方键盘仅在该载体下
+      渲染），keyboard 为 inline content 或模板 ID；
     - 富媒体：msg_type=7，content 作配文；
     - 含出站 @ 标记（官方文本链）：切换 markdown 载体（msg_type=2），
       实测仅该组合可渲染真实 @；其余文本同步转义防误解析；
     - 其余：纯文本 msg_type=0。
+    markdown 能力未开通时 post_message 降级纯文本（键盘随之丢弃，保正文）。
     """
+    if keyboard:
+        body: dict[str, Any] = {
+            "msg_type": 2,
+            "markdown": {"content": escape_markdown_text(content or " ")},
+        }
+        if "template" in keyboard:
+            body["keyboard"] = {"template": keyboard["template"]}
+        else:
+            body["keyboard"] = {"content": keyboard.get("content") or {}}
+        return body
     if file_info:
         return {"msg_type": 7, "content": content}
     if OUT_MENTION_RE.search(content or ""):
@@ -136,6 +151,8 @@ class MessageSender:
                         str((body.get("markdown") or {}).get("content") or "")
                     )
                     body.pop("markdown", None)
+                    # 按钮键盘依赖 markdown 载体，一并丢弃保正文
+                    body.pop("keyboard", None)
                     body["msg_type"] = 0
                     continue
                 if biz == BIZ_EVENT_ID_INVALID and "event_id" in body and not event_id_retried:
@@ -195,21 +212,24 @@ class MessageSender:
                 # 凭据耗尽：条目回栈首（unshift 保序），留待下次机会
                 self.ad.credentials.unshift_active(item)
                 return
-            kind, tgt, content, media = item
+            kind, tgt, content, attachment = item
             try:
+                keyboard: dict[str, Any] | None = None
                 file_info = ""
-                if media is not None:
+                if attachment is not None and str(attachment.get("type")) == "keyboard":
+                    keyboard = attachment
+                elif attachment is not None:
                     try:
-                        file_info = await self.upload_media(kind, target, media)
+                        file_info = await self.upload_media(kind, target, attachment)
                     except Exception as e:
                         self.ad.logger.warning(
                             _t("qqofficial.media_fallback", target=target, error=e)
                         )
-                body = _payload_body(content, file_info)
+                body = _payload_body(content, file_info, keyboard)
                 body["msg_id"], body["msg_seq"] = passive
                 if file_info:
                     body["media"] = {"file_info": file_info}
-                result = await self.post_message(kind, target, body, media is not None)
+                result = await self.post_message(kind, target, body, file_info != "")
                 if result == "ok":
                     # 补发成功属运行提示类日志：静默模式下不打印（防刷屏）
                     if not self.ad.suppress_connection_log:
@@ -236,20 +256,24 @@ class MessageSender:
                 continue
             except (asyncio.CancelledError, RuntimeError, GeneratorExit):
                 return
-            kind, target, content, media = item
+            kind, target, content, attachment = item
             try:
-                # 富媒体先上传：失败降级纯文本，不消耗被动凭据（msg_seq）
+                # 附件分流：键盘直接进 body；富媒体先上传（失败降级纯文本，
+                # 不消耗被动凭据 msg_seq）
+                keyboard: dict[str, Any] | None = None
                 file_info = ""
-                if media is not None:
+                if attachment is not None and str(attachment.get("type")) == "keyboard":
+                    keyboard = attachment
+                elif attachment is not None:
                     try:
-                        file_info = await self.upload_media(kind, str(target), media)
+                        file_info = await self.upload_media(kind, str(target), attachment)
                     except Exception as e:
                         self.ad.logger.warning(
                             _t("qqofficial.media_fallback", target=target, error=e)
                         )
                         file_info = ""
                 passive = self.ad.credentials.take_passive(str(target))
-                body = _payload_body(content, file_info)
+                body = _payload_body(content, file_info, keyboard)
                 if file_info:
                     body["media"] = {"file_info": file_info}
                 if passive:
@@ -267,12 +291,14 @@ class MessageSender:
                             self.ad.logger.warning(
                                 _t("qqofficial.send_no_credential", target=target, head=content[:40])
                             )
-                result = await self.post_message(kind, str(target), body, media is not None)
+                result = await self.post_message(kind, str(target), body, file_info != "")
                 if result == "rejected":
                     # 过期降级后被拒（body 已无 msg_id）同样入栈，否则静默丢失
                     if passive is None or "msg_id" not in body:
                         # 主动被拒（22009）：入栈等下次被动回复借道补发
-                        self.ad.credentials.push_active((kind, str(target), content, media))
+                        self.ad.credentials.push_active(
+                            (kind, str(target), content, attachment)
+                        )
                         if not self.ad.suppress_connection_log:
                             self.ad.logger.info(
                                 _t(
@@ -297,7 +323,7 @@ class MessageSender:
                 await asyncio.sleep(0.2)
 
     def enqueue(self, kind: str, target: Any, message: Any) -> None:
-        """消息入队（任意线程可调）：提取文本/富媒体并投递到事件循环。"""
+        """消息入队（任意线程可调）：提取文本/富媒体/按钮键盘并投递到事件循环。"""
         loop = self.ad._loop
         if not self.ad._running or loop is None or loop.is_closed():
             return

@@ -431,6 +431,94 @@ def test_extract_payload() -> None:
     check("非法 base64 安全丢弃", media is None and text == "")
 
 
+def test_keyboard_segments() -> None:
+    """按钮键盘消息段构造：keyboard 三形态 + button 便捷构造。"""
+    from endstone_lumenbridge.onebot.message import button, keyboard
+
+    seg = keyboard("tpl_123")
+    check("模板键盘段", seg == {"type": "keyboard", "data": {"template": "tpl_123"}})
+
+    rows = [[button("A", "ans_a"), button("跳过", "skip", permission=1)]]
+    seg = keyboard(rows)
+    content = seg["data"]["content"]
+    row = content["rows"][0]["buttons"]
+    check(
+        "便捷行列表包装 rows",
+        row[0] == {
+            "render_data": {"label": "A", "style": 1},
+            "action": {"type": 1, "data": "ans_a"},
+        }
+        and row[1]["action"]["permission"] == {"type": 1},
+    )
+
+    seg = keyboard({"rows": [{"buttons": []}]})
+    check("dict 原样透传", seg["data"]["content"] == {"rows": [{"buttons": []}]})
+
+
+def test_extract_keyboard() -> None:
+    """keyboard 段提取：模板 / inline、与富媒体互斥、纯键盘无正文。"""
+    from endstone_lumenbridge.onebot.qqofficial_adapter import _extract_payload
+    from endstone_lumenbridge.onebot.message import button, keyboard
+
+    text, att = _extract_payload([keyboard("tpl_9")])
+    check("模板键盘附件", text == "" and att == {"type": "keyboard", "template": "tpl_9"})
+
+    kb = keyboard([[button("A", "a")]])
+    text, att = _extract_payload([{"type": "text", "data": {"text": "请作答"}}, kb])
+    check(
+        "inline 键盘附件",
+        text == "请作答" and att == {"type": "keyboard", "content": kb["data"]["content"]},
+    )
+
+    # 富媒体与键盘互斥：首个命中生效，第二个忽略
+    mixed = [
+        {"type": "image", "data": {"url": "https://x/i.png"}},
+        keyboard([[button("A", "a")]]),
+    ]
+    text, att = _extract_payload(mixed)
+    check("媒体优先忽略键盘", att is not None and att["type"] == "image")
+
+    # 空模板 / 空内容：无效键盘忽略
+    text, att = _extract_payload([{"type": "keyboard", "data": {"template": "  "}}])
+    check("空模板键盘忽略", text == "" and att is None)
+
+
+def test_keyboard_body() -> None:
+    """键盘载体组装：msg_type=2 + markdown + keyboard；降级丢键盘保正文。"""
+    from endstone_lumenbridge.onebot.qqofficial.sender import _payload_body
+
+    kb_inline = {"type": "keyboard", "content": {"rows": []}}
+    body = _payload_body("请选择", "", kb_inline)
+    check(
+        "inline 键盘载体",
+        body["msg_type"] == 2
+        and body["keyboard"] == {"content": {"rows": []}}
+        and body["markdown"]["content"] == "请选择",
+    )
+
+    kb_tpl = {"type": "keyboard", "template": "tpl_1"}
+    body = _payload_body("", "", kb_tpl)
+    check(
+        "模板键盘空正文给空白 markdown",
+        body["msg_type"] == 2 and body["keyboard"] == {"template": "tpl_1"} and body["markdown"]["content"],
+    )
+
+    # markdown 特殊字符正文被转义（防客户端误解析）
+    body = _payload_body("选 *1* 还是 #2", "", kb_inline)
+    check("键盘正文 markdown 转义", body["markdown"]["content"] == "选 \\*1\\* 还是 \\#2")
+
+    # 降级路径（post_message 内 md 被拒时）：键盘随 markdown 一并丢弃
+    body = _payload_body("请选择", "", kb_inline)
+    body["content"] = "请选择"
+    body.pop("markdown", None)
+    body.pop("keyboard", None)
+    body["msg_type"] = 0
+    check(
+        "降级后为纯文本无键盘",
+        body == {"msg_type": 0, "content": "请选择"},
+    )
+
+
 def test_mention_markdown_body() -> None:
     """官方 @ 出站：at 段 → 官方文本链 → 切 markdown 载体（Gensokyo 实测组合）。
 

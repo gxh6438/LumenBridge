@@ -224,10 +224,12 @@ def read_local_media(path: str) -> bytes | None:
 
 
 def extract_payload(message: Any) -> tuple[str, dict[str, Any] | None]:
-    """把 OneBot 消息统一为 (纯文本, 富媒体描述)。
+    """把 OneBot 消息统一为 (纯文本, 附件描述)。
 
-    富媒体描述：{"type": "image"|"video"|"record", "url": str|None, "data":
-    bytes|None}，首个富媒体段生效（官方单条消息仅支持一个媒体）。
+    附件描述两种形态（互斥，首个命中生效）：
+    - 富媒体 {"type": "image"|"video"|"record", "url": str|None, "data": bytes|None}；
+    - 按钮键盘 {"type": "keyboard", "template": str} 或 {"type": "keyboard",
+      "content": dict}（msgbuilder.keyboard 段，仅官方域渲染按钮）。
     出站 @ 统一经 normalize_at_markers 归一为官方文本链标准格式，sender
     检测后切换 markdown 载体发送（实测可渲染组合）。
     """
@@ -253,6 +255,13 @@ def extract_payload(message: Any) -> tuple[str, dict[str, Any] | None]:
             at_id = str(data.get("qq") or "").strip()
             if at_id and at_id != "all":
                 parts.append(f'<qqbot-at-user id="{at_id}" />')
+        elif stype == "keyboard" and media is None:
+            tpl = str(data.get("template") or "").strip()
+            content = data.get("content")
+            if tpl:
+                media = {"type": "keyboard", "template": tpl}
+            elif isinstance(content, dict) and content:
+                media = {"type": "keyboard", "content": content}
         elif stype in MEDIA_FILE_TYPE and media is None:
             url = str(data.get("url") or "").strip()
             file_ref = str(data.get("file") or data.get("path") or "").strip()
