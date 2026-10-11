@@ -1729,3 +1729,61 @@ class MarketplaceClient:
         if outcome.get("ok"):
             log(f"热重载完成，当前版本 v{outcome.get('to_version')}")
         return outcome
+
+    def safe_server_reload(self, *, log=None, timeout: float = 120.0) -> dict[str, Any]:
+        """全服热重载（等同 /reload）：不替换任何文件，仅重启全部插件。
+
+        与 :meth:`safe_framework_reload` 共用两阶段 ghost 调度（先禁用再
+        reload，避免改写正在迭代的任务队列），但无暂存更新前置与 wheel
+        回滚。期间 WebUI 短暂下线，前端应轮询健康检查自动刷新。
+        """
+        log = log or (lambda _msg: None)
+        server = self.plugin.server
+        pm = server.plugin_manager
+        scheduler = server.scheduler
+        try:
+            self.plugin.note_reload_intent()
+        except Exception:  # noqa: BLE001
+            pass
+
+        ghost = self._make_reload_ghost()
+        glog = ghost.logger
+        glog.info("[WebUI] 全服热重载通道就绪")
+        log("正在通过安全通道执行全服热重载...")
+
+        done = threading.Event()
+        outcome: dict[str, Any] = {}
+
+        def _finish(**kv) -> None:
+            outcome.update(kv)
+            done.set()
+
+        def phase1() -> None:
+            glog.info("[WebUI] phase1: 禁用全部插件（任务取消仅置标志）")
+            try:
+                pm.disable_plugins()
+            except Exception as exc:  # noqa: BLE001
+                glog.error(f"[WebUI] phase1 失败：{exc!r}")
+                _finish(ok=False, error=f"禁用插件阶段失败：{exc}")
+
+        def phase2() -> None:
+            glog.info("[WebUI] phase2: 执行 server.reload()")
+            try:
+                server.reload()
+                new_plugin = pm.get_plugin("lumenbridge")
+                if new_plugin is None or not pm.is_plugin_enabled(new_plugin):
+                    raise RuntimeError("热重载后未检测到已启用的 LumenBridge 插件")
+                glog.info(f"[WebUI] 全服热重载完成，LumenBridge v{new_plugin.version} 已恢复")
+                _finish(ok=True, version=str(new_plugin.version))
+            except Exception as exc:  # noqa: BLE001
+                glog.error(f"[WebUI] phase2 热重载失败：{exc!r}")
+                _finish(ok=False, error=f"热重载失败：{exc}，请查看服务器日志")
+
+        scheduler.run_task(ghost, phase1, delay=5)
+        scheduler.run_task(ghost, phase2, delay=6)
+
+        if not done.wait(timeout=timeout):
+            return {"ok": False, "error": f"热重载超时（{timeout:g} 秒）未完成，请检查服务器日志确认结果"}
+        if outcome.get("ok"):
+            log("全服热重载完成")
+        return outcome

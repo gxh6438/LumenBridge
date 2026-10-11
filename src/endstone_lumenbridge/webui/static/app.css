@@ -397,8 +397,29 @@
   transition: background .15s, color .15s;
 }
 .pc-array-chip button:hover { color: #fff; background: var(--red); }
-.pc-array-add { display: flex; gap: 8px; flex-wrap: wrap; }
-.pc-array-add input { flex: 1; min-width: 140px; }
+/* 添加行：输入框（右侧内嵌 + 图标按钮）+ 轻量批量导入文字按钮 */
+.pc-array-add { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.pc-array-add-input { position: relative; flex: 1; min-width: 200px; }
+.pc-array-add-input input { width: 100%; padding-right: 44px; }
+.pc-array-add-btn {
+  position: absolute; top: 50%; right: 6px; transform: translateY(-50%);
+  border: none; background: transparent; color: var(--muted); cursor: pointer;
+  width: 30px; height: 30px; border-radius: 9px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  transition: color .15s, background .15s, transform .14s;
+}
+.pc-array-add-btn:hover { color: var(--accent); background: var(--accent-soft); }
+.pc-array-add-btn:active { transform: translateY(-50%) scale(.88); }
+.pc-array-add-btn svg { width: 15px; height: 15px; }
+.pc-array-batch-btn {
+  border: none; background: transparent; color: var(--muted); cursor: pointer;
+  font-size: 12.5px; font-weight: 550; font-family: inherit;
+  padding: 7px 10px; border-radius: 9px; flex: 0 0 auto;
+  display: inline-flex; align-items: center; gap: 5px;
+  transition: color .15s, background .15s;
+}
+.pc-array-batch-btn:hover, .pc-array-batch-btn.active { color: var(--accent); background: var(--accent-soft); }
+.pc-array-batch-btn svg { width: 14px; height: 14px; }
 .pc-array-batch-wrap { display: none; margin-top: 8px; }
 .pc-array-batch-wrap.show { display: block; }
 .pc-array-batch { width: 100%; min-height: 110px; }

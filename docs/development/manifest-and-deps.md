@@ -77,6 +77,32 @@
 
 检查失败时子插件仍会记录在管理列表中（`loaded=false` + `error`），WebUI 可展示失败原因与「装依赖」入口。
 
+## 依赖补全与 requirements.txt
+
+`requires` 缺失导致加载失败时，WebUI 子插件卡片会出现「补全依赖」入口。点击后自动探测当前可用的补全方式，弹窗按依赖类型分组展示。
+
+子插件可在自己目录内提供可选的 `requirements.txt`，为每个依赖声明下载直链（名称大小写不敏感，链接可留空，支持 `#` 注释与空行）：
+
+```ini
+[subplugins]
+Economy = https://cdn.example.com/economy.zip
+helper =
+
+[endstone]
+HomeAPI = https://cdn.example.com/homeapi.whl
+```
+
+两类依赖的补全方式与完成行为不同：
+
+| 依赖类型 | 可选方式 | 安装位置 | 完成后 |
+|----------|----------|----------|--------|
+| 子插件依赖 | 市场安装（已在市场发布才显示）· 链接下载（requirements.txt 提供才显示）· 手动上传 .zip | `plugins/lumenbridge/plugins/` | 自动热重载该子插件 |
+| Endstone 插件依赖 | 链接下载（requirements.txt 提供才显示）· 手动上传 .whl / .zip | 服务器根目录 `plugins/`（非 LumenBridge 子插件目录） | 询问是否全服热重载（等同 `/reload`，期间网页短暂离线后自动刷新；也可暂不重载，稍后手动执行） |
+
+- 文件损坏或缺失时按无链接处理，不影响其它补全方式；
+- 链接下载沿用 WebUI 安装链接的安全约束（`webui.install_url_allow_hosts` 白名单与可选 sha256 校验）；
+- 市场方式会补装**全部**可从市场获取的缺失依赖；个别依赖装不齐时任务结果会如实标注缺失清单，不会假报成功。
+
 ## 加载顺序
 
 1. 扫描 `plugins/lumenbridge/plugins/` 下全部含 `lumen.json` 的目录；

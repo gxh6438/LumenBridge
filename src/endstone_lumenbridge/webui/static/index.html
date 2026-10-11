@@ -900,6 +900,21 @@
   </div>
 </div>
 
+<!-- 依赖补全弹窗：缺失的 requires 依赖分类展示，按依赖选择补全方式
+     （子插件：市场/链接/上传；Endstone 插件：链接/上传）。内容动态渲染 -->
+<div class="modal-mask" id="deps-sources-modal" data-closable="true" onclick="maskClick(event,'deps-sources-modal')">
+  <div class="modal glass" style="max-width:640px">
+    <h3><span id="deps-sources-title" data-i18n="subplugins.deps_modal_title">补全依赖</span> <button class="close-x" onclick="closeDepsModal()">✕</button></h3>
+    <div class="modal-body" id="deps-sources-body" style="max-height:62vh;overflow:auto"></div>
+    <div class="toolbar" style="margin:16px 0 0;justify-content:flex-end">
+      <button class="btn small ghost" onclick="closeDepsModal()" data-i18n="common.close">关闭</button>
+    </div>
+  </div>
+</div>
+<!-- 手动上传用隐藏文件选择（标准控件无法自绘，非浏览器原生弹窗） -->
+<input type="file" id="deps-sp-file" accept=".zip" style="display:none">
+<input type="file" id="deps-es-file" accept=".whl,.zip" style="display:none">
+
 <!-- 子插件 ⋯ 更多操作浮层菜单：fixed 定位 + z-index:400，置于所有卡片/毛玻璃/弹窗之上 -->
 <div class="sp-more-menu" id="sp-more-menu" role="menu"></div>
 <div class="sp-desc-popover" id="sp-desc-popover" role="tooltip"></div>
