@@ -12,7 +12,7 @@
 
 ## 安装步骤
 
-1. 下载 `endstone_lumenbridge-1.0.11-py3-none-any.whl`。
+1. 下载 `endstone_lumenbridge-1.0.12-py3-none-any.whl`。
 2. 把 whl 文件放进 BDS 服务器的 `plugins/` 目录。
 3. 启动服务器，Endstone 会自动加载插件并在 `plugins/lumenbridge/` 下生成默认配置。
 
@@ -24,7 +24,7 @@
 
 ```text
 plugins/
-├── endstone_lumenbridge-1.0.11-py3-none-any.whl
+├── endstone_lumenbridge-1.0.12-py3-none-any.whl
 └── lumenbridge/
     ├── config.json          # 基础配置（语言、白名单、正则引擎、WebUI 等）
     ├── connections/         # 连接配置（适配器卡片，按类型分文件）

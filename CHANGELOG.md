@@ -1,5 +1,25 @@
 # 更新日志
 
+## [1.0.12] - 2026-10-11
+
+### 新增
+
+- QQ 官方域按钮键盘消息（互动式消息菜单）：`msg.button()` / `msg.keyboard()` 消息段构造器，支持回调按钮（点击触发互动事件）、指令按钮（点击在用户输入框插入指令）、跳转按钮（URL）三类，可配合 `permission=1` 实现「仅管理员可点」的入群答题验证等交互场景
+- 互动事件回应机制：官方要求按钮/快捷菜单点击必须回应否则客户端一直转圈，适配器内置 2.5 秒兜底自动回应（`code=0`），子插件也可经 `call_action("respond_interaction", ...)` 抢先自定义回应（code 0-5，如非管理员点管理员按钮回 `5=仅管理员操作`），同一 interaction_id 自动去重
+- 按钮点击事件自动注册被动回复凭据：点击后的回复消息（如「验证通过」）不消耗主动消息额度
+- 按钮点击触发 `notice.interaction_create` 事件转发（官方原始载荷在 `raw` 字段，含 `button_data` 回传数据）
+
+### 修复
+
+- 模板键盘字段名对齐官方协议（`keyboard.id`，此前误用非标准键名导致模板按钮发送失败）
+- 按钮必填字段（`visited_label` / `permission` / `unsupport_tips`）缺省时自动补全，避免官方接口 `param invalid` 拒绝
+- CI 手动触发指定已存在 tag 时改检该 tag 的提交构建，防止把新代码产物覆盖上传到旧版本 Release 造成版本-产物错配
+
+### 优化
+
+- 按钮键盘完整对齐 QQ 官方机器人开发文档（msg-btn / interaction_create / interactions API 四个页面逐项核对），文档站补「按钮键盘互动消息」专题节与官方回调载荷字段表
+- `respond_interaction` 支持自动剥离历史载荷 `INTERACTION_CREATE:` 前缀
+
 ## [1.0.11] - 2026-10-11
 
 ### 新增

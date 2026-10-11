@@ -83,7 +83,7 @@ LumenBridge 的核心是一个**多适配器并行引擎**。每个适配器实�
 
 ### 安装
 
-将 `endstone_lumenbridge-1.0.11-py3-none-any.whl` 放入 Endstone 的 `plugins/` 目录，启动服务器即可。插件无任何外部 pip 依赖。
+将 `endstone_lumenbridge-1.0.12-py3-none-any.whl` 放入 Endstone 的 `plugins/` 目录，启动服务器即可。插件无任何外部 pip 依赖。
 
 ### 三步配置
 
@@ -93,7 +93,7 @@ LumenBridge 的核心是一个**多适配器并行引擎**。每个适配器实�
 
 ```text
 plugins/
-├── endstone_lumenbridge-1.0.11-py3-none-any.whl
+├── endstone_lumenbridge-1.0.12-py3-none-any.whl
 └── lumenbridge/
     ├── config.json          # 基础配置
     ├── connections.json     # 连接配置（适配器卡片）
@@ -154,7 +154,7 @@ def on_group_message(pack, reply):
 
 | 项目 | 规格 |
 | --- | --- |
-| 版本 | 1.0.11 |
+| 版本 | 1.0.12 |
 | 许可证 | MIT |
 | 语言 | Python 3.11+ |
 | 框架 | Endstone 0.11+ |
