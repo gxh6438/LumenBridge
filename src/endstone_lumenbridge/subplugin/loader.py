@@ -147,7 +147,6 @@ class SubPluginManager:
     def discover(self) -> list[SubPlugin]:
         """扫描子插件目录，补全缺失的 lumen.json"""
         found: list[SubPlugin] = []
-        # plugins_dir 被外部删除时不阻断插件启用
         try:
             iterdir = sorted(self.plugins_dir.iterdir())
         except OSError:
@@ -164,13 +163,12 @@ class SubPluginManager:
             if manifest_path.is_file():
                 mdata = _read_manifest_dict(manifest_path)
                 if mdata is None:
-                    # 清单损坏 → 跳过该子插件，绝不回退默认 load=True 执行其代码
+                    # 绝不回退默认 load=True 执行其代码
                     self.logger.error(_t("subplugin_runtime.log.manifest_failed", name=folder.name, manifest=MANIFEST_NAME))
                     continue
                 manifest.update(mdata)
             else:
                 manifest["name"] = folder.name
-                # 原子写防中断留下半个清单
                 _write_manifest_atomic(manifest_path, manifest)
                 self.logger.info(_t("subplugin_runtime.log.manifest_generated", name=folder.name, manifest=MANIFEST_NAME))
 
@@ -186,9 +184,8 @@ class SubPluginManager:
 
     def load_all(self) -> None:
         with self._lock:
-            # 清理历史遗留的字节码缓存（含已禁用子插件）
             self._purge_pycache(self.plugins_dir)
-            # 拓扑排序：被依赖的子插件先加载，避免 requires 检查误报
+            # 拓扑排序：被依赖的子插件先加载
             for sp in self._order_by_requirements(self.discover()):
                 dup = self.subplugins.get(sp.name)
                 if dup is not None and dup.folder != sp.folder:
@@ -205,7 +202,7 @@ class SubPluginManager:
                     self.logger.info(_t("subplugin_runtime.log.disabled", name=sp.name))
                     sp.loaded = False
                     sp.error = ""
-                    self.subplugins[sp.name] = sp  # 保留记录供 WebUI 展示与开关
+                    self.subplugins[sp.name] = sp
                     continue
                 self._load_one(sp)
             count = sum(1 for sp in self.subplugins.values() if sp.loaded)
@@ -224,7 +221,7 @@ class SubPluginManager:
             pass
 
     def _load_one(self, sp: SubPlugin) -> bool:
-        # 同名冲突拒绝加载：否则旧目录模块成为孤儿（回调持续触发且无卸载入口）
+        # 同名冲突拒绝：否则旧目录模块成为孤儿（回调持续触发且无卸载入口）
         existing = self.subplugins.get(sp.name)
         if existing is not None and existing is not sp and existing.folder != sp.folder:
             self.logger.warning(
@@ -239,7 +236,7 @@ class SubPluginManager:
         context: LumenContext | None = None
         module_name = f"lumenbridge_sub_{sp.folder.name}"
         try:
-            # 刷新 importlib 缓存并确保 site-packages 在 sys.path，让新装依赖可被发现
+            # 刷新 importlib 缓存，让新装依赖可被发现
             from ..pip_manager import PipManager
             PipManager.refresh_dependency_cache()
             deps_raw = sp.manifest.get("dependencies", [])
@@ -255,7 +252,7 @@ class SubPluginManager:
             if deps:
                 pip_mgr = self._get_pip_manager()
                 if pip_mgr is None:
-                    # pip_mgr 不可用时保守拒绝加载，避免直接 ModuleNotFoundError
+                    # 保守拒绝加载，避免直接 ModuleNotFoundError
                     sp.loaded = False
                     sp.missing_deps = list(deps)
                     sp.missing_modules = [self._extract_module_name(d) for d in deps]
@@ -287,7 +284,7 @@ class SubPluginManager:
                 sp.missing_modules = []
             sp.missing_requirements = []
 
-            # min_v 版本闸：声明的最低 LumenBridge 版本高于当前 → 拒绝加载
+            # min_v 版本闸：声明的最低版本高于当前 → 拒绝加载
             unmet = self._unmet_min_version(sp.manifest)
             if unmet:
                 sp.loaded = False
@@ -310,7 +307,7 @@ class SubPluginManager:
                 )
                 return False
 
-            # requires：Endstone 插件缺失提示安装；子插件缺失/版本不符 → 拒绝加载
+            # requires：Endstone 缺失提示安装；子插件缺失/版本不符 → 拒绝加载
             req_error = self._check_plugin_requirements(sp)
             if req_error:
                 sp.loaded = False
@@ -340,13 +337,12 @@ class SubPluginManager:
                 )
             module = importlib.util.module_from_spec(spec)
             sys.modules[module_name] = module
-            # 禁写字节码：源码热重载分发不需要 pyc（加载完成后恢复原值）
+            # 禁写字节码：热重载分发不需要 pyc
             prev_dwb = sys.dont_write_bytecode
             sys.dont_write_bytecode = True
             try:
                 spec.loader.exec_module(module)
             except Exception:
-                # exec_module 失败后清理半初始化模块，避免残留破损对象
                 sys.modules.pop(module_name, None)
                 raise
             finally:
@@ -355,8 +351,7 @@ class SubPluginManager:
             on_load = getattr(module, "on_load", None)
             if not callable(on_load):
                 raise AttributeError(_t("subplugin_runtime.log.no_on_load", entry=ENTRY_NAME))
-            # 标记当前加载中的上下文：子插件经 lumen.plugin.register_command 注册
-            # 命令时（PicServer_Rank3 兼容路径），插件对象据此转发给正确上下文
+            # 标记加载中上下文：子插件经 lumen.plugin.register_command 注册时据此转发
             self.plugin.__dict__["_lumen_loading_context"] = context
             try:
                 on_load(context)
@@ -380,21 +375,21 @@ class SubPluginManager:
             raw_error = traceback.format_exc()
             sp.missing_modules = self._parse_missing_modules_from_error(raw_error)
             sp.error = self._humanize_error(raw_error, sp.missing_modules)
-            # on_load 抛异常前可能已注册事件监听器，必须清理避免泄漏
+            # on_load 抛异常前可能已注册事件监听器，必须清理
             if context is not None:
                 try:
                     context._cleanup()
                 except Exception as e:
                     self.logger.warning(_t("subplugin_runtime.log.cleanup_exception", name=sp.name, error=e))
             sys.modules.pop(module_name, None)
-            # 子模块（exec_module 中 import 的本地模块）也一并清理，避免破损对象残留
+            # 子模块也一并清理，避免破损对象残留
             for key in [k for k in sys.modules if k.startswith(module_name + ".")]:
                 del sys.modules[key]
             self.subplugins[sp.name] = sp
             self.logger.error(_t("subplugin_runtime.log.load_failed", name=sp.name, error=sp.error))
             return False
         finally:
-            # 兜底清理：覆盖 on_load 内动态导入本地模块等路径意外写入的缓存
+            # 覆盖 on_load 内动态导入意外写入的缓存
             self._purge_pycache(sp.folder)
 
     def _get_pip_manager(self) -> Any:
@@ -411,7 +406,8 @@ class SubPluginManager:
         """
         try:
             manager = self.plugin.server.plugin_manager
-            plugins = manager.get_plugins()
+            # Endstone PluginManager 的插件列表是 plugins 属性（无 get_plugins() 方法）
+            plugins = manager.plugins
         except Exception:
             return None
         installed: dict[str, str] = {}
@@ -434,7 +430,6 @@ class SubPluginManager:
         if declaration.empty:
             return ""
         if declaration.invalid:
-            # 无效声明项不阻断加载，但提示作者修正
             self.logger.warning(
                 _t(
                     "subplugin_runtime.log.requires_invalid_items",
@@ -445,7 +440,7 @@ class SubPluginManager:
 
         problems: list[str] = []
 
-        # Endstone 插件依赖只能提示安装；server 不可用（None）时不阻断
+        # Endstone 依赖只能提示；server 不可用（None）时不阻断
         if declaration.endstone:
             installed = self._installed_endstone_plugins()
             if installed is None:
@@ -463,7 +458,6 @@ class SubPluginManager:
         # 子插件依赖：必须已加载且版本满足
         for req in declaration.subplugins:
             if req.name == sp.name:
-                # 自依赖视为声明错误，忽略之（不阻断）
                 continue
             dep = self.subplugins.get(req.name)
             if dep is None:
@@ -523,7 +517,6 @@ class SubPluginManager:
                 else:
                     remaining.append(sp)
             if not progressed:
-                # 循环依赖：按原顺序加载，让各自检查报错
                 ordered.extend(remaining)
                 break
             pending = remaining
@@ -558,7 +551,7 @@ class SubPluginManager:
                 self._unload_one(name)
 
     def _unload_one(self, name: str) -> bool:
-        # 持锁贯穿 unload 流程，避免 status_* 在 on_unload 进行中观察到中间态
+        # 持锁贯穿 unload，避免 status_* 观察到中间态
         with self._lock:
             sp = self.subplugins.get(name)
             if not sp:
@@ -575,7 +568,7 @@ class SubPluginManager:
                 except Exception as e:
                     self.logger.warning(_t("subplugin_runtime.log.cleanup_exception", name=name, error=e))
             sp.loaded = False
-            # 清掉 sys.modules 中的模块及子模块，防热重载后新旧模块并存
+            # 清掉模块及子模块，防热重载后新旧模块并存
             module_name = f"lumenbridge_sub_{sp.folder.name}"
             sys.modules.pop(module_name, None)
             for key in [k for k in sys.modules if k.startswith(module_name + ".")]:
@@ -588,7 +581,6 @@ class SubPluginManager:
         with self._lock:
             for name in list(self.subplugins):
                 self._unload_one(name)
-            # 与 load_all 相同的拓扑排序，保证依赖先于依赖者加载
             for sp in self._order_by_requirements(self.discover()):
                 dup = self.subplugins.get(sp.name)
                 if dup is not None and dup.folder != sp.folder:
@@ -621,7 +613,6 @@ class SubPluginManager:
                 try:
                     entries = list(self.plugins_dir.iterdir()) if self.plugins_dir.is_dir() else []
                 except OSError:
-                    # plugins_dir 被外部删除/不可读：与 discover 同口径容错
                     entries = []
                 for d in entries:
                     if not d.is_dir():
@@ -634,10 +625,10 @@ class SubPluginManager:
                             break
                 if folder is None:
                     folder = self.plugins_dir / name
-                # 二次校验：防符号链接等绕过
+                # 二次校验防符号链接绕过
                 if not _ensure_under(folder, self.plugins_dir):
                     return False
-            # 先校验再卸载：校验失败直接返回，正在运行的实例不受影响
+            # 先校验再卸载：失败直接返回，运行中实例不受影响
             if not folder.is_dir() or not (folder / ENTRY_NAME).is_file():
                 return False
             manifest = dict(DEFAULT_MANIFEST)
@@ -649,7 +640,6 @@ class SubPluginManager:
                     self.logger.error(_t("subplugin_runtime.log.manifest_failed", name=folder.name, manifest=MANIFEST_NAME))
                     return False
                 manifest.update(mdata)
-            # 禁用（load:false）的插件不允许经热重载强行加载
             if not manifest.get("load", True):
                 self.logger.warning(f"[子插件] {name} 插件已被禁用，拒绝重载")
                 return False
@@ -682,15 +672,13 @@ class SubPluginManager:
             except OSError as e:
                 self.logger.error(_t("subplugin_runtime.log.manifest_save_failed", name=name, error=e))
                 return False
-            # 禁用不能只写标志：已加载实例必须卸载，否则仍持续运行；
-            # 卸载后补回记录供 WebUI 展示与后续重新启用
+            # 禁用必须卸载已加载实例，否则仍持续运行；补回记录供 WebUI 展示
             if not enable and sp is not None and sp.loaded:
                 self._unload_one(name)
                 sp.loaded = False
                 sp.error = ""
                 self.subplugins[name] = sp
             elif enable:
-                # 启用后立即尝试加载，否则开关打开后插件仍不运行
                 self.reload_one(name)
         if enable:
             self.logger.info(_t("subplugin_runtime.log.toggle_enabled", name=name))

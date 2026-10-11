@@ -55,9 +55,6 @@ MAIN_GROUP = 987654321
 ADMIN_QQ = 123456789
 PORT = 18765
 
-# ----------------------------------------------------------------------
-# 模拟 OneBot 服务端
-# ----------------------------------------------------------------------
 
 received_packs: list[dict] = []
 server_loop = None
@@ -119,9 +116,6 @@ def start_mock_server():
         raise RuntimeError(f"模拟 OneBot 服务端启动超时（端口 {PORT}）")
 
 
-# ----------------------------------------------------------------------
-# 模拟 Endstone 环境
-# ----------------------------------------------------------------------
 
 class FakeLogger:
     def _log(self, lv, msg): print(f"[{lv}] {msg}")
@@ -177,10 +171,6 @@ class FakePlugin:
         gid = pack.get("group_id")
         return gid is not None and gid in self.config_manager.main_groups
 
-
-# ----------------------------------------------------------------------
-# 测试主流程
-# ----------------------------------------------------------------------
 
 def wait_for(cond, timeout=8.0, desc=""):
     start = time.time()
@@ -260,7 +250,6 @@ def _main_flow(data_dir: Path):
         results.append((name, ok, detail))
         print(f"[{'PASS' if ok else 'FAIL'}] {name} {detail}")
 
-    # 1. 连接建立
     try:
         wait_for(lambda: plugin.adapter.is_connected, desc="WS 连接")
         record("正向 WS 连接建立", True)
@@ -269,7 +258,6 @@ def _main_flow(data_dir: Path):
 
     time.sleep(0.5)
 
-    # 2. QQ -> 游戏
     push_event(make_group_msg(1111, "大家好", card="小明"))
     try:
         wait_for(lambda: any("小明" in b and "大家好" in b for b in plugin.server.broadcasts),
@@ -278,7 +266,6 @@ def _main_flow(data_dir: Path):
     except TimeoutError as e:
         record("QQ 群消息 -> 游戏广播", False, str(e))
 
-    # 3. 游戏 -> QQ
     n0 = len(group_msgs())
     plugin.chat_sync_module.on_player_chat("Steve", "hello qq")
     plugin.chat_sync_module.on_player_join("Alex")
@@ -293,7 +280,6 @@ def _main_flow(data_dir: Path):
     except TimeoutError as e:
         record("游戏聊天/进服/死亡 -> QQ 群", False, str(e))
 
-    # 4. 白名单绑定
     n0 = len(group_msgs())
     push_event(make_group_msg(1111, "绑定白名单SteveXbox"))
     try:
@@ -304,7 +290,6 @@ def _main_flow(data_dir: Path):
     except TimeoutError as e:
         record("白名单绑定", False, str(e))
 
-    # 5. 正则引擎：查服（executeCommand 经 0.11 CommandSenderWrapper on_message 回调捕获输出）
     n0 = len(group_msgs())
     push_event(make_group_msg(1111, "查服"))
     try:
@@ -313,14 +298,12 @@ def _main_flow(data_dir: Path):
     except TimeoutError as e:
         record("正则引擎-查服(executeCommand)", False, str(e))
 
-    # 6. 正则引擎：非管理员执行命令被拒绝
     n0 = len(group_msgs())
     push_event(make_group_msg(1111, "执行say hack"))
     time.sleep(1.5)
     denied = not any("执行结果" in m for m in group_msgs()[n0:])
     record("正则引擎-非管理员被拒绝", denied)
 
-    # 7. 正则引擎：管理员执行命令
     n0 = len(group_msgs())
     push_event(make_group_msg(ADMIN_QQ, "执行say hello"))
     try:
@@ -330,7 +313,6 @@ def _main_flow(data_dir: Path):
     except TimeoutError as e:
         record("正则引擎-管理员执行命令", False, str(e))
 
-    # 8. 退群自动移除白名单
     n0 = len(group_msgs())
     push_event({
         "post_type": "notice", "notice_type": "group_decrease",
@@ -343,7 +325,6 @@ def _main_flow(data_dir: Path):
     except TimeoutError as e:
         record("退群自动移除白名单", False, str(e))
 
-    # 9. echo API 请求-回执
     got = {}
     plugin.adapter.get_group_member_list(MAIN_GROUP, lambda data: got.update({"data": data}))
     try:
@@ -352,7 +333,6 @@ def _main_flow(data_dir: Path):
     except TimeoutError as e:
         record("echo API 请求-回执", False, str(e))
 
-    # 10. 优雅停止
     plugin.hub.stop_all()
     record("适配器优雅停止", not plugin.hub.is_connected)
 

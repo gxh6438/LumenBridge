@@ -477,8 +477,8 @@ function applyBackground(bg) {
 }
 
 
-/* ─── 移动端可滚动 tab 条：激活 tab 平滑滚动居中（scrollIntoView 居中变体，
-   参考 Android TabLayout scrollable / Chrome 标签条交互）─── */
+/* 移动端可滚动 tab 条：激活 tab 平滑滚动居中（scrollIntoView 居中变体，
+   参考 Android TabLayout scrollable / Chrome 标签条交互）*/
 function centerActiveTab(page) {
   const bar = document.getElementById("tabbar");
   const scroller = document.getElementById("tabbar-scroll");
@@ -585,7 +585,7 @@ window.addEventListener("message", async (e) => {
   if (d.type === "lumen-modal-close") subpluginModalClose();
 });
 
-/* ───────── 子插件弹窗：接管模式 ─────────
+/* 子插件弹窗：接管模式
    架构（v2 重写）：弹窗打开时 iframe 整体转为全屏 fixed 层，主面板渲染唯一
    一层全屏遮罩。此前“iframe 内遮罩 + iframe 外四条遮罩”的拼接方案中，
    iframe 内的 backdrop-filter 采样不到主页面内容（浏览器按 iframe 划分
@@ -812,7 +812,7 @@ const CUSTOM_BASE_STYLE =
      的光斑叠加，iframe 边缘会出现明显的颜色断层。透明背景下主面板光斑本就
      透出可见，无需 iframe 自绘。 */
   "body::before{display:none!important}" +
-  /* ── 弹窗接管模式（html.lumen-modal-takeover，注入脚本随弹窗开/关切换）──
+  /* 弹窗接管模式（html.lumen-modal-takeover，注入脚本随弹窗开/关切换）
      弹窗打开时主面板把 iframe 抬升为全屏 fixed 层并渲染唯一一层全屏遮罩，
      页面内遮罩因此退化为纯定位/点击容器：fixed 全屏铺满（= 屏幕可视区，
      卡片随之恒居中）、透明、无滤镜（否则与主面板遮罩叠加变黑出界差）。
@@ -1478,7 +1478,7 @@ function setEditorLive(hostId, live) {
 }
 
 
-/* ─── 子插件配置面板（AstrBot 配置页风格复刻） ─── */
+/* 子插件配置面板（AstrBot 配置页风格复刻）*/
 /* 布局：左信息右控件的两列行式 + 分组嵌套卡片；特性：搜索过滤、单项恢复默认、
    secret 密码遮罩、数字滑块、chips 列表编辑器（批量导入）、多选复选框组、
    textarea 全屏编辑、未保存拦截、Ctrl/Cmd+S 快捷保存 */
@@ -2921,7 +2921,7 @@ async function unbind(qq) {
 }
 
 
-/* ─── 子插件卡片操作分发：主按钮与 ⋯ 菜单项共用 ─── */
+/* 子插件卡片操作分发：主按钮与 ⋯ 菜单项共用*/
 function dispatchSpAction(action, name) {
   switch (action) {
     case "reload": reloadSingleSubplugin(name); break;
@@ -2937,7 +2937,7 @@ function dispatchSpAction(action, name) {
   }
 }
 
-/* ─── 子插件 ⋯ 更多菜单（fixed 定位浮层，z-index:400 置于一切之上） ─── */
+/* 子插件 ⋯ 更多菜单（fixed 定位浮层，z-index:400 置于一切之上）*/
 const SP_MENU_ICONS = {
   files: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
   "update-deps": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>',
@@ -3021,7 +3021,7 @@ document.addEventListener("keydown", (e) => {
   });
 })();
 
-/* ─── 子插件描述展开浮层：卡片内固定两行截断，全文以滑动浮层展示 ─── */
+/* 子插件描述展开浮层：卡片内固定两行截断，全文以滑动浮层展示*/
 let spDescPopoverState = null;
 
 function toggleSpDescPopover(btn) {
@@ -3658,7 +3658,7 @@ function closeMoreSheet() {
 }
 
 
-/* ================= 实时日志（SSE 流 + 级别/关键词筛选） ================= */
+/* 实时日志（SSE 流 + 级别/关键词筛选）*/
 const LOG_LV_META = {
   info: ["INFO", "#30d158"],
   warn: ["WARN", "#ff9f0a"],
@@ -4510,7 +4510,7 @@ async function loadMarketplace() {
   }
 }
 
-/* ─── 统一任务日志弹窗（市场任务 / 框架更新共用） ─── */
+/* 统一任务日志弹窗（市场任务 / 框架更新共用）*/
 let taskLogState = null;
 
 function openTaskLogModal(taskId, title) {
@@ -5003,7 +5003,7 @@ async function updateAllSubplugins() {
   }
 }
 
-/* ─── 更新流程：单一更新按钮 → 市场更新 / 手动更新 ─── */
+/* 更新流程：单一更新按钮 → 市场更新 / 手动更新*/
 function compareVersions(a, b) {
   const pa = String(a || "").split(".").map((x) => parseInt(x, 10) || 0);
   const pb = String(b || "").split(".").map((x) => parseInt(x, 10) || 0);
@@ -5377,7 +5377,7 @@ function watchFrameworkApplyTask(taskId) {
   }, 120000);
 }
 
-/* ================================ 连接配置：适配器卡片（v1.2.0） ================================ */
+/* 连接配置：适配器卡片（v1.2.0）*/
 
 let connectionsData = [];   // /api/connections 返回的适配器快照
 let connectionsStatus = []; // 各适配器运行状态
@@ -5501,7 +5501,7 @@ async function createAdapter(type) {
   }
 }
 
-/* ---------------- 编辑弹窗（v1.2.1 重构：标签上置 / 自定义下拉 / 折叠面板） ---------------- */
+/* 编辑弹窗（v1.2.1 重构：标签上置 / 自定义下拉 / 折叠面板）*/
 
 const AE_CARET_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
 const AE_ARROW_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>';
@@ -5518,7 +5518,7 @@ function aeField(label, controlHtml, opts) {
 </div>`;
 }
 
-/* ----- 自定义下拉选择器（不使用浏览器原生 select） ----- */
+/* 自定义下拉选择器（不使用浏览器原生 select）*/
 const aeSelectRegistry = {};
 
 function aeSelectHtml(id, options, selected) {
@@ -5590,7 +5590,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeAllAeSelects();
 });
 
-/* ----- 表单行渲染 ----- */
+/* 表单行渲染*/
 
 function syncFieldRow(key, val) {
   const label = t("connections.sync_" + key);
@@ -5808,7 +5808,7 @@ function adapterNameCancel() {
   document.getElementById("ae-name-text").style.display = "";
 }
 
-/* ---------------- 密钥二次查看（眼睛按钮） ---------------- */
+/* 密钥二次查看（眼睛按钮）*/
 
 /* 双图标常驻按钮内（.ico-eye / .ico-eye-off），CSS 按 data-shown 交叉过渡。
    切换只改属性、不重建 DOM——innerHTML 瞬间替换图标会有生硬的闪变 */
@@ -5879,7 +5879,7 @@ async function toggleSecretReveal(btn, inputId, adapterId, key) {
   }
 }
 
-/* ---------------- 群绑定密钥（身份设置一键绑定群与管理员） ---------------- */
+/* 群绑定密钥（身份设置一键绑定群与管理员）*/
 
 let bindKeyTimer = null;   // 倒计时 setTimeout 句柄
 let bindKeyDeadline = 0;   // 到期时刻（Date.now() 毫秒），驱动倒计时免疫定时器漂移
@@ -5980,7 +5980,7 @@ async function copyBindKeyCommand() {
   }, 2600);
 }
 
-/* ---------------- QQ 官方机器人扫码登录 ---------------- */
+/* QQ 官方机器人扫码登录*/
 
 let qrBindTimer = null;
 
@@ -6194,7 +6194,7 @@ async function deleteAdapter(id) {
   }
 }
 
-/* ─── 聊天屏蔽（双向敏感词过滤） ─── */
+/* 聊天屏蔽（双向敏感词过滤）*/
 let chatFilterData = null;   // { config, words, wordbanks }
 let chatFilterSaving = false;
 

@@ -29,10 +29,6 @@ from endstone_lumenbridge.modules.chat_probe import ChatAbsorptionProbe
 from endstone_lumenbridge.plugin import LumenBridgePlugin
 
 
-# ----------------------------------------------------------------------
-# 探针单元测试（时间戳回溯）
-# ----------------------------------------------------------------------
-
 def test_evidence_found_when_broadcast_contains_message():
     probe = ChatAbsorptionProbe()
     probe.record_broadcast("§a[主世界] §fSteve >> hello")
@@ -116,8 +112,8 @@ def test_capacity_limit_evicts_oldest():
     assert probe.absorb_evidence("Steve", "hello") is not None
 
 
-def test_v106_compat_open_close_are_noops():
-    # v1.0.6 的 open/close 保留为空操作，外部调用不报错
+def test_compat_open_close_are_noops():
+    # open/close 保留为空操作，外部调用不报错
     probe = ChatAbsorptionProbe()
     probe.open()
     probe.record_broadcast("x")
@@ -133,9 +129,7 @@ def test_dump_debug_shape():
     assert "hello" in snap["recent"][0]["msg"]
 
 
-# ----------------------------------------------------------------------
 # 处理器集成测试（按 Endstone 真实分发顺序驱动）
-# ----------------------------------------------------------------------
 
 class _ChatSyncRecorder:
     def __init__(self):
@@ -180,10 +174,6 @@ def _fake_plugin(**overrides):
         setattr(ns, key, value)
     return ns
 
-
-# ----------------------------------------------------------------------
-# chat.forward_cancelled 策略（auto/always/never）
-# ----------------------------------------------------------------------
 
 def _make_plugin_with_mode(mode):
     return _fake_plugin(
@@ -358,9 +348,7 @@ def test_stale_broadcast_does_not_leak_across_window():
     _assert_not_forwarded(plugin)
 
 
-# ----------------------------------------------------------------------
 # 装饰器契约：优先级与注册标记
-# ----------------------------------------------------------------------
 
 def test_handler_priority_contract():
     """两个处理器必须以 MONITOR 优先级注册（只观察不修改，且晚于一切

@@ -34,10 +34,6 @@ def check(name: str, cond: bool, detail: str = "") -> None:
         raise AssertionError(f"{name} {detail}".strip())
 
 
-# ----------------------------------------------------------------------
-# Fake 环境
-# ----------------------------------------------------------------------
-
 class FakeLogger:
     def info(self, msg): print(f"    [log] {msg}")
     def warning(self, msg): print(f"    [warn] {msg}")
@@ -204,9 +200,7 @@ class FakePlugin:
         }
 
 
-# ----------------------------------------------------------------------
 # HTTP 工具
-# ----------------------------------------------------------------------
 
 # 本文件专属 WebUI 端口（M42：每文件唯一端口，避免与其他文件串用/残留占用）
 WEBUI_PORT = 18310
@@ -416,6 +410,90 @@ def test_webui_e2e():
 
         print(f"\n===== 结果: {len(PASSED)} 通过, {len(FAILED)} 失败 =====")
         # 任一 check 失败即 FAIL（check 已抛 AssertionError 到此说明全过）
+    finally:
+        if webui is not None:
+            webui.stop()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_connection_mask_and_reveal():
+    """连接密钥等长掩码 + WebUI reveal 二次查看明文。"""
+    from endstone_lumenbridge.connections import ConnectionManager
+    from endstone_lumenbridge.webui import WebUIServer
+
+    tmp = Path(tempfile.mkdtemp())
+    webui = None
+    try:
+        # ConnectionManager：默认卡片与等长掩码
+        mgr = ConnectionManager(tmp, FakeLogger())
+        check("connections: 默认仅两张卡片", len(mgr.adapters) == 2)
+        check("connections: 默认卡片为 websocket + qqofficial",
+              {a["type"] for a in mgr.adapters} == {"websocket", "qqofficial"})
+        aid = mgr.adapters[0]["id"]
+        mgr.update(aid, {"access_token": "tk_1234567890"})
+        masked = next(a for a in mgr.snapshot(mask=True) if a["id"] == aid)["access_token"]
+        check("connections: 掩码与原值等长", masked == "*" * len("tk_1234567890"))
+        check("connections: is_masked 识别掩码", ConnectionManager.is_masked(masked))
+        mgr.update(aid, {"access_token": masked})
+        check("connections: 提交掩码不覆盖原值", mgr.get(aid)["access_token"] == "tk_1234567890")
+        snap_plain = mgr.snapshot(mask=False)
+        check("connections: 明文快照可取回", any(a["access_token"] == "tk_1234567890" for a in snap_plain))
+
+        # WebUI reveal：仅放行白名单字段
+        plugin = FakePlugin(tmp)
+        plugin.connections = mgr
+        webui = WebUIServer(plugin)
+        plugin.webui = webui
+        webui.start()
+        if not _wait_port_ready():
+            raise RuntimeError(f"WebUIServer 启动超时（端口 {WEBUI_PORT} 未就绪）")
+        code, res = req("POST", "/api/auth/login", {"password": "testpass"}, token="")
+        token = res["data"]["token"]
+        code, res = req("POST", "/api/connections/reveal",
+                        {"id": aid, "key": "access_token"}, token=token)
+        check("reveal: 返回密钥明文", code == 200 and res["data"]["value"] == "tk_1234567890")
+        code, _ = req("POST", "/api/connections/reveal",
+                      {"id": aid, "key": "unknown_field"}, token=token)
+        check("reveal: 非法字段被拒绝", code == 400)
+        code, _ = req("POST", "/api/connections/reveal",
+                      {"id": "nope", "key": "access_token"}, token=token)
+        check("reveal: 未知适配器返回 404", code == 404)
+    finally:
+        if webui is not None:
+            webui.stop()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_overview_official_primary():
+    """QQ 官方适配器作 primary 时 overview 不 500：ws_type 桩函数防御性回退 -1。"""
+    from endstone_lumenbridge.onebot.qqofficial_adapter import QQOfficialAdapter
+    from endstone_lumenbridge.webui import WebUIServer
+
+    class OfficialPrimaryHub:
+        is_connected = True
+        mode_name = "QQ 官方机器人 (官方网关)"
+
+        def primary(self):
+            return QQOfficialAdapter(FakeLogger(), None)
+
+        def status(self):
+            return []
+
+    tmp = Path(tempfile.mkdtemp())
+    webui = None
+    try:
+        plugin = FakePlugin(tmp)
+        plugin.adapter = OfficialPrimaryHub()
+        webui = WebUIServer(plugin)
+        plugin.webui = webui
+        webui.start()
+        if not _wait_port_ready():
+            raise RuntimeError(f"WebUIServer 启动超时（端口 {WEBUI_PORT} 未就绪）")
+        code, res = req("POST", "/api/auth/login", {"password": "testpass"}, token="")
+        token = res["data"]["token"]
+        code, res = req("GET", "/api/overview", token=token)
+        check("overview: 官方适配器作 primary 不再 500", code == 200)
+        check("overview: mode 对桩函数回退 -1", res.get("data", {}).get("mode") == -1)
     finally:
         if webui is not None:
             webui.stop()

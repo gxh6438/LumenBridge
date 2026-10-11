@@ -84,7 +84,6 @@ from .qqofficial.utils import (
 
 websockets = import_websockets()
 
-# ---------------------------------------------------------------- 兼容别名
 # 历史版本常量 / 函数自本模块导入（tests/test_qqofficial.py 与文档引用），
 # 下划线名保持不变以兼容 monkeypatch。
 _API_DOMAIN = API_DOMAIN
@@ -212,7 +211,6 @@ class QQOfficialAdapter:
         self.translator = EventTranslator(self)
         self.sender = MessageSender(self)
 
-    # ------------------------------------------------------------ 属性视图
     @property
     def is_connected(self) -> bool:
         ws = self._ws
@@ -234,7 +232,6 @@ class QQOfficialAdapter:
         # mode_name 已含适配器名，无需再按 "{name} ({mode})" 拼接
         return self.mode_name
 
-    # ------------------------------------------------------------ 兼容委托
     # 历史内部接口（tests/test_qqofficial.py 及文档引用），转发到子模块。
     @property
     def _passive(self) -> dict[str, Any]:
@@ -298,7 +295,6 @@ class QQOfficialAdapter:
         """发送重试参数 (max, 文本间隔, 富媒体间隔)；读模块级常量便于测试 monkeypatch。"""
         return _SEND_RETRY_MAX, _SEND_RETRY_DELAY_TEXT, _SEND_RETRY_DELAY_MEDIA
 
-    # ------------------------------------------------------------ 生命周期
     def start(self) -> None:
         if self._running:
             return
@@ -498,7 +494,6 @@ class QQOfficialAdapter:
                 self.logger.warning(_t("adapter.disconnected", delay=delay, attempt=attempt))
             await asyncio.sleep(delay)
 
-    # ------------------------------------------------------------ 鉴权
     def _fetch_token_sync(self) -> tuple[str, int]:
         """同步获取 access_token（在线程池中执行）。"""
         body = json.dumps({"appId": self.app_id, "clientSecret": self.app_secret}).encode()
@@ -574,7 +569,6 @@ class QQOfficialAdapter:
                 return await asyncio.to_thread(self._api_request_sync, method, path, body, token)
             raise
 
-    # ------------------------------------------------------------ 网关会话
     async def _ws_url(self) -> str:
         data = await self._api_request("GET", "/gateway/bot")
         url = str((data or {}).get("url") or "")
@@ -719,7 +713,6 @@ class QQOfficialAdapter:
         except Exception:
             return
 
-    # ------------------------------------------------------------ READY
     def on_ready(self, data: dict[str, Any]) -> None:
         """网关 READY：记录会话 id 与机器人资料，通知上线（translator 回调）。"""
         self._session_id = str(data.get("session_id") or "")
@@ -748,14 +741,12 @@ class QQOfficialAdapter:
                 _t("qqofficial.ready", name=self._bot_user.get("nickname") or self.app_id)
             )
 
-    # ------------------------------------------------------------ 发送入口
     def send_group_msg(self, group_id: Any, message: Any) -> None:
         self.sender.enqueue("group", group_id, message)
 
     def send_private_msg(self, user_id: Any, message: Any) -> None:
         self.sender.enqueue("private", user_id, message)
 
-    # ------------------------------------------------------------ 入群审批
     def remember_group(self, group_openid: Any) -> None:
         """记录动态发现的群 openid：官方无群列表 API，广播目标从流入事件学习。"""
         key = str(group_openid or "").strip()
@@ -800,7 +791,6 @@ class QQOfficialAdapter:
                 self._join_requests.pop(key, None)
         self._join_requests[flag] = (group_openid, member_openid)
 
-    # ------------------------------------------------------------ 消息撤回
     def remember_msg_scope(self, message_id: Any, kind: str, target: str) -> None:
         """记录消息 id → (kind, target) 映射，供 delete_msg 反查群/私聊。"""
         key = str(message_id or "")
@@ -922,7 +912,6 @@ class QQOfficialAdapter:
             _approve, callback, fail_value={"ok": False, "error": "审批请求执行失败"}
         )
 
-    # ------------------------------------------------------------ 兼容接口
     def get_login_info(self, callback: Callable[[Any], None]) -> None:
         """返回机器人资料：QQ 号取配置的 bot_qq（AppID 不是 QQ 号），昵称取 READY。"""
         info = {
@@ -962,7 +951,6 @@ class QQOfficialAdapter:
         if callback:
             callback(None)
 
-    # ------------------------------------------------------------ 官方群管理 API
     def _run_official_api(
         self,
         coro_factory: Callable[[], Any],

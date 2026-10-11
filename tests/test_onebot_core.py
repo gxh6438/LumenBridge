@@ -124,6 +124,42 @@ class OneBotCoreTests(unittest.TestCase):
             {"action": "set_group_kick", "params": {"group_id": 1, "user_id": 2, "reject_add_request": True}},
         )
 
+    def test_extended_packet_builders(self) -> None:
+        """NapCat 扩展与群管理类动作包构建。"""
+        self.assertEqual(packets.group_card(1, 2, "新名片")["action"], "set_group_card")
+        self.assertFalse(packets.group_kick(1, 2)["params"]["reject_add_request"])
+        self.assertEqual(packets.group_whole_ban(1, True)["action"], "set_group_whole_ban")
+        self.assertEqual(packets.group_member_info(1, 2)["action"], "get_group_member_info")
+        self.assertEqual(packets.group_member_list(1)["action"], "get_group_member_list")
+        self.assertEqual(packets.stranger_info(2)["action"], "get_stranger_info")
+        self.assertEqual(packets.group_info(1)["action"], "get_group_info")
+        self.assertEqual(packets.group_list()["action"], "get_group_list")
+        self.assertEqual(packets.group_name(1, "新群名")["params"]["group_name"], "新群名")
+        self.assertEqual(packets.group_admin(1, 2, True)["action"], "set_group_admin")
+        self.assertEqual(packets.group_leave(1)["action"], "set_group_leave")
+        self.assertEqual(packets.friend_add_request("f1", True)["action"], "set_friend_add_request")
+        self.assertFalse(packets.group_add_request("f2", "add", False, "拒绝")["params"]["approve"])
+        self.assertEqual(packets.get_message(123)["action"], "get_msg")
+        self.assertEqual(packets.send_like(2, 10)["params"]["times"], 10)
+        self.assertEqual(packets.login_info()["action"], "get_login_info")
+        self.assertEqual(packets.version_info()["action"], "get_version_info")
+        self.assertEqual(packets.group_msg_emoji_like(5, "128077")["action"], "set_msg_emoji_like")
+        self.assertEqual(packets.group_poke(1, 2)["action"], "group_poke")
+        self.assertEqual(packets.friend_poke(2)["action"], "friend_poke")
+        self.assertEqual(packets.group_sign(1)["action"], "send_group_sign")
+        self.assertEqual(packets.essence_msg(5)["action"], "set_essence_msg")
+        self.assertEqual(packets.group_special_title(1, 2, "头衔")["params"]["special_title"], "头衔")
+        self.assertEqual(packets.upload_group_file(1, "/tmp/a.txt", "a.txt")["action"], "upload_group_file")
+        self.assertEqual(packets.group_root_files(1)["action"], "get_group_root_files")
+        self.assertEqual(packets.group_file_url(1, "fid")["action"], "get_group_file_url")
+        self.assertEqual(packets.status_info()["action"], "get_status")
+        self.assertEqual(packets.image_info("abc.image")["action"], "get_image")
+        # 通用透传
+        self.assertEqual(
+            packets.build("custom_action", {"key": "val"}, echo="e9"),
+            {"action": "custom_action", "params": {"key": "val"}, "echo": "e9"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

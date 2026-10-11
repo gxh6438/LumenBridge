@@ -1,4 +1,4 @@
-"""v1.0.8 回归：/lumen webui-host 指令（仅控制台、立即生效）、
+"""WebUI 主机与外部配置回归：/lumen webui-host 指令（仅控制台、立即生效）、
 外部手改 config.json 热重载（GET /api/config 指纹检测）、0.0.0.0 启动回显如实显示。
 """
 

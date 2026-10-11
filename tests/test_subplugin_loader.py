@@ -445,5 +445,177 @@ class MergeCommandPaletteTests(unittest.TestCase):
         self.assertEqual(context_module.merge_command_palette_into(commands), 0)
 
 
+class ZipLifecycleTests(unittest.TestCase):
+    """ZIP 安装全生命周期：版本升降级、平铺 zip、卸载。"""
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.data = Path(self.tempdir.name)
+        self.plugin = DummyPlugin(self.data)
+        self.plugin._pip_serial_lock = __import__("threading").Lock()
+        self.manager = SubPluginManager(self.plugin)
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def make_zip(self, name: str, version: str = "1.0.0", top_folder: bool = True) -> Path:
+        import io
+
+        buf = io.BytesIO()
+        prefix = f"{name}/" if top_folder else ""
+        manifest = {"name": name, "version": version, "desc": "测试插件", "load": True}
+        code = 'def on_load(lumen):\n    lumen.logger.info("hi from ' + name + '")\n'
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr(prefix + "lumen.json", json.dumps(manifest))
+            zf.writestr(prefix + "main.py", code)
+            zf.writestr(prefix + "data.txt", "some data")
+        archive = self.data / f"{name}-{version}.zip"
+        archive.write_bytes(buf.getvalue())
+        return archive
+
+    def test_full_lifecycle(self) -> None:
+        ok, message, name = self.manager.install_from_zip(self.make_zip("test_sp", "1.0.0"))
+        self.assertTrue(ok, message)
+        self.assertEqual(name, "test_sp")
+        self.assertTrue((self.manager.plugins_dir / "test_sp" / "main.py").is_file())
+
+        # 低版本覆盖应被拒绝
+        ok2, msg2, _ = self.manager.install_from_zip(self.make_zip("test_sp", "0.9.0"))
+        self.assertFalse(ok2, "低版本覆盖应被拒绝: " + msg2)
+
+        # 高版本升级
+        ok3, msg3, _ = self.manager.install_from_zip(self.make_zip("test_sp", "2.0.0"))
+        self.assertTrue(ok3, msg3)
+        manifest = json.loads((self.manager.plugins_dir / "test_sp" / "lumen.json").read_text("utf-8"))
+        self.assertEqual(manifest["version"], "2.0.0")
+
+        # 无顶层文件夹（平铺 zip）
+        ok4, msg4, name4 = self.manager.install_from_zip(self.make_zip("flat_sp", "1.0.0", top_folder=False))
+        self.assertTrue(ok4, msg4)
+        self.assertTrue((self.manager.plugins_dir / name4 / "main.py").is_file())
+
+        # 卸载
+        ok5, msg5 = self.manager.uninstall("test_sp")
+        self.assertTrue(ok5, msg5)
+        self.assertFalse((self.manager.plugins_dir / "test_sp").exists())
+        ok6, _ = self.manager.uninstall("not_exists")
+        self.assertFalse(ok6)
+
+
+class LoaderAuditTests(unittest.TestCase):
+    """加载器健壮性：同名冲突、reload_one 先校验后卸载、升级保留数据、开关即时生效。"""
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.data = Path(self.tempdir.name)
+        self.plugin = DummyPlugin(self.data)
+        self.manager = SubPluginManager(self.plugin)
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def make_zip(self, name: str, version: str, main_code: str, extra: dict | None = None) -> Path:
+        archive = self.data / f"{name}-{version}.zip"
+        manifest = {"name": name, "version": version, "load": True, "dependencies": []}
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("lumen.json", json.dumps(manifest))
+            zf.writestr("main.py", main_code)
+            for path, content in (extra or {}).items():
+                zf.writestr(path, content)
+        return archive
+
+    def install(self, name: str, version: str, main_code: str, extra: dict | None = None) -> tuple[bool, str, str]:
+        return self.manager.install_from_zip(self.make_zip(name, version, main_code, extra))
+
+    def test_name_conflict_second_folder_rejected(self) -> None:
+        # 目录 a 与 b 的清单声明同一 name：仅先加载者生效，后者拒绝
+        for folder in ("dup_a", "dup_b"):
+            d = self.manager.plugins_dir / folder
+            d.mkdir(parents=True)
+            (d / "lumen.json").write_text(
+                json.dumps({"name": "dup_plugin", "version": "1.0.0", "load": True}),
+                encoding="utf-8",
+            )
+            (d / "main.py").write_text("def on_load(lumen):\n    pass\n", encoding="utf-8")
+        self.manager.load_all()
+
+        self.assertIn("dup_plugin", self.manager.subplugins)
+        loaded = self.manager.subplugins["dup_plugin"]
+        self.assertEqual(loaded.folder.name, "dup_a")
+        self.assertTrue(loaded.loaded)
+
+    def test_reload_one_corrupt_manifest_keeps_running(self) -> None:
+        ok, _, name = self.install(
+            "corrupt_reload", "1.0.0",
+            "def on_load(lumen):\n    lumen.storage.write('state.json', {'v': 1})\n",
+        )
+        self.assertTrue(ok)
+        # 模拟清单被写坏：reload_one 必须校验失败直接返回，不得卸载运行中实例
+        (self.manager.plugins_dir / name / "lumen.json").write_text("{broken json", encoding="utf-8")
+        self.assertFalse(self.manager.reload_one(name))
+        self.assertTrue(self.manager.subplugins[name].loaded)
+
+    def test_reload_one_disabled_manifest_keeps_running(self) -> None:
+        ok, _, name = self.install(
+            "disabled_reload", "1.0.0",
+            "def on_load(lumen):\n    lumen.storage.write('state.json', {'v': 1})\n",
+        )
+        self.assertTrue(ok)
+        manifest_path = self.manager.plugins_dir / name / "lumen.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["load"] = False
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        self.assertFalse(self.manager.reload_one(name))
+        self.assertTrue(self.manager.subplugins[name].loaded)
+
+    def test_upgrade_preserves_nested_user_data(self) -> None:
+        ok, _, name = self.install(
+            "nested_data", "1.0.0",
+            "def on_load(lumen):\n"
+            "    lumen.storage.write('data/nested/state.json', {'v': 1})\n"
+            "    lumen.storage.write('config/settings.json', {'k': 'user'})\n",
+        )
+        self.assertTrue(ok)
+        dest = self.manager.plugins_dir / name
+        self.assertTrue((dest / "data" / "nested" / "state.json").is_file())
+
+        # 升级到 2.0.0：嵌套目录的用户数据必须保留
+        ok, _msg, name2 = self.install(
+            "nested_data", "2.0.0",
+            "def on_load(lumen):\n    pass\n",
+            extra={"new_file.txt": "bundle data"},
+        )
+        self.assertEqual(name2, name)
+        self.assertTrue(ok)
+        self.assertTrue((dest / "data" / "nested" / "state.json").is_file())
+        self.assertEqual(
+            json.loads((dest / "config" / "settings.json").read_text(encoding="utf-8")),
+            {"k": "user"},
+        )
+        # 新包自带文件到位
+        self.assertTrue((dest / "new_file.txt").is_file())
+
+    def test_set_enabled_takes_effect_immediately(self) -> None:
+        ok, _, name = self.install(
+            "toggle_me", "1.0.0",
+            "def on_load(lumen):\n    lumen.storage.write('state.json', {'v': 1})\n",
+        )
+        self.assertTrue(ok)
+        self.assertTrue(self.manager.subplugins[name].loaded)
+
+        # 禁用：立即卸载运行实例
+        self.assertTrue(self.manager.set_enabled(name, False))
+        self.assertFalse(self.manager.subplugins[name].loaded)
+        manifest = json.loads(
+            (self.manager.plugins_dir / name / "lumen.json").read_text(encoding="utf-8")
+        )
+        self.assertFalse(manifest["load"])
+
+        # 启用：立即尝试加载（与禁用对称）
+        self.assertTrue(self.manager.set_enabled(name, True))
+        self.assertTrue(self.manager.subplugins[name].loaded)
+
+
 if __name__ == "__main__":
     unittest.main()

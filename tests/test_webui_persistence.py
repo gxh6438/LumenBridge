@@ -1,4 +1,4 @@
-"""v1.0.7 WebUI 修复回归：总览主群含官方域 openid、语言热生效、开关单字段持久化。"""
+"""WebUI 持久化与文案回归：总览主群含官方域 openid、语言热生效、开关单字段持久化。"""
 
 from __future__ import annotations
 
@@ -94,7 +94,7 @@ class DummyPlugin:
         return None
 
 
-class V107WebUiFixTests(unittest.TestCase):
+class WebUiOverviewAndPersistenceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         # addCleanup：setUp 中途失败时 tearDown 不会执行，端口会泄漏拖垮后续用例
@@ -199,14 +199,14 @@ class V107WebUiFixTests(unittest.TestCase):
         self.assertEqual(reloaded["sync"]["max_message_length"], 512)
 
 
-class V108WebUiWordingAndFormTests(unittest.TestCase):
-    """v1.0.8 文案与表单采集回归：OneBot 措辞、适配器重建提示。"""
+class WebUiWordingAndFormTests(unittest.TestCase):
+    """文案与表单采集回归：OneBot 措辞、适配器重建提示。"""
 
     LOCALES = ROOT / "src" / "endstone_lumenbridge" / "locales"
 
     @staticmethod
     def _locale(key: str) -> dict:
-        return json.loads((V108WebUiWordingAndFormTests.LOCALES / f"{key}.json").read_text(encoding="utf-8"))
+        return json.loads((WebUiWordingAndFormTests.LOCALES / f"{key}.json").read_text(encoding="utf-8"))
 
     def test_connection_reloaded_wording_is_adapter_not_onebot(self) -> None:
         """重建提示改为"适配器连接"：QQ 官方等非 OneBot 适配器不再误报 OneBot。"""

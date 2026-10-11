@@ -296,5 +296,58 @@ class AnonymousWriteTests(unittest.TestCase):
         self.assertEqual(raw["marketplace"]["report_api_key"], "secret")
 
 
+class _LoaderDummyPlugin:
+    def __init__(self, data_folder: Path) -> None:
+        self.data_folder = data_folder
+        self.logger = SimpleNamespace(
+            info=lambda _m: None, warning=lambda _m: None,
+            error=lambda _m: None, debug=lambda _m: None,
+            exception=lambda _m: None,
+        )
+        self._tee_logger = self.logger
+        self.config_manager = None
+        self.adapter = None
+        self.env_pool = None
+        self.webui = None
+        self.regex_module = None
+        self.subplugin_manager = None
+
+    def _get_pip_manager(self):
+        return None
+
+
+class MarketplaceAtomicWriteTests(unittest.TestCase):
+    """清单检查时间更新：原子写不留 .tmp 残留。"""
+
+    def test_update_manifest_check_time_leaves_no_tmp(self) -> None:
+        from endstone_lumenbridge.marketplace import MarketplaceClient
+        from endstone_lumenbridge.subplugin.loader import SubPluginManager, SubPlugin
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            plugin = _LoaderDummyPlugin(data)
+            manager = SubPluginManager(plugin)
+            plugin.subplugin_manager = manager
+
+            folder = manager.plugins_dir / "atomic_plugin"
+            folder.mkdir(parents=True)
+            manifest = {
+                "name": "atomic_plugin", "version": "1.0.0", "load": True,
+                "_market": {"source": "test", "last_checked_at": 0},
+            }
+            (folder / "lumen.json").write_text(json.dumps(manifest), encoding="utf-8")
+            (folder / "main.py").write_text("def on_load(lumen):\n    pass\n", encoding="utf-8")
+
+            manager.subplugins["atomic_plugin"] = SubPlugin(folder, manifest)
+
+            client = MarketplaceClient(plugin)
+            client._update_manifest_check_time("atomic_plugin", 12345)
+
+            manifest_path = folder / "lumen.json"
+            self.assertFalse((folder / "lumen.json.tmp").exists())
+            data_on_disk = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(data_on_disk["_market"]["last_checked_at"], 12345)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -14,7 +14,6 @@ SRC = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(SRC))
 
 
-# 1. Endstone API 存在性
 def t_endstone_api():
     from endstone import ColorFormat  # noqa
     from endstone.command import Command, CommandSender, CommandSenderWrapper  # noqa
@@ -25,14 +24,12 @@ def t_endstone_api():
     from endstone.plugin import Plugin  # noqa
 
 
-# 2. 插件包导入
 def t_import_plugin():
     from endstone_lumenbridge.plugin import LumenBridgePlugin  # noqa
     assert LumenBridgePlugin.api_version == "0.11"
     assert "lumen" in LumenBridgePlugin.commands
 
 
-# 3. 事件总线
 def t_event_bus():
     from endstone_lumenbridge.event_bus import EventBus
     bus = EventBus()
@@ -44,7 +41,6 @@ def t_event_bus():
     assert got == [1, 10, 2], got
 
 
-# 4. 消息构建
 def t_message_builder():
     from endstone_lumenbridge.onebot.message import at, decode_cq_entities, format_message, text
     segs = format_message(["hello", at(123)])
@@ -52,7 +48,6 @@ def t_message_builder():
     assert decode_cq_entities("&#91;x&#93;&amp;") == "[x]&"
 
 
-# 5. 数据包构建
 def t_packets():
     from endstone_lumenbridge.onebot import packets
     p = packets.group_message(123, [{"type": "text", "data": {"text": "hi"}}], echo="e1")
@@ -60,7 +55,6 @@ def t_packets():
     assert packets.group_ban(1, 2, 60)["params"]["duration"] == 60
 
 
-# 6. 配置合并（v1.2.0 起 connection/sync 迁移至 connections.json，config.json 仅基础配置）
 def t_config_merge():
     from endstone_lumenbridge.config import DEFAULT_CONFIG, deep_merge
     merged, patched = deep_merge(DEFAULT_CONFIG, {"whitelist": {"enable": False}})
@@ -72,7 +66,6 @@ def t_config_merge():
     assert ConnectionManager.is_configured({"ws_type": 1, "listen_port": 0}) is False
 
 
-# 7. 正则引擎纯逻辑（变量替换 / flags / 占位符）
 def t_regex_logic():
     from endstone_lumenbridge.modules.regex_engine import compile_pattern
     from endstone_lumenbridge.modules.chat_sync import replace_placeholders
@@ -81,7 +74,6 @@ def t_regex_logic():
     assert replace_placeholders("[玩家] %s: %s", "Steve", "hi") == "[玩家] Steve: hi"
 
 
-# 8. 事件分发器（无网络，模拟包）
 def t_dispatcher():
     from endstone_lumenbridge.event_bus import EventBus
     from endstone_lumenbridge.onebot.dispatcher import EventDispatcher
@@ -108,16 +100,13 @@ def t_dispatcher():
     assert adapter.sent[0][1][0]["type"] == "reply"
 
 
-# 9. websockets 内嵌库
 def t_vendor():
     from endstone_lumenbridge.vendor import import_websockets
     ws = import_websockets()
     assert hasattr(ws, "connect") and hasattr(ws, "serve")
 
 
-# ----------------------------------------------------------------------
 # pytest 入口：每项检查一个用例，断言失败直接抛出（真实 FAIL）
-# ----------------------------------------------------------------------
 def test_endstone_api():
     t_endstone_api()
 
@@ -154,9 +143,7 @@ def test_vendor_websockets():
     t_vendor()
 
 
-# ----------------------------------------------------------------------
 # 手动运行入口（python tests/test_import.py）
-# ----------------------------------------------------------------------
 CHECKS = [
     ("Endstone API 引用", t_endstone_api),
     ("插件包导入", t_import_plugin),

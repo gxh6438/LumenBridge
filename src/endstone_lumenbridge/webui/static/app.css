@@ -1,12 +1,11 @@
-/* ==========================================================================
+/*
    LumenBridge 主面板专属样式（私有层，子插件勿依赖）
-   ==========================================================================
    仅主面板(index.html)引用，与 /lumen.css（共享层）配套加载。
    登录页 / 侧栏与底栏导航 / 仪表盘 / 市场 / 子插件列表 / 连接管理 /
    聊天屏蔽 / 代码编辑器 等页面特定样式。
    本文件中的类名与结构不构成子插件兼容性承诺，可随版本自由调整。
    依赖：/lumen.css 中的 CSS 变量与通用组件（加载顺序在前）。
-   ========================================================================== */
+*/
 #login-view {
   display: none;
   /* bg-layer 已提到 body 直属（fixed, z-index:0），登录层需显式抬到其上 */
@@ -241,7 +240,7 @@
   overflow: hidden; text-overflow: ellipsis; max-width: 90px; flex: 0 1 auto;
 }
 
-/* ---------------- 子插件配置面板（AstrBot 配置页风格） ---------------- */
+/* 子插件配置面板（AstrBot 配置页风格）*/
 /* 弹窗本体：更宽更高，头部搜索/底部操作固定，仅中间列表滚动 */
 .pc-modal { max-width: 840px; height: min(88vh, 920px); }
 @media (max-width: 640px) { .pc-modal { height: calc(100dvh - 20px); } }
@@ -516,7 +515,7 @@ mark.log-mark { background: rgba(255,159,10,.35); color: inherit; border-radius:
 #toast .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
 #toast.err .dot { background: var(--red); }
 
-/* ── 子插件弹窗（接管模式）──
+/* 子插件弹窗（接管模式）
    架构：弹窗打开时 iframe 整体转为全屏 fixed 层（其内遮罩由注入 CSS 固定为
    全屏透明、仅承载卡片与点击），主面板渲染唯一一层全屏遮罩 #subplugin-dim。
    此前“iframe 内遮罩 + iframe 外四条遮罩”的拼接方案不可修：iframe 内的
@@ -1284,7 +1283,7 @@ textarea.file-editor {
 .market-version-item .ver-changelog { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
 .market-version-item .ver-install { flex: 0 0 auto; }
 
-/* ---------------- 更新方式选择弹窗（市场更新 / 手动更新） ---------------- */
+/* 更新方式选择弹窗（市场更新 / 手动更新）*/
 .update-choice-option {
   display: flex; align-items: center; gap: 13px; width: 100%;
   padding: 14px 15px; margin-bottom: 10px;
@@ -1304,7 +1303,7 @@ textarea.file-editor {
 .update-choice-name { font-weight: 650; font-size: 14.5px; }
 .update-choice-desc { font-size: 12px; color: var(--muted); line-height: 1.45; }
 
-/* ---------------- 已是最新版弹窗（成功态大图标 + 描边动画 + 光环） ---------------- */
+/* 已是最新版弹窗（成功态大图标 + 描边动画 + 光环）*/
 .latest-version-hero { text-align: center; padding: 18px 6px 6px; position: relative; }
 .latest-version-hero::before {
   content: ""; position: absolute; inset: -26px -40px auto;
@@ -1350,7 +1349,7 @@ textarea.file-editor {
 @keyframes latest-blink { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 .latest-version-toolbar { justify-content: flex-end; }
 
-/* ---------------- 批量更新弹窗（子插件更新卡片 + 一键更新） ---------------- */
+/* 批量更新弹窗（子插件更新卡片 + 一键更新）*/
 .spu-card {
   border: 1px solid var(--divider); border-radius: 12px; padding: 11px 13px;
   margin-bottom: 10px; background: var(--input-bg);
@@ -1379,7 +1378,7 @@ textarea.file-editor {
   .spu-list { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
 }
 
-/* ---------------- 市场更新弹窗（版本选择 + 一键更新） ---------------- */
+/* 市场更新弹窗（版本选择 + 一键更新）*/
 .market-update-current { display: flex; align-items: center; gap: 7px; margin-top: 3px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
 .market-update-current .tag { font-size: 10.5px; }
 .market-ver-item {
@@ -1432,7 +1431,7 @@ textarea.file-editor {
   .market-card .market-desc { -webkit-line-clamp: 2; }
 }
 
-/* ---------------- 连接配置：适配器卡片 ---------------- */
+/* 连接配置：适配器卡片*/
 /* 页签切换按钮组（基础配置/连接配置）：毛玻璃底，避免被背景图穿透看不清 */
 .config-pane-switch {
   margin: 14px 0 4px;
@@ -1457,7 +1456,7 @@ textarea.file-editor {
 .config-pane-panel .adapter-cards { margin-top: 0; }
 .config-pane-panel .adapter-actions { margin-top: 16px; }
 
-/* ---------------- 聊天屏蔽（双向敏感词过滤） ---------------- */
+/* 聊天屏蔽（双向敏感词过滤）*/
 .cf-hero {
   display: flex; align-items: center; gap: 18px;
   padding: 22px 24px; margin-top: 14px; border-radius: var(--radius-md);
@@ -1847,7 +1846,7 @@ textarea.file-editor {
   .adapter-edit-footer { padding: 12px 0 0; }
 }
 
-/* ================= 群绑定密钥 ================= */
+/* 群绑定密钥*/
 
 /* 身份设置折叠区内的签发入口：虚线描边按钮 + 说明文字 */
 .bindkey-launch {

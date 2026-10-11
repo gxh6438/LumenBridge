@@ -1,7 +1,6 @@
-"""Bug 修复专项验证测试
+"""杂项 bug 修复专项验证测试
 
-针对 v1.0.1 修复的关键 bug 编写独立验证用例，确保修复正确且未引入新问题。
-使用真实 endstone API（非 mock），在真实环境下验证。
+针对历史修复的关键 bug 编写独立验证用例，确保修复正确且未引入新问题。
 """
 
 import os
@@ -36,9 +35,6 @@ class FakeLogger:
     def exception(self, m): pass
 
 
-# ======================================================================
-# Bug #1: regex_engine player_chat 匹配目标
-# ======================================================================
 def test_player_chat_match_target():
     print("== Bug #1: player_chat 匹配消息内容而非玩家名 ==")
     from endstone_lumenbridge.modules.regex_engine import RegexEngineModule
@@ -124,9 +120,6 @@ def test_player_chat_match_target():
     check("player_join 仍匹配玩家名", any('welcome Steve' in str(c) for c in called), f"{called}")
 
 
-# ======================================================================
-# Bug #2/#3: config 非法值不崩溃
-# ======================================================================
 def test_config_robustness():
     print("== Bug #2/#3: 非法值逐项跳过（v1.2.0 起由 connections.json 承载） ==")
     from endstone_lumenbridge.config import ConfigManager
@@ -153,9 +146,6 @@ def test_config_robustness():
         check("main_group 完全非法返回空", cm.main_groups == [], f"{cm.main_groups}")
 
 
-# ======================================================================
-# Bug #9: dispatcher raw_message None
-# ======================================================================
 def test_dispatcher_raw_message_none():
     print("== Bug #9: dispatcher raw_message=None 不崩溃 ==")
     from endstone_lumenbridge.event_bus import EventBus
@@ -178,9 +168,6 @@ def test_dispatcher_raw_message_none():
     check("raw_message 缺失不崩溃", len(received) == 1)
 
 
-# ======================================================================
-# Bug #14: ZIP 路径穿越
-# ======================================================================
 def test_zip_path_traversal():
     print("== Bug #14: ZIP 安装包路径穿越被拒绝 ==")
     from endstone_lumenbridge.subplugin.loader import SubPluginManager
@@ -208,9 +195,6 @@ def test_zip_path_traversal():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-# ======================================================================
-# Bug #24: ForwardMessageBuilder.build() 返回副本
-# ======================================================================
 def test_forward_msg_builder_copy():
     print("== Bug #24: ForwardMessageBuilder.build() 返回副本 ==")
     from endstone_lumenbridge.onebot.message import ForwardMessageBuilder
@@ -224,9 +208,7 @@ def test_forward_msg_builder_copy():
     check("build() 返回副本", len(nodes2) == original_len, f"len={len(nodes2)}")
 
 
-# ======================================================================
 # Bug #25: deep_merge 不污染 DEFAULT_CONFIG
-# ======================================================================
 def test_deep_merge_no_pollution():
     print("== Bug #25: deep_merge 不污染 DEFAULT_CONFIG ==")
     from endstone_lumenbridge.config import DEFAULT_CONFIG, deep_merge
@@ -239,9 +221,6 @@ def test_deep_merge_no_pollution():
     check("merged 可独立修改", merged['onebot']['port'] == 1111)
 
 
-# ======================================================================
-# Bug #28: auth verify_token 异常处理
-# ======================================================================
 def test_auth_robustness():
     print("== Bug #28: auth verify_token 异常处理 ==")
     from endstone_lumenbridge.webui import auth
@@ -256,9 +235,6 @@ def test_auth_robustness():
     check("错误 secret 验证失败", auth.verify_token(token, 'wrongsecret') == False)
 
 
-# ======================================================================
-# Bug #29: LoggerTee 代理
-# ======================================================================
 def test_logger_tee_proxy():
     print("== Bug #29: LoggerTee 代理 exception/critical/__getattr__ ==")
     from endstone_lumenbridge.webui.logbuffer import LogBuffer, LoggerTee
@@ -290,9 +266,7 @@ def test_logger_tee_proxy():
     check("日志写入 LogBuffer", any('exc msg' in str(e.get('msg', '')) for e in buf.cache))
 
 
-# ======================================================================
 # Bug #31: metrics RLock 可重入（不死锁）
-# ======================================================================
 def test_metrics_no_deadlock():
     print("== Bug #31: metrics start/stop 不死锁（RLock 可重入）==")
     from endstone_lumenbridge.webui.metrics import ServerMetricsCollector
@@ -311,14 +285,10 @@ def test_metrics_no_deadlock():
     check("stop 不死锁", True)
 
 
-# ======================================================================
-# Bug #10: Endstone 监听器软注销
-# ======================================================================
 def test_endstone_listener_soft_unregister():
     print("== Bug #10: Endstone 监听器软注销（_lumen_active 标志）==")
     from endstone_lumenbridge.subplugin.context import MCBridge
 
-    # 模拟 listener 对象
     class FakeListener:
         _lumen_active = True
         def on_event(self, event): pass
@@ -336,7 +306,6 @@ def test_endstone_listener_soft_unregister():
     class FakeContext:
         pass
 
-    # 构造 MCBridge 实例
     mc = MCBridge.__new__(MCBridge)
     mc._plugin = FakePlugin()
     mc._name = 'test'
@@ -345,10 +314,8 @@ def test_endstone_listener_soft_unregister():
     mc._endstone_listeners = [('PlayerJoinEvent', listener)]
     mc._endstone_dispatch = {}
 
-    # 验证 listener 初始活跃
     check("listener 初始活跃", listener._lumen_active == True)
 
-    # 构造 LumenContext 调用 _cleanup 的逻辑
     from endstone_lumenbridge.subplugin.context import LumenContext
     ctx = LumenContext.__new__(LumenContext)
     ctx._plugin = FakePlugin()
@@ -361,9 +328,6 @@ def test_endstone_listener_soft_unregister():
     check("_endstone_listeners 已清空", len(mc._endstone_listeners) == 0)
 
 
-# ======================================================================
-# Bug #1 补充: callPluginCommand 参数 strip
-# ======================================================================
 def test_call_plugin_command_strip():
     print("== Bug #26: callPluginCommand 参数 strip ==")
     from endstone_lumenbridge.modules.regex_engine import RegexEngineModule
@@ -403,7 +367,6 @@ def test_call_plugin_command_strip():
     engine._action_dedup = _OD()
     engine._action_dedup_lock = __import__('threading').Lock()
 
-    # 注册自定义动作
     def my_action(params, pack, context):
         called.append(params)
     engine.custom_actions['mycmd'] = my_action
@@ -446,6 +409,79 @@ def main():
         for f in FAILED:
             print(f"  FAILED: {f}")
         sys.exit(1)
+
+
+import unittest  # noqa: E402
+
+
+class _StubWebUI:
+    def __init__(self, running=True):
+        self._running = running
+        self.started = 0
+        self.stopped = 0
+
+    @property
+    def is_running(self):
+        return self._running
+
+    def start(self):
+        self.started += 1
+        self._running = True
+
+    def stop(self):
+        self.stopped += 1
+        self._running = False
+
+
+class ReloadWebUITests(unittest.TestCase):
+    """_reload_webui 关停 / 补启路径。"""
+
+    @classmethod
+    def setUpClass(cls):
+        from endstone_lumenbridge.plugin import LumenBridgePlugin
+
+        cls.PluginCls = LumenBridgePlugin
+
+    def _plugin(self, webui, webui_conf):
+        plugin = self.PluginCls.__new__(self.PluginCls)
+        plugin.webui = webui
+        plugin.subplugin_manager = None
+
+        class _CM:
+            data = {"webui": webui_conf}
+
+        plugin.config_manager = _CM()
+        return plugin
+
+    def test_disable_stops_running_instance(self):
+        webui = _StubWebUI(running=True)
+        plugin = self._plugin(webui, {"enable": False})
+        plugin._reload_webui()
+        self.assertEqual(webui.stopped, 1)
+        self.assertFalse(webui.is_running)
+
+    def test_reenable_restarts_stopped_instance(self):
+        """曾被 disable 停掉的实例，重新 enable 后必须显式补启。"""
+        webui = _StubWebUI(running=False)
+        plugin = self._plugin(webui, {"enable": True, "host": "127.0.0.1", "port": 8300})
+        plugin._reload_webui()
+        self.assertEqual(webui.started, 1)
+        self.assertTrue(webui.is_running)
+
+
+class GroupAllowedNotReadyTests(unittest.TestCase):
+    """connections 未就绪 → 拒绝处理（死逻辑回归）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        from endstone_lumenbridge.plugin import LumenBridgePlugin
+
+        cls.PluginCls = LumenBridgePlugin
+
+    def test_connections_none_rejects_all(self):
+        plugin = self.PluginCls.__new__(self.PluginCls)
+        plugin.connections = None
+        self.assertFalse(plugin.group_allowed({"group_id": "G1"}))
 
 
 if __name__ == "__main__":

@@ -38,7 +38,6 @@ class CredentialsStore:
         self.active_stack: dict[str, list[ActiveItem]] = {}
         self._lock = threading.Lock()
 
-    # ------------------------------------------------------------ 被动凭据池
     def cache_passive(
         self, target: str, msg_id: str, window: float, max_seq: int = PASSIVE_MAX_SEQ_GROUP
     ) -> None:
@@ -114,7 +113,6 @@ class CredentialsStore:
                         pool[i] = (entry[0], entry[1], seq + 1, entry[3], entry[4])
                     break
 
-    # ------------------------------------------------------------ 入群 event_id
     def cache_event_id(self, target: str, event_id: Any) -> None:
         """缓存机器人入群事件的 event_id：可作被动回复凭据，不消耗主动额度。"""
         token = str(event_id or "").strip()
@@ -153,7 +151,6 @@ class CredentialsStore:
             self.active_stack.pop(target, None)
         self.event_ids.pop(target, None)
 
-    # ------------------------------------------------------------ 主动补发栈
     def push_active(self, item: ActiveItem) -> bool:
         """主动消息被拒后入补发栈（每目标上限 ACTIVE_STACK_MAX，队满丢新）。"""
         target = item[1]

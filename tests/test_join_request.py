@@ -92,7 +92,6 @@ class JoinRequestTests(unittest.TestCase):
     def _dispatch(self, payload):
         asyncio.run(self.tr.on_dispatch({"t": "GROUP_JOIN_REQUEST", "d": payload}))
 
-    # ------------------------------------------------ 事件翻译
 
     def test_self_apply_with_verify_message(self):
         """主动申请 + 验证消息：完整字段翻译。"""
@@ -164,7 +163,6 @@ class JoinRequestTests(unittest.TestCase):
         self._dispatch({"group_openid": "G", "member_openid": "M"})  # 缺 flag
         self.assertEqual(len(self.ad.bus.packs), 0)
 
-    # ------------------------------------------------ 审批回传
 
     def _start_loop(self):
         loop = asyncio.new_event_loop()
@@ -247,7 +245,6 @@ class JoinRequestTests(unittest.TestCase):
         self.assertTrue(any(lv == "warn" for lv, _ in self.ad.logger.lines))
         self.assertEqual(len(self.ad.api_calls), 0)
 
-    # ------------------------------------------------ 派发事件名
 
     def test_dispatcher_event_name(self):
         """事件包可经 EventBus 以 request.group 派发（dispatcher 分层规则）。"""

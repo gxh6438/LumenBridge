@@ -55,8 +55,7 @@ from .subplugin.context import (
 )
 from .webui import LogBuffer, LoggerTee, WebUIServer
 
-# 启动横幅：figlet standard 字体，前 33 列 "Lumen" 与后 31 列 "Bridge" 双色拼接
-#（由 pyfiglet.figlet_format 生成后逐列拼接，各行为等宽 64 列；改动请重新生成勿手改）
+# 由 pyfiglet 生成的等宽 64 列横幅，勿手改
 _BANNER_LINES: tuple[str, ...] = (
     " _                                ____       _     _            ",
     "| |   _   _ _ __ ___   ___ _ __  | __ ) _ __(_) __| | __ _  ___ ",
@@ -67,13 +66,10 @@ _BANNER_LINES: tuple[str, ...] = (
 )
 _BANNER_SPLIT = 33
 
-# reload 意图窗口（秒）：命令事件 / 框架更新标记后，on_disable 在此窗口内
-# 视为 reload 而非真实停服，跳过关服误播报。窗口取宽（120s）以覆盖慢加载，
-# 窗口内真实停服仅漏播一条提示，影响远小于每次 reload 的误播。
+# reload 意图窗口：窗口内 on_disable 视为 reload 而非真实停服，跳过关服播报
 _RELOAD_INTENT_WINDOW = 120.0
 
-# server.start_time 持久化文件名（存于插件数据目录）：
-# 同一进程内 reload 后 start_time 不变，据此区分"新进程开服"与"reload 重启"。
+# 持久化 start_time：reload 前后不变，用于区分新进程开服与同进程 reload
 _SERVER_START_TIME_FILE = ".server_start_time"
 
 
@@ -125,29 +121,21 @@ class LumenBridgePlugin(Plugin):
         self._bot_profile_lock = threading.Lock()
         self._pip_manager_lock = threading.Lock()
         self._pip_manager: Any = None
-        # pip/uv 非线程安全：所有安装/卸载路径（WebUI、marketplace、/lumen pip）共用此串行锁
+        # pip/uv 非线程安全，所有安装/卸载路径共用此串行锁
         self._pip_serial_lock = threading.Lock()
-        # 机器人资料（多账号）：adapter_id → 资料快照
         self._bot_profiles: dict[str, dict[str, Any]] = {}
         self._language: str = DEFAULT_LANGUAGE
-        # 服务器主线程 ident：主线程上 run_on_main+等待须直接调用，避免自死锁
+        # 主线程上「调度+阻塞等待」会自死锁，须直接调用
         self._main_thread_id: int = threading.get_ident()
-        # reload 意图时间戳：玩家/控制台执行 reload 命令或框架更新触发
-        # server.reload() 前记录；on_disable 据此跳过关服误播报
         self._reload_requested_at: float = 0.0
-        # 周期性市场更新检查线程的停止信号（on_disable 置位，热重载/停服时退出循环）
         self._market_check_stop = threading.Event()
-        # 市场检查线程引用：幂等补启用（reload 时不叠加重复线程）
         self._market_thread: threading.Thread | None = None
-        # 聊天吸收探针：回溯关联广播与原生聊天事件，识别美化插件取消后重发（见 chat_probe.py）
+        # 聊天吸收探针：识别美化插件取消聊天后重发（见 chat_probe.py）
         self._chat_probe = ChatAbsorptionProbe(window_ms=1000)
 
     @property
     def _chat_debug(self) -> bool:
-        """聊天事件链路诊断开关（惰性求值，事件处理器内访问）。
-
-        由配置 ``debug: true`` 控制，关闭时不输出 [chatdbg] 日志。
-        """
+        """聊天链路诊断开关（debug: true 时输出 [chatdbg] 日志）。"""
         try:
             cm = getattr(self, "config_manager", None)
             return bool(cm.data.get("debug", False)) if cm else False
@@ -160,11 +148,7 @@ class LumenBridgePlugin(Plugin):
         return get_i18n()
 
     def _cmd_log(self) -> Any:
-        """命令处理路径安全取日志器。
-
-        后台线程须用 tee logger（replxx 线程安全，见 logbuffer.py）；实例
-        可能缺 _tee_logger/logger 属性（测试替身），逐级回退到模块级 logger。
-        """
+        """后台线程须用 tee logger（replxx 非主线程写入会崩溃服务端）。"""
         return (
             getattr(self, "_tee_logger", None)
             or getattr(self, "logger", None)
@@ -207,7 +191,6 @@ class LumenBridgePlugin(Plugin):
                 pass
 
     def on_load(self) -> None:
-        # on_load 阶段 i18n 尚未初始化，先用默认语言保证配置加载失败时也能显示日志
         get_i18n().set_language(DEFAULT_LANGUAGE)
         self._print_banner()
         self.logger.info(
@@ -216,11 +199,10 @@ class LumenBridgePlugin(Plugin):
 
     def on_enable(self) -> None:
         try:
-            # on_enable 必然在服务器主线程执行，刷新主线程 ident 兜底
             self._main_thread_id = threading.get_ident()
-            # 本地图片白名单：image() 仅允许读插件数据目录，防任意路径外发服务器文件
+            # 本地图片仅允许读插件数据目录，防任意路径外发服务器文件
             set_local_image_roots([Path(self.data_folder)])
-            # 日志三通：后台线程日志调度回主线程输出，避免与 Windows 控制台 replxx 线程竞争崩溃
+            # 日志三通：后台线程日志调度回主线程，避免与 Windows replxx 竞争崩溃
             self._raw_logger = self.logger
             self._tee_logger = LoggerTee(
                 self.logger,
@@ -234,7 +216,6 @@ class LumenBridgePlugin(Plugin):
 
             self.bus = EventBus(self._tee_logger)
 
-            # 适配器卡片独立存于 connections.json，首次生成时自动迁移旧 config.json
             self.connections = ConnectionManager(
                 self.data_folder,
                 self._tee_logger,
@@ -261,12 +242,11 @@ class LumenBridgePlugin(Plugin):
             self.register_events(self)
 
             self.env_pool = EnvPool(self)
-            # 注入到分发器，使子插件 env.get("main_group") 能感知当前事件来源群
             self.dispatcher.env_pool = self.env_pool
             self.subplugin_manager = SubPluginManager(self)
             self.subplugin_manager.load_all()
 
-            # 插件市场：网络检查绝不在游戏主线程执行，也不未经管理员确认自动安装
+            # 市场网络检查绝不在游戏主线程执行，也不自动安装
             self.marketplace = MarketplaceClient(self)
             market_cfg = self.config_manager.data.get("marketplace", {})
             updates_cfg = self.config_manager.data.get("updates", {})
@@ -278,7 +258,6 @@ class LumenBridgePlugin(Plugin):
             webui_cfg = self.config_manager.data.get("webui", {})
             if isinstance(webui_cfg, dict) and webui_cfg.get("enable", True):
                 self.webui = WebUIServer(self)
-                # 子插件加载早于 webui 创建，就绪后补注册其暂存的 config/page/api
                 with self.subplugin_manager._lock:
                     pending = [sp for sp in self.subplugin_manager.subplugins.values() if sp.loaded and sp.context]
                 for sp in pending:
@@ -330,11 +309,9 @@ class LumenBridgePlugin(Plugin):
         )
 
     def on_disable(self) -> None:
-        # 先停周期性更新检查线程，避免清理期间仍在触网/写暂存文件
         self._market_check_stop.set()
-        # 每个清理步骤独立 try/except，避免单步异常阻断后续清理导致资源泄漏
+        # 每步独立 try/except，避免单步异常阻断后续清理导致资源泄漏
         log = self._tee_logger or self.logger
-        # reload 周期内禁用（全服 /reload 或框架更新）不是真实停服，跳过关服播报
         reloading = self._is_reload_pending()
         for cleanup in (
             lambda: self.webui.stop() if self.webui else None,
@@ -347,10 +324,9 @@ class LumenBridgePlugin(Plugin):
                 cleanup()
             except Exception as e:
                 log.error(_t("plugin.stop_exception", error=e))
-        # 与 _on_bot_online 的 check-then-set 同锁原子化，防止停用中 bot 上线重置 _started
+        # 与 _on_bot_online 的 check-then-set 原子化，防停用中 bot 上线重置 _started
         with self._bot_profile_lock:
             self._started = False
-        # 清理 lambda 全部执行完毕后再统一置空引用，避免停用后被误用
         self.webui = None
         self.subplugin_manager = None
         self.chat_sync_module = None
@@ -362,14 +338,12 @@ class LumenBridgePlugin(Plugin):
         self.whitelist_module = None
         self.regex_module = None
         self.chat_filter = None
-        # 群绑定密钥随实例销毁：密钥只存内存，停用即全部失效
         self.group_bind_module = None
         self.admin_command_module = None
         self.marketplace = None
-        # 失效 pip manager 缓存：禁用→启用复用同一实例时会持有旧 config_manager.data
+        # 失效 pip manager 缓存，避免复用旧 config_manager.data
         with self._pip_manager_lock:
             self._pip_manager = None
-        # 补齐与 on_enable 的对称清理（含 connections 内的协议端凭据）
         self.config_manager = None
         self.connections = None
         with self._bot_profile_lock:
@@ -436,7 +410,6 @@ class LumenBridgePlugin(Plugin):
             if not info.get("available"):
                 return
             version = str((info.get("latest") or {}).get("version") or "?")
-            # 自动下载暂存（下载/校验/原子替换/旧版备份），不触发重载
             try:
                 client.stage_framework_update(log=lambda msg: log.info(f"[Update] {msg}"))
                 log.info(
@@ -468,10 +441,9 @@ class LumenBridgePlugin(Plugin):
         """按 connections.json 重建各适配器的资料基线（未连接也显示卡片）。"""
         if not self.connections:
             return
-        # 持锁快照，避免与 WebUI 并发 CRUD 的列表变更冲突
+        # 持锁快照，避免与 WebUI 并发 CRUD 冲突
         adapters_view = self.connections.adapters_view()
-        # 连接状态取 hub 实时值（不继承上一轮快照，避免断线后仍显示已连接）；
-        # hub.get 可能触及其内部锁，须在 _bot_profile_lock 外先收集完毕
+        # hub.get 触及内部锁，须在 _bot_profile_lock 外先收集
         live_states: dict[str, bool] = {}
         if self.hub:
             for cfg in adapters_view:
@@ -531,7 +503,6 @@ class LumenBridgePlugin(Plugin):
                 "nickname": nickname or str(prev.get("nickname") or ""),
                 "avatar_url": self._qq_avatar_url(qq),
                 "app_id": str(data.get("app_id") or prev.get("app_id") or ""),
-                # 沿用实时连接状态：回调到达瞬间断线时不会被硬编码 True 覆盖
                 "connected": bool(getattr(adapter, "is_connected", False)),
                 "source": "onebot",
             }
@@ -577,25 +548,23 @@ class LumenBridgePlugin(Plugin):
             return
         if self.webui is None:
             self.webui = WebUIServer(self)
-            # 补注册子插件在 on_load 中暂存的 config/page/api（与 on_enable 同序）
             if self.subplugin_manager is not None:
-                # 持锁快照：安装/卸载线程会并发增删该 dict，裸迭代会 RuntimeError
+                # 持锁快照：安装/卸载线程并发增删该 dict，裸迭代会 RuntimeError
                 with self.subplugin_manager._lock:
                     pending = [sp for sp in self.subplugin_manager.subplugins.values() if sp.loaded and sp.context]
                 for sp in pending:
                     sp.context.web._flush_pending()
             self.webui.start()
             return
-        # 曾被停掉的实例须显式 start（refresh_config 不重启监听；stop 已置空 httpd 可复用）
+        # 曾停掉的实例须显式 start（refresh_config 不重启监听）
         if not self.webui.is_running:
             self.webui.start()
             return
         self.webui.refresh_config()
 
     def _on_bot_online(self, adapter: Any = None) -> None:
-        # 此回调在 WS 线程触发，必须用线程安全的 tee logger
+        # WS 线程回调，必须用线程安全的 tee logger
         name = str(getattr(adapter, "display_name", "") or "")
-        # 运行提示类日志：适配器开启静默开关时不打印（READY/RESUMED 每次重连触发，防刷屏）
         if not getattr(adapter, "suppress_connection_log", False):
             (self._tee_logger or self.logger).info(_t("plugin.bot_connected", name=name))
         if adapter is not None:
@@ -607,16 +576,14 @@ class LumenBridgePlugin(Plugin):
                 online_adapter.get_login_info(
                     lambda data, a=online_adapter: self._update_bot_profile(a, data)
                 )
-        # check-then-set 用 _bot_profile_lock 原子化；网络调用一律留在锁外
+        # check-then-set 原子化；网络调用留在锁外
         with self._bot_profile_lock:
             if self._started:
                 return
             self._started = True
-        # 同一进程内 reload（start_time 未变）不是真实开服，跳过开服播报
+        # 同进程 reload 不是真实开服，跳过开服播报
         if self.chat_sync_module and self._is_new_server_process():
             self.chat_sync_module.on_server_start()
-
-    # ------------------------------------------------- reload / 停服播报判定
 
     def note_reload_intent(self) -> None:
         """标记"全服 reload 即将发生"（/reload 命令或框架更新）。
@@ -647,7 +614,7 @@ class LumenBridgePlugin(Plugin):
                 saved = path.read_text(encoding="utf-8").strip()
             current_str = str(getattr(current, "isoformat", lambda: current)())
             if saved and saved == current_str:
-                return False  # 同一进程内的 reload 重启
+                return False
             path.write_text(current_str, encoding="utf-8")
             return True
         except Exception:
@@ -745,18 +712,16 @@ class LumenBridgePlugin(Plugin):
         key = str(gid)
         connections = self.connections
         if connections is None:
-            # 连接管理器未就绪（加载中/已卸载）时不处理任何群消息
             return False
-        # group_key_set 为缓存 frozenset（热路径 O(1)）；getattr 兼容测试桩
+        # getattr 兼容测试桩
         key_set = getattr(connections, "group_key_set", None)
         configured = key_set() if callable(key_set) else frozenset(connections.all_group_keys())
         if not configured:
-            # 没有任何适配器填写群号 → 默认所有群生效
             return True
         if key in configured:
             return True
         adapter_id = str(pack.get("_lumen_adapter_id", "") or "")
-        # get_view 免深拷贝（该回退路径每条消息触发一次）；getattr 兼容只有 get() 的桩
+        # getattr 兼容只有 get() 的桩
         if adapter_id:
             view = getattr(connections, "get_view", None)
             cfg = view(adapter_id) if callable(view) else connections.get(adapter_id)
@@ -779,9 +744,8 @@ class LumenBridgePlugin(Plugin):
 
     @event_handler(priority=EventPriority.MONITOR)
     def on_player_chat(self, event: PlayerChatEvent) -> None:
-        # 三态判定（见 modules/chat_probe.py）：已取消但窗口内有匹配广播 =
-        # 美化插件接手重发（玩家已看到），照常转发；已取消且无匹配 = 被管理
-        # 插件抑制，不转发。chat.forward_cancelled=always/never 可覆盖。
+        # 三态判定（见 modules/chat_probe.py）：已取消但有匹配广播=美化插件重发，照常转发；
+        # 已取消且无匹配=被抑制，不转发。chat.forward_cancelled 可覆盖。
         evidence = self._chat_probe.absorb_evidence(event.player.name, event.message)
         mode = self._forward_cancelled_mode()
         if self._chat_debug:
@@ -808,10 +772,7 @@ class LumenBridgePlugin(Plugin):
 
     @event_handler(priority=EventPriority.MONITOR)
     def on_broadcast_message(self, event: BroadcastMessageEvent) -> None:
-        """无条件记录广播（MONITOR：只观察不修改），供聊天吸收探针回溯匹配。
-
-        被取消的广播未真正送达玩家，不构成“聊天已展示”的证据，不计入。
-        """
+        """记录广播供吸收探针匹配；被取消的广播未送达玩家，不计入。"""
         if event.is_cancelled:
             return
         if self._chat_debug:
@@ -820,7 +781,6 @@ class LumenBridgePlugin(Plugin):
 
     @event_handler(priority=EventPriority.MONITOR)
     def on_player_join(self, event: PlayerJoinEvent) -> None:
-        # join/quit 事件部分版本无 is_cancelled 属性，getattr 缺省 False 不受影响
         if getattr(event, "is_cancelled", False):
             return
         name = event.player.name
@@ -870,7 +830,6 @@ class LumenBridgePlugin(Plugin):
                 return translated
         except Exception:
             pass
-        # 兼容回退：手动用参数替换 %s 占位符
         try:
             text = getattr(msg, "text", "") or ""
             params = [str(p) for p in (getattr(msg, "params", None) or [])]
@@ -899,14 +858,12 @@ class LumenBridgePlugin(Plugin):
 
     def on_command(self, sender: CommandSender, command: Command, args: list[str]) -> bool:
         if command.name != "lumen":
-            # 子插件命令经启动面板声明、由 LumenBridge 持有，此处分发给注册 handler
             entry = getattr(self, "_lumen_sub_commands", {}).get(command.name)
             if entry is None:
                 return False
             handler = entry.get("handler")
             try:
-                # 贪心 usage 使整行剩余内容作为单字符串到达，而子插件 handler
-                # 约定 args 为空白分隔 token 列表，此处统一展开
+                # 贪心 usage 使剩余内容作为单字符串到达，统一展开为 token 列表
                 tokens = [tok for arg in args for tok in str(arg).split()]
                 return bool(handler(sender, tokens)) if callable(handler) else False
             except Exception as e:  # noqa: BLE001
@@ -921,17 +878,15 @@ class LumenBridgePlugin(Plugin):
             sender.send_message(f"{ColorFormat.RED}{_t('plugin.command.unknown_action', action=action)}{ColorFormat.RESET}")
             return True
 
-        # 密码重置仅限控制台（硬门先于 allow_in_game/OP 检查）：游戏内 OP 是
-        # 独立认证域，被盗 OP 不得借此接管可安装子插件（任意代码执行）的 WebUI
+        # 密码重置仅限控制台：被盗 OP 不得借此接管 WebUI（可安装子插件=任意代码执行）
         if action == "password":
             return self._handle_password_command(sender, args[1:] if len(args) > 1 else [])
 
-        # 监听地址切换同样仅限控制台：0.0.0.0 会把管理面板暴露到局域网/公网，
-        # 属于服务器运维决策，不应让游戏内 OP（独立认证域）代替控制台操作
+        # 监听地址切换仅限控制台：0.0.0.0 会把面板暴露到公网，属运维决策
         if action == "webui-host":
             return self._handle_webui_host_command(sender, args[1:] if len(args) > 1 else [])
 
-        # config_manager 为 None 时默认拒绝（安全降级），避免配置加载失败后权限体系失效
+        # config_manager 为 None 时默认拒绝（安全降级）
         if self.config_manager:
             allowed, reason_key = self.config_manager.check_command_permission(sender, action)
             if not allowed:
@@ -965,7 +920,7 @@ class LumenBridgePlugin(Plugin):
             rules = len(self.regex_module.rules) if self.regex_module else 0
             bindings = len(self.whitelist_module.snapshot()) if self.whitelist_module else 0
             if self.subplugin_manager:
-                # 持锁快照：WebUI 安装/卸载线程会并发增删 subplugins dict
+                # 持锁快照：WebUI 安装/卸载线程并发增删 subplugins dict
                 with self.subplugin_manager._lock:
                     sub_count = sum(1 for sp in self.subplugin_manager.subplugins.values() if sp.loaded)
                     sub_total = len(self.subplugin_manager.subplugins)
@@ -989,15 +944,13 @@ class LumenBridgePlugin(Plugin):
             try:
                 self.config_manager.load()
                 self._init_i18n()
-                # 连接配置同样热重载：手动编辑 connections.json 后 /lumen reload 也能生效
                 self.reload_onebot_connection()
                 self._reload_webui()
-                # 失效 pip manager 缓存使新 pip 配置生效；加锁避免与 _get_pip_manager 双检锁并发竞态
+                # 失效 pip 缓存；加锁避免与 _get_pip_manager 双检锁竞态
                 with self._pip_manager_lock:
                     self._pip_manager = None
                 count = self.regex_module.reload_rules() if self.regex_module else 0
                 sub_count = self.subplugin_manager.reload_all() if self.subplugin_manager else 0
-                # reload 后按最新配置补启检查线程（线程内按 enable 实时判断，幂等）
                 if self.marketplace is not None:
                     market_cfg = self.config_manager.data.get("marketplace", {})
                     updates_cfg = self.config_manager.data.get("updates", {})
@@ -1027,7 +980,6 @@ class LumenBridgePlugin(Plugin):
                 return True
             if self.adapter and self.adapter.is_connected:
                 text = args[1]
-                # 全适配器群标识并集（含 openid），与 group_allowed 口径一致，hub 按群路由
                 groups = (
                     self.connections.all_group_keys()
                     if self.connections
@@ -1079,7 +1031,6 @@ class LumenBridgePlugin(Plugin):
             return True
 
         webui = self.webui
-        # 贪心参数原样取首参（保留内部空格）；纯空白视同无效，与"留空清除"区分
         raw = str(args[0]) if args else ""
         pw = raw.strip()
         if raw and not pw:
@@ -1087,7 +1038,6 @@ class LumenBridgePlugin(Plugin):
             return True
 
         if webui is None:
-            # WebUI 未启用：只写配置（新密码哈希落盘 / 随机模式哨兵）
             try:
                 if pw:
                     from .webui.auth import hash_password
@@ -1101,7 +1051,7 @@ class LumenBridgePlugin(Plugin):
 
         if not pw:
             new_pw = webui.clear_webui_password()
-            # 随机密码只走控制台 stdout 不经 logger，避免被 WebUI 日志/SSE 回看
+            # 随机密码只走 stdout，避免被 WebUI 日志/SSE 回看
             print(f"[WebUI] {_t('plugin.random_password', password=new_pw)}", flush=True)
             sender.send_message(f"{ColorFormat.GREEN}{_t('plugin.command.password_cleared')}{ColorFormat.RESET}")
             return True
@@ -1149,7 +1099,6 @@ class LumenBridgePlugin(Plugin):
         elif lowered == "public":
             host = "0.0.0.0"
         else:
-            # 具体 IP：ipaddress 严格校验（IPv4/IPv6 均可），防笔误写入无效地址
             import ipaddress
 
             try:
@@ -1174,8 +1123,6 @@ class LumenBridgePlugin(Plugin):
             sender.send_message(f"{ColorFormat.GREEN}{_t('plugin.command.webui_host_staged', host=host)}{ColorFormat.RESET}")
             return True
 
-        # 立即生效：refresh_config 检测 host 变化后重启监听 socket
-        #（未运行的实例仅更新属性，下次 start 使用新地址）
         try:
             webui.refresh_config()
         except Exception as e:  # noqa: BLE001
@@ -1210,7 +1157,6 @@ class LumenBridgePlugin(Plugin):
                 sender.send_message(f"{ColorFormat.RED}{_t('pip.cmd_install_usage')}{ColorFormat.RESET}")
                 return True
             target = tokens[1]
-            # 先尝试当作子插件名取其声明的依赖，否则当作包名
             packages: list[str] = []
             if self.subplugin_manager:
                 with self.subplugin_manager._lock:
@@ -1222,14 +1168,13 @@ class LumenBridgePlugin(Plugin):
 
             sender.send_message(f"{ColorFormat.GOLD}{_t('pip.cmd_installing', packages=' '.join(packages))}{ColorFormat.RESET}")
 
-            # 异步安装避免阻塞；后台线程必须用 tee logger——原始 logger 经
-            # replxx 写控制台，非主线程调用会竞争崩溃服务端（见 logbuffer.py）
+            # 后台线程必须用 tee logger（replxx 非主线程写入会崩溃服务端）
             _log = self._cmd_log()
 
             def _async_install() -> None:
                 log_lines: list[str] = []
                 try:
-                    # 持 _pip_serial_lock：与 WebUI 安装/卸载、marketplace 依赖安装互斥，避免并发写损坏元数据
+                    # 与 WebUI/marketplace 安装路径互斥，防并发写损坏元数据
                     with self._pip_serial_lock:
                         success, msg = mgr.install(packages, on_log=lambda line: log_lines.append(line))
                 except Exception as e:  # noqa: BLE001
@@ -1242,7 +1187,7 @@ class LumenBridgePlugin(Plugin):
                             sender.send_message(line)
                         color = ColorFormat.GREEN if success else ColorFormat.RED
                         sender.send_message(f"{color}{msg}{ColorFormat.RESET}")
-                        # 子插件依赖安装成功则自动 reload；reload_one 调用 Endstone API 必须在主线程执行
+                        # reload_one 须在主线程执行
                         if success and self.subplugin_manager and target:
                             with self.subplugin_manager._lock:
                                 sp_exists = target in self.subplugin_manager.subplugins
@@ -1252,13 +1197,11 @@ class LumenBridgePlugin(Plugin):
                                 rcolor = ColorFormat.GREEN if ok else ColorFormat.RED
                                 sender.send_message(f"{rcolor}{reload_msg}{ColorFormat.RESET}")
                     except Exception:  # noqa: BLE001
-                        # run_on_main 只调度不执行，_send_result 内部异常须自捕获
                         _log.exception("pip install result send failed")
 
                 try:
                     self.run_on_main(_send_result)
                 except Exception:  # noqa: BLE001
-                    # 插件已停用、调度器不可用时线程不得静默死亡，留日志供排查
                     _log.exception("pip install result dispatch failed")
 
             threading.Thread(target=_async_install, name="LumenBridge-pip-install", daemon=True).start()
@@ -1270,12 +1213,11 @@ class LumenBridgePlugin(Plugin):
                 return True
             package = tokens[1]
 
-            # 同步卸载会阻塞命令线程，与 install 一致移入后台线程执行
             _log = self._cmd_log()
 
             def _async_uninstall() -> None:
                 try:
-                    # 持 _pip_serial_lock：与 install 路径互斥，避免并发卸载/安装损坏环境
+                    # 与 install 路径互斥，防并发损坏环境
                     with self._pip_serial_lock:
                         success, msg = mgr.uninstall(package)
                 except Exception as e:  # noqa: BLE001
@@ -1298,7 +1240,6 @@ class LumenBridgePlugin(Plugin):
             return True
 
         if sub == "list":
-            # pip list 为同步子进程调用（冷启动 1-3s），移入后台线程避免阻塞
             _log = self._cmd_log()
 
             def _async_list() -> None:
@@ -1342,7 +1283,6 @@ class LumenBridgePlugin(Plugin):
             sender.send_message(f"{ColorFormat.RED}{_t('plugin.command.update_usage')}{ColorFormat.RESET}")
             return True
 
-        # /lumen update framework [-y]：框架本体更新（手动确认，热重载重载全服插件）
         if tokens[0] in ("framework", "框架"):
             return self._handle_framework_update_command(sender, tokens[1:])
 
@@ -1372,7 +1312,6 @@ class LumenBridgePlugin(Plugin):
             f"{ColorFormat.GOLD}{_t('plugin.command.update_starting_all' if update_all else 'plugin.command.update_starting', name=target)}{ColorFormat.RESET}"
         )
 
-        # 后台线程必须用 tee logger（replxx 线程安全，见 logbuffer.py）
         _thread_log = self._cmd_log()
 
         def _dispatch(color: str, text: str) -> None:
@@ -1383,7 +1322,6 @@ class LumenBridgePlugin(Plugin):
 
         def _run() -> None:
             def _log(msg: str) -> None:
-                # 市场日志同步抄一份到控制台，方便无 WebUI 时排查
                 _thread_log.info(f"[Market] {msg}")
 
             try:
@@ -1426,10 +1364,7 @@ class LumenBridgePlugin(Plugin):
         return True
 
     def _handle_framework_update_command(self, sender: CommandSender, args: list[str]) -> bool:
-        """处理 /lumen update framework [-y]：框架本体更新（手动确认模式）。
-
-        两步确认：无 -y 只检查并下载校验暂存（不生效）；带 -y 且有就绪暂存
-        时在命令上下文内联热重载（Server.reload() 会重载全服插件，故须确认）。
+        """处理 /lumen update framework [-y]：两步确认，带 -y 且有暂存时热重载。
 
         ⚠ 热重载不能经 run_on_main 任务执行（reload 清理调度器任务，任务内
         调用会悬垂心跳迭代队列 → SIGSEGV，endstone 0.11.10 scheduler.cpp:255），
@@ -1452,7 +1387,6 @@ class LumenBridgePlugin(Plugin):
         if confirm:
             receipt = client.staged_framework_update()
             if receipt is not None:
-                # 已有就绪暂存：命令上下文内联热重载（主线程、调度器心跳之外）
                 version = str(receipt.get("to_version") or "?")
                 sender.send_message(
                     f"{ColorFormat.GOLD}{_t('plugin.command.framework_reload_start', version=version)}{ColorFormat.RESET}"
@@ -1483,7 +1417,6 @@ class LumenBridgePlugin(Plugin):
                         _t("plugin.command.framework_apply_failed", error=str(result.get("error") or "?")),
                     )
                 return True
-            # 无就绪暂存：落入下方检查+暂存流程（完成后提示再次 -y 触发热重载）
 
         sender.send_message(f"{ColorFormat.GOLD}{_t('plugin.command.framework_checking')}{ColorFormat.RESET}")
 
@@ -1519,12 +1452,7 @@ class LumenBridgePlugin(Plugin):
 
 
 def _merge_subplugin_command_palette() -> None:
-    """服务器启动时把子插件命令面板并入类级 commands（模块导入期执行）。
-
-    endstone 加载器在导入后立即快照 ``cls.__dict__['commands']`` 并冻结
-    BDS 命令表，合并必须发生在模块导入期——放 __init__/on_load 已晚。
-    面板损坏时静默跳过，不阻断加载。
-    """
+    """合并须在模块导入期：endstone 加载器导入后立即快照并冻结命令表。"""
     try:
         merge_command_palette_into(LumenBridgePlugin.commands, allowed_permissions=set(LumenBridgePlugin.permissions))
     except Exception:

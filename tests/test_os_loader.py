@@ -126,14 +126,12 @@ def _run():
         plugin = FakePlugin(data_dir)
         mgr = SubPluginManager(plugin)
 
-        # 1. 目录发现加载
         shutil.copytree(src_plugin, plugins_dir / "os")
         mgr.load_all()
         loaded = mgr.subplugins.get("os")
         check("加载器发现并加载 os", loaded is not None and getattr(loaded, "loaded", False),
               str(getattr(loaded, "error", "")) if loaded else "未发现")
 
-        # 2. 群消息触发（走真实事件总线 + 真实 LumenContext）
         replies = []
         plugin.bus.emit(
             "message.group.normal",
@@ -145,11 +143,9 @@ def _run():
             ok = "游戏版本：1.21.100" in replies[0] and "平均TPS: 20.00" in replies[0]
             check("回复内容含版本与TPS", ok, replies[0][:100])
 
-        # 3. 热重载
         mgr.reload_all()
         check("热重载正常", mgr.subplugins.get("os") is not None and mgr.subplugins["os"].loaded)
 
-        # 4. ZIP 安装（模拟网页安装路径）
         zpath = data_dir / "os.zip"
         with zipfile.ZipFile(zpath, "w") as z:
             for f in src_plugin.rglob("*"):

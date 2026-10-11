@@ -34,9 +34,6 @@ from endstone_lumenbridge.subplugin.requires import (
 )
 
 
-# ----------------------------------------------------------------------
-# requires.py：纯解析与比较
-# ----------------------------------------------------------------------
 class ParseRequirementTests(unittest.TestCase):
     def test_name_only_requires_existence(self) -> None:
         req = parse_requirement("economy")
@@ -172,9 +169,7 @@ class CheckEndstoneRequirementsTests(unittest.TestCase):
         self.assertEqual(check_endstone_requirements([req], {"economy": ""}), [])
 
 
-# ----------------------------------------------------------------------
 # loader 集成：安装 / 加载 / 拓扑 / 反向依赖
-# ----------------------------------------------------------------------
 class DummyLogger:
     def info(self, _message: object) -> None:
         pass
@@ -214,8 +209,9 @@ class DummyPlugin:
         plugins = self.endstone_plugins
         if plugins is None:
             raise AttributeError("no server")
+        # 模拟真实 Endstone PluginManager：插件列表是 plugins 属性（无 get_plugins()）
         return SimpleNamespace(
-            plugin_manager=SimpleNamespace(get_plugins=lambda: plugins)
+            plugin_manager=SimpleNamespace(plugins=plugins)
         )
 
     def _get_pip_manager(self):
@@ -367,9 +363,6 @@ class RequiresLoaderTests(unittest.TestCase):
         self.assertTrue(self.manager.subplugins["shop"].loaded)
 
 
-# ----------------------------------------------------------------------
-# marketplace：requires 自动补装（不触网，全部 mock）
-# ----------------------------------------------------------------------
 class _MarketStubPlugin(DummyPlugin):
     """供 MarketplaceClient 使用的替身：同步执行主线程任务。"""
 

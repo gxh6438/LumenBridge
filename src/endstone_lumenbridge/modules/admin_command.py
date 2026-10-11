@@ -88,7 +88,6 @@ class AdminCommandModule:
                 self._handle_add_admin(pack, reply)
                 return
 
-    # ---------------------------------------------------------------- 添加
     def _handle_add_admin(self, pack: dict[str, Any], reply: Any) -> None:
         adapter_id = str(pack.get("_lumen_adapter_id", "") or "")
         if not adapter_id:

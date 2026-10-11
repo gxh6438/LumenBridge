@@ -62,7 +62,6 @@ class GroupBindModule:
         # 绑定指令不经 group_allowed 过滤：目标群尚未写入群列表时会被群过滤拦截
         self.bus.on("message.group.normal", self._on_group_message)
 
-    # ---------------------------------------------------------------- 签发
     def issue_key(self, adapter_id: str) -> dict[str, Any] | None:
         """为适配器签发新绑定密钥（旧密钥立即销毁），明文仅本次响应返回一次。"""
         connections = getattr(self.plugin, "connections", None)
@@ -84,7 +83,6 @@ class GroupBindModule:
             "expires_in": int(KEY_TTL),
         }
 
-    # ---------------------------------------------------------------- 消费
     def _pop_key(self, adapter_id: str, token: str) -> bool:
         """验证并一次性消费密钥（compare_digest 防时序侧信道）。
 
@@ -140,7 +138,6 @@ class GroupBindModule:
         except Exception as exc:  # noqa: BLE001 - 回执已发出，重载失败仅记日志
             self.logger.warning(_t("groupbind.log.reload_failed", error=exc))
 
-    # ---------------------------------------------------------------- 绑定
     def _bind(self, adapter_id: str, pack: dict[str, Any]) -> tuple[bool, str, str]:
         """把当前群与发送者写入适配器身份配置（列表去重）。
 

@@ -33,7 +33,6 @@ def check(name: str, ok: bool) -> None:
         raise AssertionError(name)
 
 
-# ---------------------------------------------------------------- fakes
 class FakeLogger:
     def info(self, *a): pass
     def warning(self, *a): pass
@@ -116,7 +115,6 @@ class BindFixture:
         return (group is None or str(group) in groups) and (user is None or str(user) in admins)
 
 
-# ---------------------------------------------------------------- 1. 签发
 def test_issue_key_structure(tmp: Path) -> None:
     fix = BindFixture(tmp)
     info = fix.module.issue_key(fix.adapter_id)
@@ -156,7 +154,6 @@ def test_new_key_burns_old(tmp: Path) -> None:
     )
 
 
-# ---------------------------------------------------------------- 2. 指令消费
 def test_command_variants(tmp: Path) -> None:
     fix = BindFixture(tmp)
 
@@ -242,7 +239,6 @@ def test_extract_bind_text() -> None:
     check("提取：优先 message 段列表", both == "/lumen绑定 abc123")
 
 
-# ---------------------------------------------------------------- 3. 绑定写入
 def test_bind_dedup_and_official_openid(tmp: Path) -> None:
     fix = BindFixture(tmp)
 
@@ -286,7 +282,6 @@ def test_bind_dedup_and_official_openid(tmp: Path) -> None:
     )
 
 
-# ---------------------------------------------------------------- 4. HTTP API
 def test_bindkey_http_api(tmp: Path) -> None:
     import tempfile as _tf
     from urllib.error import HTTPError
@@ -354,7 +349,6 @@ def test_bindkey_http_api(tmp: Path) -> None:
         plugin.webui.stop()
 
 
-# ---------------------------------------------------------------- 5. 前端装配
 def test_frontend_wiring() -> None:
     static = Path(__file__).resolve().parent.parent / "src" / "endstone_lumenbridge" / "webui" / "static"
     html = (static / "index.html").read_text(encoding="utf-8")
@@ -409,7 +403,6 @@ def test_i18n_keys_complete() -> None:
         check(f"i18n：{lang} groupbind.* 完整", not missing_gb)
 
 
-# ---------------------------------------------------------------- 入口
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as td:
         tmpdir = Path(td)
