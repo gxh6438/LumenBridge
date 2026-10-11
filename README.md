@@ -2,7 +2,7 @@
 
 **Endstone 群服互通框架 · OneBot v11 双向消息同步 · QQ 官方机器人 · 全平台中继**
 
-[插件市场](https://market.mxcraft.vip/) · [文档中心](docs/README.md) · [MIT License](#许可)
+[插件市场](https://market.mxcraft.vip/) · [文档中心](https://gxh6438.github.io/LumenBridge/) · [MIT License](#许可)
 
 ---
 
@@ -140,7 +140,7 @@ def on_group_message(pack, reply):
 
 ## 文档
 
-完整文档位于 [`docs/`](docs/README.md)，按「入门 → 使用 → 开发」三层组织，每篇独立成文：
+完整文档位于 [`docs/`](docs/index.md)（[在线版](https://gxh6438.github.io/LumenBridge/)，由 VitePress 构建），按「入门 → 使用 → 开发」三层组织，每篇独立成文：
 
 | 分区 | 内容 |
 | --- | --- |

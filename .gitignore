@@ -28,3 +28,7 @@ env/
 # IDE share artifacts and local source archives
 .trae-html-share-packages/
 /lumenbridge-*-src.zip
+
+# VitePress
+node_modules/
+docs/.vitepress/cache/

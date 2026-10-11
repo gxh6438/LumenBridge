@@ -1,3 +1,39 @@
+---
+layout: home
+
+hero:
+  name: LumenBridge
+  text: Endstone 群服互通框架
+  tagline: OneBot v11 双向消息同步 · QQ 官方机器人 · 全平台中继 · 零外部依赖
+  image:
+    src: /logo-512.png
+    alt: LumenBridge
+  actions:
+    - theme: brand
+      text: 快速上手
+      link: /getting-started/quickstart
+    - theme: alt
+      text: 安装插件
+      link: /getting-started/installation
+    - theme: alt
+      text: GitHub
+      link: https://github.com/gxh6438/LumenBridge
+
+features:
+  - title: 群服双向互通
+    details: 游戏内聊天与 QQ 群消息实时同步，进退服、死亡与开关服通知自动推送，管理员在群里即可管理服务器。
+  - title: 多适配器并行
+    details: OneBot v11 个人号、QQ 官方机器人、AstrBot 中继可同时运行，各自维护独立的群列表与管理员，保存即热重载。
+  - title: 子插件生态
+    details: 动态加载、热重载、插件市场一键安装，Context API、事件总线、Web 扩展（配置表单 / REST / 自定义页面）齐备。
+  - title: WebUI 管理面板
+    details: 纯标准库实现的管理面板，浏览器内完成连接、白名单、正则引擎、插件市场全部管理。
+  - title: 安全设计
+    details: PBKDF2 密码哈希、路径穿越防护、本地图片白名单、受保护 pip 包名单、反向 WS 无鉴权监听告警。
+  - title: 零外部依赖
+    details: websockets 库已内置打包，放进 plugins/ 目录即可使用，不与服务器已有包冲突。
+---
+
 # LumenBridge 文档中心
 
 > 版本 1.0.11 · MIT License · 面向 Endstone（Minecraft 基岩版专用服务器插件框架）

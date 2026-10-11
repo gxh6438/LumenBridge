@@ -10,13 +10,16 @@ Lumenbridge/
 ├── README.md                 # 项目首页（链接到 docs/）
 ├── CHANGELOG.md              # 版本变更记录
 ├── LICENSE
-├── docs/                     # 本文档站（getting-started / guide / development）
+├── docs/                     # 本文档站（VitePress 源码 + md 内容）
 ├── src/endstone_lumenbridge/ # 插件源码（核心）
 ├── tests/                    # pytest 测试套件
 ├── scripts/                  # 运维与调试脚本
 ├── examples_plugins/         # 子插件示例（example_greeter / os）
-└── .github/workflows/        # CI（build.yml：自动构建 wheel 并发 Release）
+├── package.json              # VitePress 文档站（npm run docs:build）
+└── .github/workflows/        # CI（build.yml 构建 Release / docs.yml 部署文档站）
 ```
+
+文档站本地预览：`npm install && npm run docs:dev`；配置在 `docs/.vitepress/config.mts`（导航、侧边栏、本地搜索），`docs/index.md` 为站点首页。
 
 ## src/endstone_lumenbridge/
 
@@ -99,9 +102,9 @@ pytest 套件，按主题拆分（`test_onebot_*`、`test_subplugin_*`、`test_w
 | `update_marketplace_i18n.py` | 同步市场 i18n 词条 |
 | `endstone_*_probe.py` | Endstone API 兼容性探测（适配新版本） |
 
-## CI 自动构建发版（.github/workflows/build.yml）
+## CI 自动构建发版（.github/workflows/）
 
-两种触发方式，产物均为 wheel 并自动附加到 GitHub Release：
+**build.yml** —— wheel 构建与 Release，两种触发方式：
 
 | 触发方式 | 行为 |
 |------|------|
@@ -109,6 +112,8 @@ pytest 套件，按主题拆分（`test_onebot_*`、`test_subplugin_*`、`test_w
 | Actions 页面手动触发（workflow_dispatch，输入 tag） | 构建 wheel → Release 已存在则覆盖产物（`--clobber`）；不存在则创建（tag 缺失时在当前提交上建 tag） |
 
 Release 正文自动取 CHANGELOG.md 中该版本段落（`## [版本号]` 到下一个版本标题之间），CHANGELOG 无对应段落时回退 GitHub 自动生成。因此发版前只需：更新 `pyproject.toml` 版本号 + CHANGELOG 追加段落 + 打 tag 推送，其余交给 CI。
+
+**docs.yml** —— VitePress 文档站部署：`docs/**`、`package*.json` 变更推送到 main 时自动构建并发布到 GitHub Pages，也可手动触发。
 
 ## 运行期数据（服务器侧）
 
