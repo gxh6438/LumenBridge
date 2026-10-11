@@ -1492,6 +1492,8 @@ const PC_EYE_OFF_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColo
 const PC_EXPAND_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>';
 const PC_SECTION_SVG = '<svg class="pc-section-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
 const PC_CHEVRON_SVG = '<svg class="pc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
+const PC_PLUS_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
+const PC_LIST_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3.01 6h.01M3.01 12h.01M3.01 18h.01"/></svg>';
 
 function renderPluginConfig(schema) {
   const box = document.getElementById("plugin-config-body");
@@ -1616,13 +1618,15 @@ function pcRenderRow(item, index) {
     ctrl = `<div class="pc-array">` +
       `<div class="pc-array-chips" id="${id}-chips"></div>` +
       `<div class="pc-array-add">` +
+      `<div class="pc-array-add-input">` +
       `<input type="text" id="${id}-add" placeholder="${esc(t("subplugins.config_array_add_ph"))}" onkeydown="if(event.key==='Enter'){event.preventDefault();pcArrayAdd(${index})}">` +
-      `<button class="btn small ghost" onclick="pcArrayAdd(${index})">＋</button>` +
-      `<button class="btn small ghost" onclick="pcArrayBatchToggle(${index})">${esc(t("subplugins.config_batch_import"))}</button>` +
+      `<button type="button" class="pc-array-add-btn" onclick="pcArrayAdd(${index})" title="${esc(t("subplugins.config_array_add_btn"))}">${PC_PLUS_SVG}</button>` +
+      `</div>` +
+      `<button type="button" class="pc-array-batch-btn" id="${id}-batch-btn" onclick="pcArrayBatchToggle(${index})">${PC_LIST_SVG}<span>${esc(t("subplugins.config_batch_import"))}</span></button>` +
       `</div>` +
       `<div class="pc-array-batch-wrap" id="${id}-batch-wrap">` +
       `<textarea id="${id}-batch" class="pc-array-batch" placeholder="${esc(t("subplugins.config_batch_ph"))}"></textarea>` +
-      `<div style="margin-top:8px;display:flex;gap:8px">` +
+      `<div style="margin-top:8px;display:flex;gap:8px;justify-content:flex-end">` +
       `<button type="button" class="btn small" onclick="pcArrayBatchApply(${index})">${esc(t("subplugins.config_batch_apply"))}</button>` +
       `</div></div>` +
       `<input type="hidden" id="${id}" value="${esc(JSON.stringify(val))}">` +
@@ -1892,19 +1896,23 @@ function pcArrayRemove(index, i) {
 
 function pcArrayBatchToggle(index) {
   const wrap = document.getElementById(`plugin-config-${index}-batch-wrap`);
+  const btn = document.getElementById(`plugin-config-${index}-batch-btn`);
   if (wrap) {
-    wrap.classList.toggle("show");
+    const show = wrap.classList.toggle("show");
+    if (btn) btn.classList.toggle("active", show);
     const ta = document.getElementById(`plugin-config-${index}-batch`);
-    if (wrap.classList.contains("show") && ta) ta.focus();
+    if (show && ta) ta.focus();
   }
 }
 
 function pcArrayBatchApply(index) {
   const ta = document.getElementById(`plugin-config-${index}-batch`);
   const wrap = document.getElementById(`plugin-config-${index}-batch-wrap`);
+  const btn = document.getElementById(`plugin-config-${index}-batch-btn`);
   if (!ta) return;
   const lines = (ta.value || "").split("\n").map((s) => s.trim()).filter(Boolean);
   if (wrap) wrap.classList.remove("show");
+  if (btn) btn.classList.remove("active");
   if (!lines.length) return;
   const arr = pcArrayGet(index);
   lines.forEach((ln) => { if (!arr.some((x) => String(x) === ln)) arr.push(ln); });
@@ -2360,6 +2368,18 @@ document.addEventListener("click", (e) => {
   const spActionBtn = e.target.closest(".sp-action-btn[data-action]");
   if (spActionBtn) {
     dispatchSpAction(spActionBtn.dataset.action || "", spActionBtn.dataset.name || "");
+    return;
+  }
+  /* 依赖补全弹窗按钮：方式选择（market/link/upload）+ 依赖类型 */
+  const depsWayBtn = e.target.closest(".deps-way-btn[data-way]");
+  if (depsWayBtn) {
+    dispatchDepsWay(
+      depsWayBtn.dataset.way || "",
+      depsWayBtn.dataset.kind || "",
+      depsWayBtn.dataset.dep || "",
+      depsWayBtn.dataset.url || "",
+      depsWayBtn
+    );
     return;
   }
   /* 更新中心卡片：单独更新按钮 */
@@ -5188,16 +5208,213 @@ async function updateSubpluginDependencies(name) {
   } catch (e) { toast(e.message || t("marketplace.deps_update_failed", { name }), true); }
 }
 
+/* ===== 依赖补全（requires 缺失）：分类弹窗 + 按依赖选择补全方式 =====
+   子插件依赖：市场（已在售才显示）/ requirements.txt 链接 / 手动上传 zip；
+   Endstone 插件依赖：requirements.txt 链接 / 手动上传 whl|zip（落盘到
+   服务器 plugins 目录）→ 落盘后询问是否全服热重载（页面自动刷新恢复） */
+let depsModalPlugin = "";
+
 async function installSubpluginRequirements(name) {
-  // 插件级强制依赖补装：子插件依赖会从市场自动安装（像 pip 依赖那样），
-  // Endstone 插件依赖只能提示用户自行安装
-  if (!await customConfirm(t("subplugins.install_requirements_confirm", { name }))) return;
-  try {
-    const res = await api("POST", `/api/subplugins/${encodeURIComponent(name)}/install-requirements`, {});
-    watchMarketTask(res.data.task_id, t("subplugins.install_requirements_success", { name }));
-  } catch (e) { toast(e.message || t("subplugins.install_requirements_failed", { name, error: e.message }), true); }
+  depsModalPlugin = name;
+  document.getElementById("deps-sources-modal").classList.add("show");
+  await refreshDepsSources(name);
 }
 
+function closeDepsModal() {
+  closeModal("deps-sources-modal");
+  if (depsModalPlugin) {
+    depsModalPlugin = "";
+    loadSubplugins();
+    loadCustomPages();
+  }
+}
+
+async function refreshDepsSources(name) {
+  const body = document.getElementById("deps-sources-body");
+  if (!body) return;
+  body.innerHTML = `<p style="margin:0;color:var(--muted)">${esc(t("subplugins.deps_loading"))}</p>`;
+  let data;
+  try {
+    const res = await api("GET", `/api/subplugins/${encodeURIComponent(name)}/deps-sources`);
+    data = res.data || {};
+  } catch (e) {
+    body.innerHTML = `<p style="margin:0;color:var(--red)">${esc(e.message || t("subplugins.deps_load_failed"))}</p>`;
+    return;
+  }
+  if (depsModalPlugin !== name) return;
+  const spDeps = Array.isArray(data.subplugins) ? data.subplugins : [];
+  const esDeps = Array.isArray(data.endstone) ? data.endstone : [];
+  const html = [];
+  if (data.unverified) {
+    html.push(`<p style="margin:0 0 14px;color:var(--muted);font-size:13px">${esc(t("subplugins.deps_unverified"))}</p>`);
+  }
+  if (!spDeps.length && !esDeps.length) {
+    html.push(`<p style="margin:0;line-height:1.7">${esc(t("subplugins.deps_all_satisfied", { name }))}</p>`);
+  }
+  if (spDeps.length) {
+    html.push(`<h4 style="margin:0 0 4px">${esc(t("subplugins.deps_subplugin_section"))}</h4>`);
+    html.push(`<p style="margin:0 0 12px;color:var(--muted);font-size:13px">${esc(t("subplugins.deps_subplugin_hint"))}</p>`);
+    spDeps.forEach((d) => html.push(renderDepsRow(d, "subplugin")));
+  }
+  if (esDeps.length) {
+    html.push(`<h4 style="margin:18px 0 4px">${esc(t("subplugins.deps_endstone_section"))}</h4>`);
+    html.push(`<p style="margin:0 0 12px;color:var(--muted);font-size:13px">${esc(t("subplugins.deps_endstone_hint"))}</p>`);
+    esDeps.forEach((d) => html.push(renderDepsRow(d, "endstone")));
+  }
+  body.innerHTML = html.join("");
+}
+
+function renderDepsRow(dep, kind) {
+  const ways = [];
+  const btn = (way, label, cls) =>
+    `<button class="btn small ${cls} deps-way-btn" data-way="${esc(way)}" data-kind="${esc(kind)}" data-dep="${esc(dep.name || "")}" data-url="${esc(dep.url || "")}">${esc(label)}</button>`;
+  if (kind === "subplugin" && dep.in_market) ways.push(btn("market", t("subplugins.deps_via_market"), ""));
+  if (dep.url) ways.push(btn("link", t("subplugins.deps_via_link"), "white"));
+  ways.push(btn("upload", t("subplugins.deps_via_upload"), "ghost"));
+  let status = "";
+  if (kind === "subplugin") {
+    if (!dep.installed) status = t("subplugins.deps_status_missing");
+    else if (!dep.loaded) status = t("subplugins.deps_status_not_loaded", { version: dep.local_version || "?" });
+    else status = t("subplugins.deps_status_version", { version: dep.local_version || "?" });
+  } else if (dep.local_version) {
+    status = t("subplugins.deps_status_version", { version: dep.local_version });
+  }
+  return `<div class="deps-row" style="display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--border,#2a2f3a);border-radius:10px;margin-bottom:8px;flex-wrap:wrap">
+    <div style="flex:1;min-width:180px">
+      <div style="font-weight:600">${esc(dep.display || dep.name || "?")}</div>
+      ${status ? `<div style="color:var(--muted);font-size:12px;margin-top:2px">${esc(status)}</div>` : ""}
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">${ways.join("")}</div>
+  </div>`;
+}
+
+async function dispatchDepsWay(way, kind, dep, url, btnEl) {
+  const name = depsModalPlugin;
+  if (!name) return;
+  if (way === "market") {
+    // 市场方式走 install-requirements：自动补装全部可从市场获取的依赖并
+    // 热重载；onDone 校验任务 result，部分缺失时如实警示（修复假成功）
+    try {
+      btnEl.disabled = true;
+      const res = await api("POST", `/api/subplugins/${encodeURIComponent(name)}/install-requirements`, {});
+      watchMarketTask(res.data.task_id, null, (ok, task) => {
+        const r = (task && task.result) || {};
+        if (ok && r.ok === false) toast(r.message || t("subplugins.deps_partial"), true);
+        refreshDepsSources(name);
+      });
+    } catch (e) {
+      toast(e.message || t("subplugins.install_requirements_failed", { name, error: e.message }), true);
+      btnEl.disabled = false;
+    }
+    return;
+  }
+  if (way === "link") {
+    if (!url) return;
+    if (kind === "endstone") {
+      try {
+        btnEl.disabled = true;
+        toast(t("subplugins.deps_downloading"));
+        const res = await api("POST", `/api/subplugins/${encodeURIComponent(name)}/endstone-dep/url`, { url });
+        toast(res.msg || t("subplugins.es_saved"), false);
+        await promptEsReload();
+        await refreshDepsSources(name);
+      } catch (e) { toast(e.message || t("subplugins.es_save_failed"), true); }
+      btnEl.disabled = false;
+    } else {
+      try {
+        btnEl.disabled = true;
+        toast(t("subplugins.install_downloading"));
+        const res = await api("POST", "/api/subplugins/install/url", { url });
+        const loaded = !res.data || res.data.loaded !== false;
+        toast(res.msg || t("subplugins.install_success"), !loaded);
+        await refreshDepsSources(name);
+      } catch (e) { toast(e.message || t("subplugins.install_failed", { error: e.message }), true); }
+      btnEl.disabled = false;
+    }
+    return;
+  }
+  if (way === "upload") {
+    const input = document.getElementById(kind === "endstone" ? "deps-es-file" : "deps-sp-file");
+    if (!input) return;
+    input.dataset.plugin = name;
+    input.dataset.dep = dep;
+    input.value = "";
+    input.click();
+    return;
+  }
+}
+
+/* Endstone 依赖落盘成功后：询问是否立即全服热重载（等同 /reload）。
+   确认 → 后台执行 + waitForWebuiRecovery 轮询恢复并自动刷新页面 */
+async function promptEsReload() {
+  const yes = await customConfirm(t("subplugins.es_reload_prompt"));
+  if (!yes) { toast(t("subplugins.es_reload_later"), false); return; }
+  try {
+    const res = await api("POST", "/api/server/reload", {});
+    waitForWebuiRecovery(res.data && res.data.task_id);
+  } catch (e) {
+    toast(e.message || t("subplugins.es_reload_failed"), true);
+  }
+}
+
+function uploadDepsSpZip(file) {
+  if (!file) return;
+  if (!file.name.toLowerCase().endsWith(".zip")) { toast(t("subplugins.install_zip_only"), true); return; }
+  const form = new FormData();
+  form.append("file", file);
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/subplugins/install/upload");
+  xhr.setRequestHeader("Authorization", "Bearer " + TOKEN);
+  xhr.onload = () => {
+    if (xhr.status === 401) { logout(true); return; }
+    try {
+      const data = JSON.parse(xhr.responseText);
+      if (data.code === 200) {
+        const loaded = !data.data || data.data.loaded !== false;
+        toast(data.msg || t("subplugins.install_success"), !loaded);
+        if (depsModalPlugin) refreshDepsSources(depsModalPlugin);
+      } else {
+        toast(data.msg || t("subplugins.install_failed", { error: "" }), true);
+      }
+    } catch (_) { toast(t("subplugins.install_failed_response"), true); }
+  };
+  xhr.onerror = () => toast(t("subplugins.install_failed_network"), true);
+  xhr.send(form);
+}
+
+function uploadDepsEsFile(file) {
+  if (!file) return;
+  const lower = file.name.toLowerCase();
+  if (!lower.endsWith(".whl") && !lower.endsWith(".zip")) { toast(t("subplugins.es_file_only"), true); return; }
+  const name = depsModalPlugin;
+  if (!name) return;
+  const form = new FormData();
+  form.append("file", file);
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", `/api/subplugins/${encodeURIComponent(name)}/endstone-dep/upload`);
+  xhr.setRequestHeader("Authorization", "Bearer " + TOKEN);
+  xhr.onload = async () => {
+    if (xhr.status === 401) { logout(true); return; }
+    try {
+      const data = JSON.parse(xhr.responseText);
+      if (data.code === 200) {
+        toast(data.msg || t("subplugins.es_saved"), false);
+        await promptEsReload();
+        await refreshDepsSources(name);
+      } else {
+        toast(data.msg || t("subplugins.es_save_failed"), true);
+      }
+    } catch (_) { toast(t("subplugins.es_save_failed"), true); }
+  };
+  xhr.onerror = () => toast(t("subplugins.es_save_failed"), true);
+  xhr.send(form);
+}
+
+/* 隐藏文件选择控件的 change 分发（data-plugin 标记当前弹窗目标） */
+document.addEventListener("change", (e) => {
+  if (e.target && e.target.id === "deps-sp-file") { uploadDepsSpZip(e.target.files && e.target.files[0]); return; }
+  if (e.target && e.target.id === "deps-es-file") { uploadDepsEsFile(e.target.files && e.target.files[0]); }
+});
 
 async function checkFrameworkUpdate() {
   const content = document.getElementById("framework-update-content");

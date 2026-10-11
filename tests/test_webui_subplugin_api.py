@@ -5,6 +5,8 @@
 3. 子插件文件列表 / 读取 / 保存（含非法 JSON 与目录穿越拦截）
 4. 子插件卸载与未登录拒绝
 5. ConfigFormBuilder 中文标签 label
+6. 依赖补全全链路：deps-sources 探测 / Endstone 依赖落盘（上传与链接）/
+   全服热重载任务 / install-requirements 结果如实透传
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 SRC = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(SRC))
@@ -217,7 +220,157 @@ def test_webui_subplugin_api():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _multipart(filename: str, content: bytes, field: str = "file") -> tuple[bytes, str]:
+    boundary = "----lumtestboundary"
+    mp = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"; "
+          f"filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n").encode() \
+          + content + f"\r\n--{boundary}--\r\n".encode()
+    return mp, f"multipart/form-data; boundary={boundary}"
+
+
+class _DepsMarket:
+    """市场替身：helper_sp 在售；依赖补装如实返回部分缺失；全服重载成功。"""
+
+    enabled = True
+
+    def _find_market_plugin_by_manifest_name(self, name):
+        return {"name": str(name)} if str(name).lower() == "helper_sp" else None
+
+    def install_plugin_requirements(self, name, log=None, progress=None):
+        return {"ok": False, "message": "Endstone 插件依赖无法自动安装: HomeAPI",
+                "endstone_missing": ["HomeAPI"]}
+
+    def safe_server_reload(self, *, log=None):
+        log("reload called")
+        return {"ok": True, "version": "1.0.6"}
+
+
+def _wait_task(token, task_id, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        st, d = _req("GET", f"/api/market/task/{task_id}", token=token)
+        if st == 200 and d["data"].get("done"):
+            return d["data"]
+        time.sleep(0.05)
+    raise AssertionError(f"market task {task_id} not done in {timeout}s")
+
+
+def test_deps_resolve_endpoints():
+    """依赖补全四端点：方式探测 / Endstone 落盘（上传+链接）/ 全服热重载。"""
+    from endstone_lumenbridge.subplugin.loader import SubPluginManager
+    from endstone_lumenbridge.webui import LogBuffer
+    from endstone_lumenbridge.webui import WebUIServer
+
+    tmp = Path(tempfile.mkdtemp())
+    srv = None
+    try:
+        # 目录结构：server_root/plugins/lumenbridge = data_folder
+        # Endstone 依赖必须落盘到 server_root/plugins（BDS 根，非子插件目录）
+        data_folder = tmp / "server_root" / "plugins" / "lumenbridge"
+        data_folder.mkdir(parents=True)
+        bds_plugins = data_folder.parent
+
+        plugin = _Plugin(data_folder)
+        plugin.log_buffer = LogBuffer()
+        plugin.marketplace = _DepsMarket()
+        plugin.server.plugin_manager = type("PM", (), {"plugins": []})()
+        plugin.subplugin_manager = SubPluginManager(plugin)
+        srv = WebUIServer(plugin)
+        srv.start()
+        assert _wait_port_ready(), "WebUIServer 启动超时"
+
+        st, d = _req("POST", "/api/auth/login", {"password": "testpwd"})
+        assert st == 200, d
+        token = d["data"]["token"]
+
+        # 装入声明两类依赖的子插件（disabled，只需清单可读）
+        mgr = plugin.subplugin_manager
+        sp_dir = mgr.plugins_dir / "deps_demo"
+        sp_dir.mkdir(parents=True)
+        (sp_dir / "lumen.json").write_text(json.dumps({
+            "name": "deps_demo", "version": "1.0.0", "load": False,
+            "requires": {"subplugins": ["helper_sp>=1.0.0"], "endstone": ["HomeAPI>=1.0"]},
+        }), encoding="utf-8")
+        (sp_dir / "main.py").write_text("def on_load(lumen):\n    pass\n", encoding="utf-8")
+        (sp_dir / "requirements.txt").write_text(
+            "[subplugins]\nHelper_SP = https://cdn.test/helper.zip\n"
+            "[endstone]\nHomeAPI = https://cdn.test/homeapi.whl\n",
+            encoding="utf-8",
+        )
+        mgr.load_all()
+
+        # --- deps-sources：市场存在性 / 本地状态 / requirements 直链 ---
+        st, d = _req("GET", "/api/subplugins/deps_demo/deps-sources", token=token)
+        assert st == 200, d
+        data = d["data"]
+        assert data["market_enabled"] is True
+        assert data["unverified"] is False
+        sp_dep = next(x for x in data["subplugins"] if x["name"] == "helper_sp")
+        assert sp_dep["in_market"] is True
+        assert sp_dep["installed"] is False
+        assert sp_dep["url"] == "https://cdn.test/helper.zip"
+        es_dep = next(x for x in data["endstone"] if x["name"] == "HomeAPI")
+        assert es_dep["url"] == "https://cdn.test/homeapi.whl"
+        # 未知子插件 → 404
+        st, _ = _req("GET", "/api/subplugins/no_such/deps-sources", token=token)
+        assert st == 404
+
+        # --- install-requirements：部分缺失时 result.ok=false 如实透传（假成功修复） ---
+        st, d = _req("POST", "/api/subplugins/deps_demo/install-requirements", token=token, body={})
+        assert st == 200, d
+        task = _wait_task(token, d["data"]["task_id"])
+        assert task["success"] is True  # 任务本身执行成功
+        assert task["result"]["ok"] is False  # 但依赖未补齐，如实告知
+        assert "HomeAPI" in task["result"]["endstone_missing"]
+
+        # --- endstone-dep/upload：落盘服务器 plugins 目录 ---
+        body, ctype = _multipart("HomeAPI-1.0.0.whl", b"fake-wheel")
+        st, d = _req("POST", "/api/subplugins/deps_demo/endstone-dep/upload", token=token,
+                     raw_body=body, ctype=ctype)
+        assert st == 200, d
+        assert (bds_plugins / "HomeAPI-1.0.0.whl").read_bytes() == b"fake-wheel"
+        assert not (mgr.plugins_dir / "HomeAPI-1.0.0.whl").exists()  # 不落子插件目录
+        # 路径穿越与非法扩展被拒
+        body, ctype = _multipart("../evil.whl", b"x")
+        st, _ = _req("POST", "/api/subplugins/deps_demo/endstone-dep/upload", token=token,
+                     raw_body=body, ctype=ctype)
+        assert st == 400
+        body, ctype = _multipart("HomeAPI.tar.gz", b"x")
+        st, _ = _req("POST", "/api/subplugins/deps_demo/endstone-dep/upload", token=token,
+                     raw_body=body, ctype=ctype)
+        assert st == 400
+
+        # --- endstone-dep/url：链接下载落盘 + 参数校验 ---
+        with patch("endstone_lumenbridge.webui.server._fetch_url_bytes", return_value=b"dl-wheel"):
+            st, d = _req("POST", "/api/subplugins/deps_demo/endstone-dep/url", token=token,
+                         body={"url": "https://cdn.test/HomeAPI-2.0.0.whl"})
+            assert st == 200, d
+            assert (bds_plugins / "HomeAPI-2.0.0.whl").read_bytes() == b"dl-wheel"
+            # sha256 不匹配拒绝写入
+            st, _ = _req("POST", "/api/subplugins/deps_demo/endstone-dep/url", token=token,
+                         body={"url": "https://cdn.test/HomeAPI-2.0.0.whl", "sha256": "0" * 64})
+            assert st == 400
+        st, _ = _req("POST", "/api/subplugins/deps_demo/endstone-dep/url", token=token,
+                     body={"url": "ftp://cdn.test/HomeAPI.whl"})
+        assert st == 400
+        st, _ = _req("POST", "/api/subplugins/deps_demo/endstone-dep/url", token=token,
+                     body={"url": "https://cdn.test/no-extension"})
+        assert st == 400
+
+        # --- server/reload：全服热重载任务 ---
+        st, d = _req("POST", "/api/server/reload", token=token, body={})
+        assert st == 200, d
+        task = _wait_task(token, d["data"]["task_id"])
+        assert task["success"] is True
+        assert task["result"] == {"ok": True, "version": "1.0.6"}
+    finally:
+        if srv is not None:
+            srv.stop()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_configform_label()
     test_webui_subplugin_api()
+    test_deps_resolve_endpoints()
     print("全部通过")

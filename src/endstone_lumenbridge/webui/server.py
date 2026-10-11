@@ -29,7 +29,7 @@ from ..i18n import (
     normalize_locale,
     t as _t,
 )
-from ..subplugin.requires import parse_requires_from_manifest
+from ..subplugin.requires import parse_requires_from_manifest, check_endstone_requirements
 from . import auth as auth_util
 from .configform import ConfigFormBuilder
 from .logbuffer import LogBuffer
@@ -2130,6 +2130,186 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 progress(100, _t("task_log.done"))
                 return result
             task_id = self.webui._start_market_task("requirements_install", _run_requirements_install)
+            if task_id is None:
+                return self._send_json({"code": 429, "msg": "任务数过多，请稍后再试"}, 429)
+            return self._send_json({"code": 200, "data": {"task_id": task_id}})
+
+        m = re.fullmatch(r"/api/subplugins/([A-Za-z0-9_\-]+)/deps-sources", path)
+        if m and method == "GET":
+            # 依赖补全方式探测：区分子插件依赖（市场/链接/上传）与
+            # Endstone 插件依赖（链接/上传，市场不售 Endstone 插件）
+            mgr = plugin.subplugin_manager
+            if mgr is None:
+                return self._send_json({"code": 500, "msg": _t("webui.msg.subplugin_manager_unavailable")}, 500)
+            name = m.group(1)
+            from ..subplugin.loader import parse_requirements_links
+
+            with mgr._lock:
+                sp = mgr.subplugins.get(name)
+                manifest = dict(sp.manifest) if sp is not None else None
+            if manifest is None:
+                return self._send_json({"code": 404, "msg": _t("webui.msg.subplugin_not_found")}, 404)
+            declaration = parse_requires_from_manifest(manifest)
+            try:
+                links = parse_requirements_links(mgr.plugins_dir / name)
+            except Exception:  # noqa: BLE001 - 解析失败按无链接处理
+                links = {"subplugins": {}, "endstone": {}}
+            market_client = getattr(plugin, "marketplace", None)
+            market_enabled = bool(market_client is not None and market_client.enabled)
+
+            subplugin_deps: list[dict[str, Any]] = []
+            with mgr._lock:
+                for req in declaration.subplugins:
+                    if req.name == name:
+                        continue
+                    dep = mgr.subplugins.get(req.name)
+                    local_version = str(dep.manifest.get("version") or "") if dep is not None else ""
+                    if dep is not None and dep.loaded and req.satisfied_by(local_version):
+                        continue
+                    in_market = False
+                    if market_enabled:
+                        try:
+                            in_market = market_client._find_market_plugin_by_manifest_name(req.name) is not None
+                        except Exception:  # noqa: BLE001 - 市场查询失败按未命中处理
+                            in_market = False
+                    subplugin_deps.append({
+                        "name": req.name,
+                        "display": req.display(),
+                        "installed": dep is not None,
+                        "loaded": bool(dep is not None and dep.loaded),
+                        "local_version": local_version,
+                        "in_market": in_market,
+                        "url": links["subplugins"].get(req.name.lower(), ""),
+                    })
+
+            endstone_deps: list[dict[str, Any]] = []
+            unverified = False
+            if declaration.endstone:
+                try:
+                    installed_es = mgr._installed_endstone_plugins()
+                except Exception:  # noqa: BLE001 - 服务器 API 不可用时无法核实，仍列出全部声明
+                    installed_es = None
+                if installed_es is None:
+                    unverified = True
+                    unmet_es = [(req, "") for req in declaration.endstone]
+                else:
+                    unmet_es = check_endstone_requirements(declaration.endstone, installed_es)
+                for req, actual in unmet_es:
+                    endstone_deps.append({
+                        "name": req.name,
+                        "display": req.display(),
+                        "local_version": actual,
+                        "url": links["endstone"].get(req.name.lower(), ""),
+                    })
+
+            return self._send_json({"code": 200, "data": {
+                "name": name,
+                "market_enabled": market_enabled,
+                "subplugins": subplugin_deps,
+                "endstone": endstone_deps,
+                "unverified": unverified,
+            }})
+
+        def _save_endstone_dep(filename: str, data: bytes) -> tuple[dict[str, Any], int] | None:
+            """Endstone 插件包落盘到服务器 plugins/ 目录（BDS 根，非子插件目录）。
+
+            返回 None 表示成功；否则返回 (错误响应, HTTP 状态码)。
+            """
+            base = os.path.basename(filename.replace("\\", "/")).strip()
+            if not base or base.startswith(".") or base != filename:
+                return {"code": 400, "msg": "文件名非法（禁止路径分隔符与隐藏文件）"}, 400
+            if not base.lower().endswith((".whl", ".zip")):
+                return {"code": 400, "msg": "仅支持 .whl / .zip 格式的 Endstone 插件包"}, 400
+            plugins_dir = Path(plugin.data_folder).parent
+            try:
+                plugins_dir.mkdir(parents=True, exist_ok=True)
+                (plugins_dir / base).write_bytes(data)
+            except OSError as exc:
+                return {"code": 500, "msg": f"写入服务器 plugins 目录失败：{exc}"}, 500
+            return None
+
+        m = re.fullmatch(r"/api/subplugins/([A-Za-z0-9_\-]+)/endstone-dep/upload", path)
+        if m and method == "POST":
+            file_info = self._read_multipart_file()
+            if not file_info:
+                return self._send_json(
+                    {"code": 400, "msg": "未接收到有效的文件（需 multipart/form-data，最大 16MB）"}, 400
+                )
+            filename, content = file_info
+            error = _save_endstone_dep(filename, content)
+            if error is not None:
+                return self._send_json(*error)
+            self.webui.logger.info(
+                f"[WebUI] Endstone 插件包上传落盘：{filename} → plugins/（{len(content)} 字节）"
+            )
+            return self._send_json({"code": 200, "data": {"saved": filename}, "msg": "已保存到服务器 plugins 目录"})
+
+        m = re.fullmatch(r"/api/subplugins/([A-Za-z0-9_\-]+)/endstone-dep/url", path)
+        if m and method == "POST":
+            body = self._read_body() or {}
+            if not isinstance(body, dict):
+                return self._send_json({"code": 400, "msg": _t("webui.msg.invalid_body")}, 400)
+            url = str(body.get("url", "")).strip()
+            if not url.startswith(("http://", "https://")):
+                return self._send_json({"code": 400, "msg": _t("webui.msg.invalid_url")}, 400)
+            parsed = urllib.parse.urlparse(url)
+            if not parsed.hostname:
+                return self._send_json({"code": 400, "msg": _t("webui.msg.invalid_hostname")}, 400)
+            sha256 = str(body.get("sha256", "") or "").strip().lower()
+            if sha256 and not re.fullmatch(r"[a-f0-9]{64}", sha256):
+                return self._send_json({"code": 400, "msg": "sha256 字段必须是 64 位十六进制字符串"}, 400)
+            client_ip = str(self.client_address[0]) if self.client_address else "unknown"
+            try:
+                webui_conf = plugin.config_manager.data.get("webui", {}) if plugin.config_manager else {}
+            except Exception:  # noqa: BLE001 - 配置读取失败按无白名单处理
+                webui_conf = {}
+            allow_raw = webui_conf.get("install_url_allow_hosts", []) if isinstance(webui_conf, dict) else []
+            allow_hosts = {
+                str(h).strip().lower() for h in (allow_raw if isinstance(allow_raw, (list, tuple, set)) else [])
+                if str(h).strip()
+            }
+            if allow_hosts and (parsed.hostname or "").lower() not in allow_hosts:
+                return self._send_json({
+                    "code": 403,
+                    "msg": "该主机不在 webui.install_url_allow_hosts 白名单内；请在配置中调整白名单或移除该限制",
+                }, 403)
+            # 文件名取 URL 末段并校验扩展，防止把任意内容写进 plugins 目录
+            filename = os.path.basename((parsed.path or "").rstrip("/")) or ""
+            if not filename.lower().endswith((".whl", ".zip")):
+                return self._send_json(
+                    {"code": 400, "msg": "无法从链接推断 .whl/.zip 文件名（链接末段需以扩展名结尾）"}, 400
+                )
+            try:
+                data = _fetch_url_bytes(url, _MAX_UPLOAD_BYTES, timeout=30)
+            except Exception as e:  # noqa: BLE001
+                self.webui.logger.warning(
+                    f"[WebUI] Endstone 依赖 URL 下载失败 url={url} ip={client_ip} error={e.__cause__ or e!r}"
+                )
+                return self._send_json({"code": 400, "msg": "下载失败"}, 400)
+            if sha256 and not hmac.compare_digest(hashlib.sha256(data).hexdigest(), sha256):
+                self.webui.logger.warning(f"[WebUI] Endstone 依赖 URL 下载 SHA-256 校验失败 url={url} ip={client_ip}")
+                return self._send_json({"code": 400, "msg": "SHA-256 校验失败，已拒绝写入"}, 400)
+            error = _save_endstone_dep(filename, data)
+            if error is not None:
+                return self._send_json(*error)
+            self.webui.logger.info(f"[WebUI] Endstone 插件包经链接下载落盘：{filename} → plugins/")
+            return self._send_json({"code": 200, "data": {"saved": filename}, "msg": "已下载并保存到服务器 plugins 目录"})
+
+        if method == "POST" and path == "/api/server/reload":
+            # 全服热重载（等同 /reload）：Endstone 依赖落盘后加载新插件的入口。
+            # 复用框架更新的两阶段 ghost 调度，期间 WebUI 短暂下线由前端轮询恢复
+            client = getattr(plugin, "marketplace", None)
+            if client is None:
+                return self._send_json({"code": 500, "msg": "热重载通道不可用"}, 500)
+
+            def _run_server_reload(log, progress):
+                log("正在执行全服热重载（等同 /reload）...")
+                progress(10, _t("task_log.waiting_tasks"))
+                result = client.safe_server_reload(log=log)
+                progress(100, _t("task_log.done"))
+                return result
+
+            task_id = self.webui._start_market_task("server_reload", _run_server_reload)
             if task_id is None:
                 return self._send_json({"code": 429, "msg": "任务数过多，请稍后再试"}, 429)
             return self._send_json({"code": 200, "data": {"task_id": task_id}})

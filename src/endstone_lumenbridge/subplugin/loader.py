@@ -83,6 +83,45 @@ def _read_manifest_dict(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def parse_requirements_links(plugin_dir: Path) -> dict[str, dict[str, str]]:
+    """解析子插件目录下的 requirements.txt（可选文件），提取依赖下载直链。
+
+    格式（name 大小写不敏感，值为 http(s) 直链，可留空）::
+
+        [subplugins]
+        economy = https://example.com/economy.zip
+
+        [endstone]
+        HomeAPI = https://example.com/homeapi.whl
+
+    返回 {"subplugins": {name小写: url}, "endstone": {name小写: url}}；
+    文件不存在或损坏时返回空映射，绝不抛异常。
+    """
+    result: dict[str, dict[str, str]] = {"subplugins": {}, "endstone": {}}
+    path = plugin_dir / "requirements.txt"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return result
+    section = ""
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.fullmatch(r"\[([A-Za-z_]+)\]", line)
+        if m:
+            key = m.group(1).lower()
+            section = key if key in ("subplugins", "subplugin") or key.startswith("endstone") else ""
+            continue
+        if not section or "=" not in line:
+            continue
+        name, _, url = line.partition("=")
+        name, url = name.strip(), url.strip()
+        if name and url.startswith(("http://", "https://")):
+            result["subplugins" if section.startswith("subplugin") else "endstone"][name.lower()] = url
+    return result
+
+
 def _ensure_under(folder: Path, base: Path) -> bool:
     """校验 folder 解析后仍在 base 之下，防路径穿越（如 .. / 符号链接）"""
     try:

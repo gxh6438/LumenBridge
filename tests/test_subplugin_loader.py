@@ -21,7 +21,7 @@ from endstone_lumenbridge.subplugin.context import (
     plugin_register_command_compat,
     sanitize_usages,
 )
-from endstone_lumenbridge.subplugin.loader import SubPluginManager
+from endstone_lumenbridge.subplugin.loader import SubPluginManager, parse_requirements_links
 
 
 class DummyLogger:
@@ -615,6 +615,65 @@ class LoaderAuditTests(unittest.TestCase):
         # 启用：立即尝试加载（与禁用对称）
         self.assertTrue(self.manager.set_enabled(name, True))
         self.assertTrue(self.manager.subplugins[name].loaded)
+
+
+class ParseRequirementsLinksTests(unittest.TestCase):
+    """requirements.txt 直链解析：依赖补全方式探测的数据源。"""
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tempdir.name)
+        self.addCleanup(self.tempdir.cleanup)
+
+    def test_parses_both_sections_case_insensitive(self) -> None:
+        (self.dir / "requirements.txt").write_text(
+            "[subplugins]\n"
+            "Economy = https://cdn.test/economy.zip\n"
+            "helper = http://cdn.test/helper-1.0.0.zip\n"
+            "\n"
+            "[endstone]\n"
+            "HomeAPI = https://cdn.test/homeapi.whl\n",
+            encoding="utf-8",
+        )
+        links = parse_requirements_links(self.dir)
+        self.assertEqual(links["subplugins"], {
+            "economy": "https://cdn.test/economy.zip",
+            "helper": "http://cdn.test/helper-1.0.0.zip",
+        })
+        self.assertEqual(links["endstone"], {"homeapi": "https://cdn.test/homeapi.whl"})
+
+    def test_missing_file_returns_empty_map(self) -> None:
+        links = parse_requirements_links(self.dir)
+        self.assertEqual(links, {"subplugins": {}, "endstone": {}})
+
+    def test_corrupt_file_returns_empty_map(self) -> None:
+        (self.dir / "requirements.txt").write_bytes(b"\xff\xfe\x00binary")
+        links = parse_requirements_links(self.dir)
+        self.assertEqual(links, {"subplugins": {}, "endstone": {}})
+
+    def test_ignores_comments_blank_and_malformed_lines(self) -> None:
+        (self.dir / "requirements.txt").write_text(
+            "# 注释行\n"
+            "\n"
+            "[unknown_section]\n"
+            "evil = https://cdn.test/evil.zip\n"
+            "[subplugins]\n"
+            "no-eq-line\n"
+            "empty =\n",
+            encoding="utf-8",
+        )
+        links = parse_requirements_links(self.dir)
+        self.assertEqual(links["subplugins"], {})
+        self.assertEqual(links["endstone"], {})
+
+    def test_singular_section_aliases_accepted(self) -> None:
+        (self.dir / "requirements.txt").write_text(
+            "[subplugin]\nEconomy = https://cdn.test/e.zip\n[endstone]\nHomeAPI = https://cdn.test/h.whl\n",
+            encoding="utf-8",
+        )
+        links = parse_requirements_links(self.dir)
+        self.assertEqual(links["subplugins"], {"economy": "https://cdn.test/e.zip"})
+        self.assertEqual(links["endstone"], {"homeapi": "https://cdn.test/h.whl"})
 
 
 if __name__ == "__main__":

@@ -301,8 +301,10 @@ tr:last-child td { border-bottom: none; }
 .switch { position: relative; width: 42px; height: 24px; flex: 0 0 42px; margin-top: 3px; }
 /* 开关与左侧文字描述的保底横向间距：文字占满标签列时也不会贴到开关 */
 .form-row > .switch,
-.pc-row .pc-ctrl-inner > .switch,
 .cf-row > .switch { margin-left: 12px; }
+/* 子插件配置行：开关右对齐至行尾，与文字保持舒展距离
+   （与聊天过滤页 label 左 / 开关右 的排布一致） */
+.pc-row .pc-ctrl-inner > .switch { margin-left: auto; }
 .switch input { position: absolute; opacity: 0; pointer-events: none; }
 .switch .track {
   position: absolute; inset: 0; display: block; width: 42px !important; height: 24px !important;
