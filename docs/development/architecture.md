@@ -25,18 +25,18 @@
 
 | 文件/目录 | 职责 |
 |-----------|------|
-| [plugin.py](../../src/endstone_lumenbridge/plugin.py) | 插件入口：生命周期、`/lumen` 命令、`run_on_main` 调度、模块装配、聊天探针接线 |
-| [config.py](../../src/endstone_lumenbridge/config.py) | 主配置加载/校验/原子写入/外部修改检测 |
-| [connections.py](../../src/endstone_lumenbridge/connections.py) | 适配器卡片管理（CRUD、校验、按类型分文件持久化、群/管理员并集缓存） |
-| [event_bus.py](../../src/endstone_lumenbridge/event_bus.py) | 线程安全事件总线（on/once/emit/off） |
-| [i18n.py](../../src/endstone_lumenbridge/i18n.py) | 国际化：locale 规范化、语言检测、`t()` 翻译 |
-| [onebot/](../../src/endstone_lumenbridge/onebot/) | OneBot v11 适配器体系（见下文） |
-| [modules/](../../src/endstone_lumenbridge/modules/) | 七个功能模块（见下文） |
-| [subplugin/](../../src/endstone_lumenbridge/subplugin/) | 子插件加载器、Context API、依赖检查 |
-| [webui/](../../src/endstone_lumenbridge/webui/) | 纯标准库 Web 管理面板 |
-| [marketplace.py](../../src/endstone_lumenbridge/marketplace.py) | 插件市场与更新客户端 |
-| [pip_manager.py](../../src/endstone_lumenbridge/pip_manager.py) | pip 依赖隔离与受保护包机制 |
-| [vendor.py](../../src/endstone_lumenbridge/vendor.py) | 内置 vendored 依赖装载（websockets） |
+| [plugin.py](https://github.com/gxh6438/LumenBridge/blob/main/src/endstone_lumenbridge/plugin.py) | 插件入口：生命周期、`/lumen` 命令、`run_on_main` 调度、模块装配、聊天探针接线 |
+| [config.py](https://github.com/gxh6438/LumenBridge/blob/main/src/endstone_lumenbridge/config.py) | 主配置加载/校验/原子写入/外部修改检测 |
+| [connections.py](https://github.com/gxh6438/LumenBridge/blob/main/src/endstone_lumenbridge/connections.py) | 适配器卡片管理（CRUD、校验、按类型分文件持久化、群/管理员并集缓存） |
+| [event_bus.py](https://github.com/gxh6438/LumenBridge/blob/main/src/endstone_lumenbridge/event_bus.py) | 线程安全事件总线（on/once/emit/off） |
+| [i18n.py](https://github.com/gxh6438/LumenBridge/blob/main/src/endstone_lumenbridge/i18n.py) | 国际化：locale 规范化、语言检测、`t()` 翻译 |
+| [onebot/](https://github.com/gxh6438/LumenBridge/blob/main/src/endstone_lumenbridge/onebot/) | OneBot v11 适配器体系（见下文） |
+| [modules/](https://github.com/gxh6438/LumenBridge/blob/main/src/endstone_lumenbridge/modules/) | 七个功能模块（见下文） |
+| [subplugin/](https://github.com/gxh6438/LumenBridge/blob/main/src/endstone_lumenbridge/subplugin/) | 子插件加载器、Context API、依赖检查 |
+| [webui/](https://github.com/gxh6438/LumenBridge/blob/main/src/endstone_lumenbridge/webui/) | 纯标准库 Web 管理面板 |
+| [marketplace.py](https://github.com/gxh6438/LumenBridge/blob/main/src/endstone_lumenbridge/marketplace.py) | 插件市场与更新客户端 |
+| [pip_manager.py](https://github.com/gxh6438/LumenBridge/blob/main/src/endstone_lumenbridge/pip_manager.py) | pip 依赖隔离与受保护包机制 |
+| [vendor.py](https://github.com/gxh6438/LumenBridge/blob/main/src/endstone_lumenbridge/vendor.py) | 内置 vendored 依赖装载（websockets） |
 
 ## OneBot 适配器体系
 

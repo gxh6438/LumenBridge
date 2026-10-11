@@ -27,3 +27,7 @@ env/
 
 # IDE share artifacts and local source archives
 /lumenbridge-*-src.zip
+
+# VitePress
+node_modules/
+docs/.vitepress/cache/
