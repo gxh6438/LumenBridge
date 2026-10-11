@@ -161,3 +161,9 @@ lumen.regex_module.register_action("weather", my_handler)
 | 查服 | `^查服$` | 执行 `list` 并回显在线人数 |
 | 管理员执行命令 | `^执行(.+)` + 管理员条件 | 管理员在群里远程执行服务器命令 |
 | 入群欢迎 | `group.member_join` | @ 新成员发欢迎语 |
+
+## 相关文档
+
+- **下一步**：[插件市场与更新](marketplace.md)
+- [插件市场与更新](marketplace.md)——下一步：子插件生态
+- [消息收发](../development/messaging.md)——动作背后的机制

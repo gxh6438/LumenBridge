@@ -162,3 +162,7 @@ reply("引用回复", quote=True)     # 带引用
 
 - 可以：发 QQ 消息（适配器线程安全）、读写 storage/env、`lumen.run_on_main` / `call_on_main` 调度
 - 不可以：直接触碰玩家/世界对象（用 `call_on_main` 桥接）、执行阻塞过久（阻塞会拖慢同队列的其他事件）
+
+## 相关文档
+
+- **下一步**：[消息收发](messaging.md)

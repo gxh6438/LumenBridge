@@ -160,3 +160,9 @@ plugins/lumenbridge/
 | `adapter.listen_port 必须位于 1 至 65535 之间` | 端口越界 |
 | `监听端口与适配器「xx」冲突` | 两个反向 WS 适配器用了同一端口 |
 | `adapter.main_group 中包含无效的 openid` | 官方卡片里填了 QQ 号而非 group_openid |
+
+## 相关文档
+
+- **下一步**：[Web 管理面板](webui.md)
+- [群服互通与聊天](chat.md)——sync 配置的实际效果
+- [QQ 官方机器人开发专题](../development/qqofficial-dev.md)——官方域连接原理与限制

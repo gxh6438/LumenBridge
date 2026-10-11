@@ -140,3 +140,9 @@ pip、setuptools、wheel、websockets、endstone-lumenbridge …
 
 - WebUI「包管理」页：列表/安装/卸载/镜像源配置
 - 游戏命令 `/lumen pip install|list|uninstall`，详见[命令系统](commands.md#pip-python-包管理)
+
+## 相关文档
+
+- **下一步**：[常见问题](faq.md)
+- [常见问题](faq.md)——下一步：排障
+- [清单与依赖](../development/manifest-and-deps.md)——开发自己的子插件

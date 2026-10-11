@@ -132,5 +132,5 @@ plugins/lumenbridge/
 
 ## 相关文档
 
+- **下一步**：[测试指南](testing.md)——为改动补充回归
 - [架构总览](architecture.md)：分层与线程模型
-- [测试指南](testing.md)：如何运行与编写测试

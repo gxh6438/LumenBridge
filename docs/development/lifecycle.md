@@ -126,6 +126,7 @@ LumenBridge 本体的市场更新采用两阶段：先下载落盘，提示「�
 
 ## 相关文档
 
+- **下一步**：[项目结构](project-structure.md)——代码库地图
 - [子插件清单与依赖声明](manifest-and-deps.md)：加载检查顺序
 - [Context API 参考](context-api.md)：`on_load` 可用接口与自动清理语义
 - [架构总览](architecture.md)：线程模型与模块边界

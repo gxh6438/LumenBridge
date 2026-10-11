@@ -95,6 +95,7 @@
 
 ## 相关文档
 
+- **下一步**：[国际化](i18n.md)——多语言打磨
 - [子插件开发入门](subplugin-getting-started.md)：目录结构与最小示例
 - [Context API 参考](context-api.md)：`on_load(lumen)` 可用的全部接口
 - [生命周期与热重载](lifecycle.md)：`on_load` / `on_unload` 调用时机与清理语义
