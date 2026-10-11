@@ -1,6 +1,7 @@
 # 自动构建发布：推送 v* 标签时构建 wheel 并创建 GitHub Release；
 # 也可在 Actions 页面手动触发（workflow_dispatch），指定 tag 更新已有
-# Release 的 .whl（--clobber 同名覆盖），用于替换旧版产物。
+# Release 的 .whl（--clobber 同名覆盖）；tag 不存在时在当前提交上创建。
+# Release 正文自动取 CHANGELOG.md 中该版本段落，缺失时回退自动生成。
 name: Build Release
 
 on:
@@ -9,9 +10,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "目标 tag（如 v1.0.4；不存在时会在当前提交上创建）"
+        description: "目标 tag（如 v1.0.11；不存在时会在当前提交上创建）"
         required: true
-        default: "v1.0.4"
+        default: "v1.0.11"
 
 permissions:
   contents: write
@@ -50,11 +51,6 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: wheel
-          path: dist
-
       - name: Determine tag
         id: tag
         run: |
@@ -64,14 +60,44 @@ jobs:
             echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
 
+      # 检出构建提交以读取 CHANGELOG.md（tag 触发=tag 指向提交，手动=触发分支头）
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheel
+          path: dist
+
+      - name: Extract changelog
+        id: notes
+        run: |
+          VER="${{ steps.tag.outputs.tag }}"
+          VER="${VER#v}"
+          # 提取 "## [版本号]" 到下一个 "## [" 之间的段落
+          awk -v ver="## [$VER]" '
+            substr($0, 1, length(ver)) == ver {found=1; next}
+            found && /^## \[/ {exit}
+            found {print}
+          ' CHANGELOG.md | sed -e '/./,$!d' -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}' > body.md
+          if [ -s body.md ]; then
+            echo "已从 CHANGELOG.md 提取 $VER 段落"
+          else
+            echo "fallback=1" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create or update release
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
-          # Release 不存在则创建（tag 不存在时会在 --target 指向的提交上建 tag，
-          # tag 已存在则直接复用）；存在则复用
-          gh release view "$TAG" >/dev/null 2>&1 || \
-            gh release create "$TAG" --target "${{ github.sha }}" --title "$TAG" --generate-notes
-          # 上传 wheel，同名产物覆盖（替换旧版 .whl）
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release 已存在，复用并覆盖产物"
+          elif [ -n "${{ steps.notes.outputs.fallback }}" ]; then
+            gh release create "$TAG" --target "${{ github.sha }}" \
+              --title "$TAG" --generate-notes
+          else
+            gh release create "$TAG" --target "${{ github.sha }}" \
+              --title "$TAG" --notes-file body.md
+          fi
+          # 同名产物覆盖（替换旧版 .whl）
           gh release upload "$TAG" dist/*.whl --clobber
           echo "已上传："
           gh release view "$TAG" --json assets --jq '.assets[].name'
