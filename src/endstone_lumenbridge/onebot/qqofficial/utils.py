@@ -228,8 +228,9 @@ def extract_payload(message: Any) -> tuple[str, dict[str, Any] | None]:
 
     附件描述两种形态（互斥，首个命中生效）：
     - 富媒体 {"type": "image"|"video"|"record", "url": str|None, "data": bytes|None}；
-    - 按钮键盘 {"type": "keyboard", "template": str} 或 {"type": "keyboard",
-      "content": dict}（msgbuilder.keyboard 段，仅官方域渲染按钮）。
+    - 按钮键盘 {"type": "keyboard", "id": str} 或 {"type": "keyboard",
+      "content": dict}（msgbuilder.keyboard 段，仅官方域渲染按钮；模板 ID
+      为官方 keyboard.id 键）。
     出站 @ 统一经 normalize_at_markers 归一为官方文本链标准格式，sender
     检测后切换 markdown 载体发送（实测可渲染组合）。
     """
@@ -256,10 +257,10 @@ def extract_payload(message: Any) -> tuple[str, dict[str, Any] | None]:
             if at_id and at_id != "all":
                 parts.append(f'<qqbot-at-user id="{at_id}" />')
         elif stype == "keyboard" and media is None:
-            tpl = str(data.get("template") or "").strip()
+            tpl = str(data.get("id") or data.get("template") or "").strip()
             content = data.get("content")
             if tpl:
-                media = {"type": "keyboard", "template": tpl}
+                media = {"type": "keyboard", "id": tpl}
             elif isinstance(content, dict) and content:
                 media = {"type": "keyboard", "content": content}
         elif stype in MEDIA_FILE_TYPE and media is None:

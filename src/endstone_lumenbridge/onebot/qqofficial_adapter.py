@@ -43,6 +43,8 @@ from .qqofficial.constants import (
     HTTP_TIMEOUT,
     INTENT_FALLBACK_THRESHOLD,
     INTENT_GROUP_MEMBER,
+    INTERACTION_ACK_DELAY,
+    INTERACTION_ACK_MAX,
     LOCAL_MEDIA_MAX,
     MEDIA_FILE_TYPE,
     OFFICIAL_RAW_EVENTS,
@@ -199,6 +201,10 @@ class QQOfficialAdapter:
         # 入群申请缓存 flag → (group_openid, member_openid)：OneBot 只回传 flag，
         # 官方审批接口需三者齐备；超出上限丢最旧
         self._join_requests: dict[str, tuple[str, str]] = {}
+        # 已回应的互动事件 id（官方同一 interaction_id 仅可回应一次）；
+        # 超上限丢最旧防无限增长
+        self._acked_interactions: dict[str, float] = {}
+        self._interaction_lock = threading.Lock()
         # 消息 id → (kind, target)：撤回接口需 group_openid 反查（OneBot delete_msg 只带 message_id）
         self._msg_scopes: dict[str, tuple[str, str]] = {}
         # GROUP_MEMBER intent 自适应降级：官方文档位号两版不一（1<<24 / 1<<25），
@@ -801,6 +807,64 @@ class QQOfficialAdapter:
                 self._msg_scopes.pop(old, None)
         self._msg_scopes[key] = (kind, str(target))
 
+    def respond_interaction(
+        self,
+        interaction_id: Any,
+        code: int = 0,
+        callback: Callable[[Any], None] | None = None,
+    ) -> bool:
+        """回应互动事件（按钮/快捷菜单点击）：PUT /interactions/{id}。
+
+        官方要求 type=11/12 的点击必须回应，否则客户端一直 loading 到超时；
+        同一 interaction_id 仅可回应一次（重复返回 False）。code：0 成功 /
+        1 操作失败 / 2 操作频繁 / 3 重复操作 / 4 没有权限 / 5 仅管理员操作。
+        子插件经 call_action("respond_interaction", ...) 调用抢占兜底回应。
+        """
+        # 官方历史载荷 id 可能带 "INTERACTION_CREATE:" 前缀，PUT 接口要求纯 ID
+        iid = str(interaction_id or "").strip().removeprefix("INTERACTION_CREATE:")
+        if not iid:
+            if callback:
+                callback({"ok": False, "error": "empty interaction_id"})
+            return False
+        with self._interaction_lock:
+            if iid in self._acked_interactions:
+                if callback:
+                    callback({"ok": False, "error": "interaction already responded"})
+                return False
+            self._acked_interactions[iid] = time.time()
+            if len(self._acked_interactions) > INTERACTION_ACK_MAX:
+                for old in list(self._acked_interactions.keys())[: INTERACTION_ACK_MAX // 4]:
+                    self._acked_interactions.pop(old, None)
+
+        async def _respond() -> Any:
+            await self._api_request("PUT", f"/interactions/{iid}", {"code": int(code)})
+            return {"ok": True}
+
+        self._run_official_api(_respond, callback)
+        return True
+
+    def schedule_interaction_ack(
+        self, interaction_id: str, delay: float = INTERACTION_ACK_DELAY
+    ) -> None:
+        """按钮点击兜底回应：子插件未在 delay 秒内自定义回应时自动补 code=0。
+
+        保证客户端永不因未回应而 loading 到超时；子插件经 respond_interaction
+        抢先回应后，此处因同一 id 去重而自动跳过。
+        """
+        iid = str(interaction_id or "").strip()
+        loop = self._loop
+        if not iid or loop is None or loop.is_closed():
+            return
+
+        async def _later() -> None:
+            await asyncio.sleep(max(0.0, delay))
+            self.respond_interaction(iid, 0)
+
+        try:
+            asyncio.run_coroutine_threadsafe(_later(), loop)
+        except RuntimeError:
+            pass
+
     def delete_msg(
         self, message_id: Any, callback: Callable[[Any], None] | None = None
     ) -> None:
@@ -1199,6 +1263,11 @@ class QQOfficialAdapter:
                 str(p.get("cursor") or ""),
                 int(p.get("limit") or 20),
                 callback,
+            )
+        elif action == "respond_interaction":
+            # 互动事件回应（按钮/快捷菜单点击）：抢占兜底自动回应自定义 code
+            self.respond_interaction(
+                p.get("interaction_id"), int(p.get("code") or 0), callback
             )
         elif action == "get_group_info":
             self._get_group_info_async(p.get("group_id"), callback)

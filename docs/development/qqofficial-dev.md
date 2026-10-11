@@ -95,7 +95,7 @@ WS 关闭码语义：`4004` 鉴权失败（重取 token）；`4006` / `4009` / `
 实现机制：
 
 - **被动凭据池**：每个目标保留最近 8 条收到的 `msg_id`，回复时取最新可用凭据；
-- **入群 event_id**：机器人入群事件的 `event_id` 在 30 分钟内可作被动回复凭据（不消耗主动额度）；
+- **event_id 凭据**：机器人入群事件、按钮/快捷菜单点击事件（`INTERACTION_CREATE`）的 `event_id` 在 30 分钟内可作被动回复凭据（不消耗主动额度）；
 - 凭据耗尽或过期（业务码 `40034005`）后转走**主动消息**通道。
 
 ## 主动消息与补发栈
@@ -111,6 +111,7 @@ WS 关闭码语义：`4004` 鉴权失败（重取 token）；`4006` / `4009` / `
 |----------|------|
 | 纯文本 | `msg_type=0`（content） |
 | 含 @ 或 markdown 段 | `msg_type=2` markdown 载体（@ 转官方文本标记） |
+| 按钮键盘段 | `msg_type=2` markdown 载体 + `keyboard` 字段（见下节） |
 | 图片/视频/语音 | 先调官方 media 接口拿 file_info，再发富媒体消息 |
 
 容错与降级：
@@ -120,6 +121,65 @@ WS 关闭码语义：`4004` 鉴权失败（重取 token）；`4006` / `4009` / `
 - 合并转发：官方无 forward 接口，降级为**逐条发送模拟**（节点上限 3，额度宝贵）。
 
 富媒体限制：官方 media 接口仅支持 image/video/file 三类（语音映射 file）；本地文件 base64 上传上限 8MB（官方限制约 10MB 留余量）。
+
+## 按钮键盘互动消息
+
+官方域支持**消息按钮**（官方「消息按钮」协议）：markdown 消息底部挂载键盘，用户点击回调按钮触发 `INTERACTION_CREATE` 互动事件。消息段构造见 [消息收发 · 按钮键盘](messaging.md#按钮键盘官方域扩展)，本节讲收发全链路。
+
+### 发送侧
+
+- 键盘仅官方域渲染：`msg_type=2`（markdown 载体）+ `keyboard` 字段（自定义按钮 `keyboard.content` 或后台模板 `keyboard.id`）；
+- 官方必填字段（`visited_label` / `data` / `permission` / `unsupport_tips`）由 `button()` 缺省自动补全，避免 `630001 param invalid`；
+- markdown 能力未开通降级纯文本时键盘一并丢弃（按钮依赖 markdown 载体）；
+- 单条消息键盘与富媒体互斥（首个命中生效）。
+
+### 点击回调（入站）
+
+点击回调按钮触发 `notice.interaction_create`（1<<26 互动事件），`raw` 为官方原始载荷：
+
+```python
+def on_interaction(event):
+    raw = event["raw"]
+    # 群聊点击：raw.group_openid / raw.group_member_openid / raw.data.resolved.button_data
+    # 单聊点击：raw.user_openid / raw.data.resolved.button_data
+    if raw["data"]["resolved"]["button_data"] == "ans_creeper":
+        event.ctx.send_group_msg(raw["group_openid"], "回答正确，验证通过！")
+
+lumen.on("notice.interaction_create", on_interaction)
+```
+
+官方载荷关键字段（type=11 消息按钮）：
+
+| 字段 | 说明 |
+|------|------|
+| `id` | 互动事件 ID（被动回复凭据 + 回应接口参数） |
+| `type` | 互动类型：11 消息按钮 / 12 快捷菜单 / 13 消息反馈 / 14 清空会话 / 18 用户授权 / 19 群授权 等 |
+| `scene` / `chat_type` | c2c=单聊 / group=群聊 / guild=频道 |
+| `group_openid` / `group_member_openid` | 群聊场景的群与点击者 |
+| `user_openid` | 单聊场景的点击者 |
+| `data.resolved.button_data` | 按钮的 `data` 字段原样回传（答题答案判定靠它） |
+| `data.resolved.button_id` | 按钮的 `id` 字段（发送时设置才有） |
+
+### 回应机制（防客户端转圈）
+
+官方要求：**type=11/12 的点击必须在事件有效期内调 `PUT /interactions/{interaction_id}` 回应，否则客户端一直 loading 到超时；同一 interaction_id 仅可回应一次**。适配器处理：
+
+- 收到 type=11/12 点击 → 调度 2.5 秒兜底自动回应 `code=0`（子插件无感，客户端永不转圈）；
+- 子插件可在宽限期内抢先自定义回应（抢占后兜底自动跳过）：
+
+```python
+lumen.QClient.call_action(
+    "respond_interaction",
+    {"interaction_id": raw["id"], "code": 5},   # 5=仅管理员操作：非管理员点「跳过验证」给失败提示
+    callback=lambda r: None,
+)
+```
+
+  `code`：0 成功 / 1 操作失败 / 2 操作频繁 / 3 重复操作 / 4 没有权限 / 5 仅管理员操作。
+
+### 被动回复凭据
+
+点击事件 `id` 会注册为该目标的 `event_id` 被动凭据（与入群 event_id 同机制）：点击后的回复消息（如「验证通过」）自动借道被动通道发送，**不消耗主动额度**。
 
 ## API 翻译参考（官方域全量动作）
 
@@ -133,7 +193,16 @@ WS 关闭码语义：`4004` 鉴权失败（重取 token）；`4006` / `4009` / `
 - 消息经 `extract_payload` 归一为 `(文本, 富媒体)`：`text` 段拼接、`at` 段转官方 `<qqbot-at-user id="..." />` 文本链（`@全体成员` 丢弃）、首个 `image` / `video` / `record` 段作富媒体（`reply` 段忽略）；文本截断 2000 字符；
 - 载体自动选择：纯文本 `msg_type=0`；含 @ 走 `msg_type=2` markdown（实测唯一可渲染真实 @ 的组合）；富媒体 `msg_type=7`；
 - 富媒体先 `POST /v2/{groups|users}/{openid}/files` 上传（URL 直传或本地 base64，上限 8MB）取 `file_info` 再发送，失败降级纯文本；
-- 凭据三级：被动 `msg_id`+`msg_seq`（不耗主动额度）→ 入群 `event_id` → 主动消息（可能被拒 22009 入补发栈）。
+- 凭据三级：被动 `msg_id`+`msg_seq`（不耗主动额度）→ `event_id`（入群 / 按钮点击事件）→ 主动消息（可能被拒 22009 入补发栈）。
+
+### 互动事件回应
+
+**`respond_interaction(interaction_id, code, callback)`**（`call_action("respond_interaction", ...)`）
+→ `PUT /interactions/{interaction_id}`，body `{"code": int}`
+
+- 官方要求按钮（type=11）/快捷菜单（type=12）点击必须回应，否则客户端 loading 到超时；适配器已内置 2.5 秒兜底自动回应（`code=0`），子插件仅在有自定义提示需求时抢先调用（如非管理员点管理员按钮回 `code=5`）；
+- 同一 `interaction_id` 仅可回应一次（重复回调 `{"ok": False, "error": ...}`）；`interaction_id` 取互动事件 `raw.id`（适配器自动剥离 `INTERACTION_CREATE:` 前缀）；
+- `code`：0 成功 / 1 操作失败 / 2 操作频繁 / 3 重复操作 / 4 没有权限 / 5 仅管理员操作。
 
 ### 消息撤回
 

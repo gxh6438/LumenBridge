@@ -134,6 +134,15 @@ PASSIVE_POOL_MAX = 8
 # 机器人入群事件 event_id 可作被动回复凭据（不消耗主动额度）的窗口
 EVENT_ID_WINDOW = 30 * 60.0
 
+# 互动事件回应（官方「互动事件响应」文档）：type=11 消息按钮 / 12 快捷菜单
+# 的点击必须调 PUT /interactions/{id} 回应，否则客户端 loading 到超时；
+# 同一 interaction_id 仅可回应一次。子插件自定义回应的宽限时长：超时后
+# 适配器自动补 code=0 兜底，保证客户端永不转圈。
+INTERACTION_ACK_TYPES = frozenset({11, 12})
+INTERACTION_ACK_DELAY = 2.5
+# 已回应 interaction_id 去重表上限（防无限增长，超限丢最旧）
+INTERACTION_ACK_MAX = 512
+
 # 主动消息被拒（22009）补发栈：每目标上限 / 每次借道补发条数
 # （过多会挤占正常回复额度，Gensokyo 建议不超过 3）
 ACTIVE_STACK_MAX = 5

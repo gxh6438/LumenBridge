@@ -432,36 +432,52 @@ def test_extract_payload() -> None:
 
 
 def test_keyboard_segments() -> None:
-    """按钮键盘消息段构造：keyboard 三形态 + button 便捷构造。"""
+    """按钮键盘消息段构造：keyboard 三形态 + button 便捷构造（官方必填字段自动补全）。"""
     from endstone_lumenbridge.onebot.message import button, keyboard
 
+    # 官方模板键盘键名为 id（非 template）
     seg = keyboard("tpl_123")
-    check("模板键盘段", seg == {"type": "keyboard", "data": {"template": "tpl_123"}})
+    check("模板键盘段", seg == {"type": "keyboard", "data": {"id": "tpl_123"}})
 
     rows = [[button("A", "ans_a"), button("跳过", "skip", permission=1)]]
     seg = keyboard(rows)
     content = seg["data"]["content"]
     row = content["rows"][0]["buttons"]
+    # 官方必填：visited_label / data / permission / unsupport_tips 均自动补全
     check(
-        "便捷行列表包装 rows",
-        row[0] == {
-            "render_data": {"label": "A", "style": 1},
-            "action": {"type": 1, "data": "ans_a"},
-        }
-        and row[1]["action"]["permission"] == {"type": 1},
+        "按钮必填字段自动补全",
+        row[0]["render_data"]["label"] == "A"
+        and row[0]["render_data"]["visited_label"] == "A"
+        and row[0]["action"]["data"] == "ans_a"
+        and row[0]["action"]["permission"] == {"type": 2}
+        and row[0]["action"]["unsupport_tips"],
     )
+    check("管理员按钮 permission=1", row[1]["action"]["permission"] == {"type": 1})
+    check(
+        "visited_label 显式指定优先",
+        button("B", "b", visited_label="已作答")["render_data"]["visited_label"] == "已作答",
+    )
+    # 指令按钮专属增强（官方 8983+）：enter 直接发送 / reply 引用本消息
+    cmd = button("查绑定", "/bind", action_type=2, enter=True, reply=True)
+    check(
+        "指令按钮 enter/reply",
+        cmd["action"]["type"] == 2 and cmd["action"]["enter"] is True and cmd["action"]["reply"] is True,
+    )
+    # 跳转按钮：url 透传
+    jump = button("打开面板", "", action_type=0, url="https://example.com")
+    check("跳转按钮 url", jump["action"]["type"] == 0 and jump["action"]["url"] == "https://example.com")
 
     seg = keyboard({"rows": [{"buttons": []}]})
     check("dict 原样透传", seg["data"]["content"] == {"rows": [{"buttons": []}]})
 
 
 def test_extract_keyboard() -> None:
-    """keyboard 段提取：模板 / inline、与富媒体互斥、纯键盘无正文。"""
+    """keyboard 段提取：模板（id 键）/ inline、与富媒体互斥、纯键盘无正文。"""
     from endstone_lumenbridge.onebot.qqofficial_adapter import _extract_payload
     from endstone_lumenbridge.onebot.message import button, keyboard
 
     text, att = _extract_payload([keyboard("tpl_9")])
-    check("模板键盘附件", text == "" and att == {"type": "keyboard", "template": "tpl_9"})
+    check("模板键盘附件", text == "" and att == {"type": "keyboard", "id": "tpl_9"})
 
     kb = keyboard([[button("A", "a")]])
     text, att = _extract_payload([{"type": "text", "data": {"text": "请作答"}}, kb])
@@ -479,7 +495,7 @@ def test_extract_keyboard() -> None:
     check("媒体优先忽略键盘", att is not None and att["type"] == "image")
 
     # 空模板 / 空内容：无效键盘忽略
-    text, att = _extract_payload([{"type": "keyboard", "data": {"template": "  "}}])
+    text, att = _extract_payload([{"type": "keyboard", "data": {"id": "  "}}])
     check("空模板键盘忽略", text == "" and att is None)
 
 
@@ -496,11 +512,11 @@ def test_keyboard_body() -> None:
         and body["markdown"]["content"] == "请选择",
     )
 
-    kb_tpl = {"type": "keyboard", "template": "tpl_1"}
+    kb_tpl = {"type": "keyboard", "id": "tpl_1"}
     body = _payload_body("", "", kb_tpl)
     check(
         "模板键盘空正文给空白 markdown",
-        body["msg_type"] == 2 and body["keyboard"] == {"template": "tpl_1"} and body["markdown"]["content"],
+        body["msg_type"] == 2 and body["keyboard"] == {"id": "tpl_1"} and body["markdown"]["content"],
     )
 
     # markdown 特殊字符正文被转义（防客户端误解析）
@@ -517,6 +533,72 @@ def test_keyboard_body() -> None:
         "降级后为纯文本无键盘",
         body == {"msg_type": 0, "content": "请选择"},
     )
+
+
+def test_interaction_event() -> None:
+    """互动事件：event_id 凭据注册 + 兜底回应调度 + notice 原样转发；回应去重。"""
+    ad = make_adapter()
+    acks: list[str] = []
+    ad.schedule_interaction_ack = lambda iid, delay=2.5: acks.append(iid)
+
+    # 群聊按钮点击（type=11，官方 2026-07 载荷结构）
+    data = {
+        "id": "06915133-7aef-46ed-94f7-c50939e285ae",
+        "type": 11,
+        "scene": "group",
+        "chat_type": 1,
+        "group_openid": "GRPOPENID1",
+        "group_member_openid": "MEMBER9",
+        "data": {"type": 11, "resolved": {"button_data": "ans_creeper", "button_id": "btn1"}},
+        "timestamp": "2026-10-11T07:00:00+08:00",
+        "version": 1,
+    }
+    run_async(ad.translator.on_dispatch({"t": "INTERACTION_CREATE", "d": data}))
+    check("按钮点击注册 event_id 凭据", ad.credentials.take_event_id("GRPOPENID1") == data["id"])
+    check("按钮点击调度兜底回应", acks == [data["id"]])
+    pack = [p for e, p in ad.bus.events if e == "onebot.pack"][-1]
+    check(
+        "互动事件 notice 转发",
+        pack["notice_type"] == "interaction_create"
+        and pack["group_id"] == "GRPOPENID1"
+        and pack["user_id"] == "MEMBER9"
+        and pack["raw"]["data"]["resolved"]["button_data"] == "ans_creeper",
+    )
+
+    # 单聊快捷菜单（type=12）：凭据目标为 user_openid
+    acks.clear()
+    c2c = {
+        "id": "c2c-iid",
+        "type": 12,
+        "scene": "c2c",
+        "user_openid": "USER2",
+        "data": {"type": 12, "resolved": {"feature_id": "menu1"}},
+    }
+    run_async(ad.translator.on_dispatch({"t": "INTERACTION_CREATE", "d": c2c}))
+    check(
+        "单聊互动凭据目标 user_openid",
+        ad.credentials.take_event_id("USER2") == "c2c-iid" and acks == ["c2c-iid"],
+    )
+
+    # 消息反馈（type=13）官方无需回应：不注册凭据、不调度，事件仍转发
+    ad.bus.events.clear()
+    acks.clear()
+    feedback = {
+        "id": "fb-1",
+        "type": 13,
+        "scene": "c2c",
+        "user_openid": "USER1",
+        "data": {"type": 13, "resolved": {"feedback_opt": "LIKE"}},
+    }
+    run_async(ad.translator.on_dispatch({"t": "INTERACTION_CREATE", "d": feedback}))
+    check("非按钮互动不回应", acks == [] and ad.credentials.take_event_id("USER1") == "")
+    packs = [p for e, p in ad.bus.events if e == "onebot.pack"]
+    check("反馈事件仍转发", bool(packs) and packs[-1]["notice_type"] == "interaction_create")
+
+    # 回应去重：同一 interaction_id 仅一次；历史前缀剥离后归一
+    check("首次回应受理", ad.respond_interaction("INTERACTION_CREATE:abc-1", 0) is True)
+    check("重复回应拒绝", ad.respond_interaction("abc-1", 0) is False)
+    check("前缀剥离归一记录", "abc-1" in ad._acked_interactions)
 
 
 def test_mention_markdown_body() -> None:

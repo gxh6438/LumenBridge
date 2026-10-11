@@ -98,30 +98,46 @@ def button(
     permission: int | dict | None = None,
     action_type: int = 1,
     url: str = "",
+    reply: bool = False,
+    enter: bool = False,
 ) -> dict:
     """官方域按钮节点便捷构造（配合 keyboard() 使用）。
 
-    action_type：1 回调按钮（点击触发 notice.interaction_create，data 为
-    回传数据）/ 2 指令按钮（点击自动以机器人身份发送 data 文本）/ 0 跳转
-    按钮（需 url）。style：0 次要线框 / 1 主实心。permission 语义与取值
-    以官方按钮文档为准（int 直接作为 type，dict 原样透传）。
+    官方必填字段（visited_label / data / permission / unsupport_tips）缺省
+    时自动补全：visited_label 回填 label，permission 默认 {"type": 2}（所有
+    人可操作）。action_type：1 回调按钮（点击触发 notice.interaction_create，
+    data 为回传数据）/ 2 指令按钮（点击在用户输入框插入 @机器人 data，
+    enter=True 直接送出、reply=True 引用本消息）/ 0 跳转按钮（需 url）。
+    style：0 灰色线框 / 1 蓝色线框。permission int 直接作为官方 type
+    （0 指定用户 1 仅管理者 2 所有人 3 身份组），dict 原样透传。
     """
     node: dict = {
-        "render_data": {"label": str(label), "style": int(style)},
-        "action": {"type": int(action_type)},
+        "render_data": {
+            "label": str(label),
+            "visited_label": str(visited_label or label),
+            "style": int(style),
+        },
+        "action": {
+            "type": int(action_type),
+            "permission": (
+                {"type": int(permission)}
+                if isinstance(permission, int)
+                else (permission if permission is not None else {"type": 2})
+            ),
+            "data": str(data),
+            "unsupport_tips": "当前客户端版本暂不支持此操作",
+        },
     }
     if id:
         node["id"] = str(id)
-    if visited_label:
-        node["render_data"]["visited_label"] = str(visited_label)
-    if permission is not None:
-        node["action"]["permission"] = (
-            {"type": int(permission)} if isinstance(permission, int) else permission
-        )
-    if data:
-        node["action"]["data"] = str(data)
     if url:
         node["action"]["url"] = str(url)
+    if action_type == 2:
+        # 指令按钮专属字段（客户端 8983+）：reply 引用本消息 / enter 直接发送
+        if reply:
+            node["action"]["reply"] = True
+        if enter:
+            node["action"]["enter"] = True
     return node
 
 
@@ -129,12 +145,12 @@ def keyboard(payload: dict | str | list) -> Segment:
     """按钮键盘消息段（LumenBridge 官方域扩展；个人号域协议端会忽略未知段）。
 
     payload 三种形态：
-    - str：开放平台后台预配置的按钮模板 ID；
+    - str：开放平台后台预配置的按钮模板 ID（官方 keyboard.id）；
     - list：便捷行列表 [[button(...), ...], ...]，自动包装为官方 rows 结构；
     - dict：完整官方 keyboard.content 结构（如 {"rows": [...]}）原样透传。
     """
     if isinstance(payload, str):
-        data: dict = {"template": payload.strip()}
+        data: dict = {"id": payload.strip()}
     elif isinstance(payload, list):
         rows = [{"buttons": [b if isinstance(b, dict) else dict(b) for b in row]} for row in payload]
         data = {"content": {"rows": rows}}

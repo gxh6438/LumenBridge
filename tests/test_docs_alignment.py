@@ -73,9 +73,17 @@ class FakeAdapter:
         self._loop = None
         self.api_calls = []
         self._discovered_groups = {}
+        # 与真实适配器属性契约对齐：互动事件会注册凭据并调度兜底回应
+        from endstone_lumenbridge.onebot.qqofficial.credentials import CredentialsStore
+
+        self.credentials = CredentialsStore()
+        self.scheduled_acks: list[str] = []
 
     def remember_group(self, group_openid):
         self._discovered_groups[str(group_openid or "")] = 0.0
+
+    def schedule_interaction_ack(self, interaction_id, delay=2.5):
+        self.scheduled_acks.append(str(interaction_id or ""))
 
     def _emit_pack(self, pack):
         # 与真实适配器的 stop() 后 fallback 路径一致：直接同步 emit
@@ -210,6 +218,9 @@ class RawForwardTests(unittest.TestCase):
         self.assertEqual(pack["user_id"], "M1")
         self.assertEqual(pack["group_id"], "G1")
         self.assertEqual(pack["official_event"], "INTERACTION_CREATE")
+        # 官方要求按钮点击（type=11）必须回应：调度兜底回应并注册被动凭据
+        self.assertEqual(self.ad.scheduled_acks, ["itx-1"])
+        self.assertEqual(self.ad.credentials.take_event_id("G1"), "itx-1")
 
         self._dispatch(
             "INTERACTION_CREATE",
@@ -217,6 +228,8 @@ class RawForwardTests(unittest.TestCase):
         )
         pack2 = self.ad.bus.packs[1][1]
         self.assertEqual(pack2["user_id"], "U1")
+        # 用户授权（type=18）官方无需回应：不调度不注册
+        self.assertEqual(self.ad.scheduled_acks, ["itx-1"])
 
     def test_guild_create_forwarded(self):
         """频道创建事件 raw 转发（1<<0 默认订阅后即可到达）。"""

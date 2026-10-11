@@ -38,7 +38,7 @@ def _payload_body(
     """按内容选择官方消息载体。
 
     - 按钮键盘：msg_type=2，正文走 markdown 载体（官方键盘仅在该载体下
-      渲染），keyboard 为 inline content 或模板 ID；
+      渲染），keyboard 为 inline content 或模板 ID（官方键名 id）；
     - 富媒体：msg_type=7，content 作配文；
     - 含出站 @ 标记（官方文本链）：切换 markdown 载体（msg_type=2），
       实测仅该组合可渲染真实 @；其余文本同步转义防误解析；
@@ -50,8 +50,8 @@ def _payload_body(
             "msg_type": 2,
             "markdown": {"content": escape_markdown_text(content or " ")},
         }
-        if "template" in keyboard:
-            body["keyboard"] = {"template": keyboard["template"]}
+        if "id" in keyboard:
+            body["keyboard"] = {"id": keyboard["id"]}
         else:
             body["keyboard"] = {"content": keyboard.get("content") or {}}
         return body
