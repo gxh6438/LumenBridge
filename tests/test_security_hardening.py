@@ -353,6 +353,43 @@ def test_marketplace_redirect_guard():
     assert hasattr(urllib.request, "urlopen")
 
 
+def test_webui_fetch_allows_cross_host_redirect():
+    # WebUI 下载（子插件 zip / Endstone 依赖 whl）允许 30x 跳转到其它主机
+    # （如链接 302 到 CDN）；初始 URL 的白名单校验在调用侧，不在本函数。
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from endstone_lumenbridge.webui.server import _fetch_url_bytes
+
+    payload = b"PK\x03\x04cross-host-redirect-body"
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/hop":
+                # 127.0.0.1 -> localhost：host 字符串不同，验证跨主机放行
+                self.send_response(302)
+                self.send_header("Location", "http://localhost:%d/real.zip" % PORT[0])
+                self.end_headers()
+            else:
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        def log_message(self, *args):  # 静默
+            pass
+
+    PORT = [0]
+    srv = HTTPServer(("127.0.0.1", 0), Handler)
+    PORT[0] = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        data = _fetch_url_bytes(f"http://127.0.0.1:{PORT[0]}/hop", max_bytes=1024)
+        assert data == payload
+    finally:
+        srv.shutdown()
+
+
 def test_marketplace_run_on_main_wait_main_thread():
     plugin = SimpleNamespace(
         logger=QuietLogger(), _tee_logger=None,
@@ -396,6 +433,7 @@ def main():
         test_run_command_capture_worker_thread_uses_scheduler,
         test_zip_extraction_limits,
         test_marketplace_redirect_guard,
+        test_webui_fetch_allows_cross_host_redirect,
         test_marketplace_run_on_main_wait_main_thread,
         test_plugin_is_on_main_thread,
     ]
