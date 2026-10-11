@@ -164,6 +164,5 @@ lumen.regex_module.register_action("weather", my_handler)
 
 ## 相关文档
 
-- **下一步**：[插件市场与更新](marketplace.md)
-- [插件市场与更新](marketplace.md)——下一步：子插件生态
+- **下一步**：[插件市场与更新](marketplace.md)——子插件生态
 - [消息收发](../development/messaging.md)——动作背后的机制

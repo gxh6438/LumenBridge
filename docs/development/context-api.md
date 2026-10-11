@@ -105,9 +105,12 @@ def on_load(lumen):
         "diange",                     # 命令名统一按小写处理 → /diange
         handler,
         description="点歌命令",
+        aliases=["dg"],               # 别名仅记录到命令面板，重启后生效
         usages=["/diange [args: message]"],
     )
 ```
+
+签名：`register_command(name, handler, description="", aliases=None, usages=None) -> bool`。
 
 工作机制（**两段式注册**）：
 

@@ -143,6 +143,5 @@ pip、setuptools、wheel、websockets、endstone-lumenbridge …
 
 ## 相关文档
 
-- **下一步**：[常见问题](faq.md)
-- [常见问题](faq.md)——下一步：排障
+- **下一步**：[常见问题](faq.md)——排障
 - [清单与依赖](../development/manifest-and-deps.md)——开发自己的子插件
