@@ -96,9 +96,9 @@ jobs:
         run: |
           VER="${{ needs.build.outputs.tag }}"
           VER="${VER#v}"
-          # 提取 "## [版本号]" 到下一个 "## [" 之间的段落
+          # 提取 "## [版本号]" 到下一个 "## [" 之间的段落（含带日期的标题行）
           awk -v ver="## [$VER]" '
-            substr($0, 1, length(ver)) == ver {found=1; next}
+            substr($0, 1, length(ver)) == ver {found=1; print; next}
             found && /^## \[/ {exit}
             found {print}
           ' CHANGELOG.md | sed -e '/./,$!d' -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}' > body.md
