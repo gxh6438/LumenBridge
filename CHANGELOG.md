@@ -1,17 +1,5 @@
 # 更新日志
 
-## [未发布]
-
-### 变更
-
-- 许可证由 MIT 更换为 Apache License 2.0（已发布的旧版本仍按 MIT 分发）
-- 新增 THIRD_PARTY_NOTICES.md 声明与 SparkBridge3 的衍生关系，wheel 打包随附
-- 后台管理员专属角色由 `sparkadmin` 更名为 `lumenadmin`（区别于群管理员）
-
-### 破坏性变更
-
-- 移除旧配置中 `sparkadmin` 角色的兼容逻辑，正则规则条件里 `userRole == "sparkadmin"` 将不再匹配，请手动改为 `lumenadmin`
-
 ## [1.0.12] - 2026-10-11
 
 ### 新增
