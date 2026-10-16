@@ -174,7 +174,8 @@ class PipManager:
         # 用 or "" 防 None：index_url 为 null 时 str(None) 会得到 "None" 被当 URL
         self.index_url: str = str(cfg.get("index_url") or "")
         try:
-            self.timeout: int = int(cfg.get("timeout") or 300)
+            # 下限 1：负/零超时会让 watchdog 立即杀掉安装进程
+            self.timeout: int = max(1, int(cfg.get("timeout") or 300))
         except (TypeError, ValueError):
             self.timeout = 300
 
@@ -407,21 +408,15 @@ class PipManager:
         # uv 不支持 --report，预检必须用标准 pip 拿结构化 JSON 才能识别受保护依赖
         cmd = [
             sys.executable, "-m", "pip", "install", "--break-system-packages",
-            "--dry-run", "--report", "-", "--quiet", "--",
+            "--dry-run", "--report", "-", "--quiet",
         ]
         if self.index_url:
-            # -i 必须在 -- 之前
-            cmd = [
-                sys.executable, "-m", "pip", "install", "--break-system-packages",
-                "--dry-run", "--report", "-", "--quiet", "-i", self.index_url, "--",
-            ]
+            cmd += ["-i", self.index_url]
         if upgrade:
-            cmd.insert(-1, "--upgrade")
-        cmd.extend(packages)
-        # 预检超时上限 180s：慢网络/大依赖树解析易超 60s，用户配置更低时取更小值
-        precheck_timeout = (
-            min(self.timeout, 180) if self.timeout > 60 else min(self.timeout, 60)
-        )
+            cmd.append("--upgrade")
+        cmd += ["--"] + packages
+        # 预检超时上限 180s：慢网络/大依赖树解析易超 60s
+        precheck_timeout = min(self.timeout, 180)
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",

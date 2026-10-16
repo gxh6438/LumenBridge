@@ -11,13 +11,13 @@
 from __future__ import annotations
 
 import hmac
-import re
 import secrets
 import threading
 import time
 from typing import TYPE_CHECKING, Any
 
 from ..i18n import t as _t
+from .textutil import match_command_prefix, message_text
 
 if TYPE_CHECKING:
     from ..plugin import LumenBridgePlugin
@@ -30,22 +30,10 @@ _KEY_BYTES = 6
 # 绑定指令前缀：全语言变体常驻接受，匹配不区分大小写
 _BIND_COMMANDS = ("/lumen绑定", "/lumen綁定", "/lumen bind")
 
-# raw_message 中的 @ CQ 码：剥离后「@机器人 指令 密钥」与「指令 密钥」等价
-_CQ_AT_RE = re.compile(r"\[CQ:at,[^\]]*\]\s*")
-
 
 def extract_bind_text(pack: dict[str, Any]) -> str:
-    """提取群消息的可比对纯文本（剥离 @ 段）：优先拼 text 段，回退剥离 @ CQ 码。"""
-    segments = pack.get("message")
-    if isinstance(segments, list):
-        parts = [
-            str((seg.get("data") or {}).get("text") or "")
-            for seg in segments
-            if isinstance(seg, dict) and seg.get("type") == "text"
-        ]
-        return "".join(parts).strip()
-    raw = str(pack.get("raw_message", "") or "")
-    return _CQ_AT_RE.sub("", raw).strip()
+    """提取群消息的可比对纯文本（回退路径剥离 @ CQ 码）。"""
+    return message_text(pack, strip_at=True)
 
 
 class GroupBindModule:
@@ -104,14 +92,9 @@ class GroupBindModule:
 
     def _on_group_message(self, pack: dict[str, Any], reply: Any) -> None:
         text = extract_bind_text(pack)
-        # 快速预筛：指令前缀必以 / 开头，绝大多数群消息零成本跳过
-        if not text or not text.startswith("/"):
-            return
-        lowered = text.casefold()
-        for cmd in _BIND_COMMANDS:
-            if lowered.startswith(cmd.casefold()):
-                self._handle_bind(pack, reply, text[len(cmd):].strip())
-                return
+        cmd = match_command_prefix(text, _BIND_COMMANDS)
+        if cmd:
+            self._handle_bind(pack, reply, text[len(cmd):].strip())
 
     def _handle_bind(self, pack: dict[str, Any], reply: Any, token: str) -> None:
         adapter_id = str(pack.get("_lumen_adapter_id", "") or "")

@@ -14,10 +14,17 @@ import threading
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .i18n import t as _t
 
 ADAPTER_TYPES = ("websocket", "astrbot", "qqofficial")
+
+ADAPTER_DEFAULT_NAMES = {
+    "websocket": "OneBot",
+    "astrbot": "AstrBot",
+    "qqofficial": "QQ 官方机器人",
+}
 
 
 def _default_sync() -> dict[str, Any]:
@@ -182,8 +189,6 @@ def _validate_adapter(adapter: dict[str, Any]) -> None:
         # target：反向 WS 时必填且必须是 ws:// 或 wss://
         target = str(_get("target", "") or "").strip()
         if target:
-            from urllib.parse import urlparse
-
             parsed = urlparse(target)
             if parsed.scheme not in {"ws", "wss"} or not parsed.netloc:
                 raise ConnectionValidationError("adapter.target 必须是有效的 ws:// 或 wss:// 地址")
@@ -416,12 +421,7 @@ class ConnectionManager:
             raise ConnectionValidationError(f"未知适配器类型：{adapter_type}")
         result = copy.deepcopy(template)
         result["id"] = self._gen_id(adapter_type)
-        default_names = {
-            "websocket": "OneBot",
-            "astrbot": "AstrBot",
-            "qqofficial": "QQ 官方机器人",
-        }
-        result["name"] = default_names.get(adapter_type, adapter_type)
+        result["name"] = ADAPTER_DEFAULT_NAMES.get(adapter_type, adapter_type)
         return result
 
     @staticmethod
@@ -541,10 +541,8 @@ class ConnectionManager:
         created["enabled"] = True
         with self._lock:
             same = [a for a in self.adapters if a.get("type") == adapter_type]
-            base_name = {"websocket": "OneBot", "astrbot": "AstrBot",
-                         "qqofficial": "QQ 官方机器人"}.get(adapter_type, "Adapter")
-            default_name = base_name if not same else f"{base_name} {len(same) + 1}"
-        created["name"] = default_name
+            base_name = ADAPTER_DEFAULT_NAMES.get(adapter_type, "Adapter")
+            created["name"] = base_name if not same else f"{base_name} {len(same) + 1}"
         patch = {k: v for k, v in patch.items() if k not in ("id",)}
         patch = self._unmask_patch(patch, created)
         created = _merge_adapter(created, patch)
@@ -715,36 +713,28 @@ class ConnectionManager:
         """所有适配器群标识的宽松并集（含 QQ 官方的 group_openid 字符串）。"""
         return list(self.group_key_set())
 
-    def group_key_set(self) -> frozenset[str]:
-        """all_group_keys 的集合视图（缓存）：消息热路径 O(1) 成员判定用。"""
-        cached = self._group_keys_cache
+    def _key_set_cached(self, field: str, cache: str) -> frozenset[str]:
+        """按适配器字段构建宽松标识集合并缓存；无锁读缓存、锁内双检写缓存。"""
+        cached = getattr(self, cache)
         if cached is not None:
             return cached
         with self._lock:
-            # 锁内双检+写缓存：与 CRUD 失效（同锁）串行化，消除陈旧缓存窗口
-            if self._group_keys_cache is not None:
-                return self._group_keys_cache
+            if getattr(self, cache) is not None:
+                return getattr(self, cache)
             keys: set[str] = set()
             for adapter in self.adapters:
-                keys.update(self.parse_groups_loose(adapter.get("main_group")))
+                keys.update(self.parse_groups_loose(adapter.get(field)))
             frozen = frozenset(keys)
-            self._group_keys_cache = frozen
+            setattr(self, cache, frozen)
             return frozen
+
+    def group_key_set(self) -> frozenset[str]:
+        """all_group_keys 的集合视图（缓存）：消息热路径 O(1) 成员判定用。"""
+        return self._key_set_cached("main_group", "_group_keys_cache")
 
     def admin_key_set(self) -> frozenset[str]:
         """all_admin_keys 的集合视图（缓存）：管理员判定 O(1) 成员判定用。"""
-        cached = self._admin_keys_cache
-        if cached is not None:
-            return cached
-        with self._lock:
-            if self._admin_keys_cache is not None:
-                return self._admin_keys_cache
-            keys: set[str] = set()
-            for adapter in self.adapters:
-                keys.update(self.parse_groups_loose(adapter.get("admin_qq")))
-            frozen = frozenset(keys)
-            self._admin_keys_cache = frozen
-            return frozen
+        return self._key_set_cached("admin_qq", "_admin_keys_cache")
 
     def all_admins(self) -> list[int]:
         """所有 WebSocket 适配器管理员的并集。"""

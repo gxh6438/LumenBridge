@@ -391,8 +391,10 @@ def test_ssrf_defense():
             for url in ("http://127.0.0.1:8080/evil.zip", "http://192.168.1.1/x.zip",
                         "http://10.0.0.1/x.zip", "http://169.254.169.254/latest/x.zip"):
                 code, res = req("POST", "/api/subplugins/install/url", body={"url": url})
+                # 任务模式：放行 = 通过协议/白名单校验并受理为后台任务
+                # （返回 task_id），而非被 SSRF 拦截（403/401）
                 check(f"内网地址 {url.rsplit('/', 2)[0]} 放行至下载安装流程",
-                      code == 400 and "内网" not in res.get("msg", ""),
+                      code == 200 and isinstance(res.get("data", {}).get("task_id"), str),
                       f"code={code}, res={res}")
         finally:
             urllib.request.urlopen = orig_urlopen
@@ -439,18 +441,20 @@ def test_password_timing_safe():
         check("缺少 password 字段返回 401", code == 401, f"code={code}")
 
         # 5. 验证源码使用 hmac.compare_digest 而非 ==
-        server_src = (SRC / "endstone_lumenbridge" / "webui" / "server.py").read_text("utf-8")
+        # 重构后：密码比较在 auth.py，URL 安装 SHA-256 比对在 routes/base.py，
+        # server.py 仅做登录防护窗口与请求体校验
+        base_src = (SRC / "endstone_lumenbridge" / "webui" / "routes" / "base.py").read_text("utf-8")
         check("源码使用 hmac.compare_digest",
-              "compare_digest" in server_src and "hmac" in server_src,
+              "compare_digest" in base_src and "hmac" in base_src,
               "未找到 hmac.compare_digest 调用")
         # 密码比较逻辑收敛在 auth.verify_password（哈希与明文分支均恒时比较），
-        # 登录路由必须经由它而非自行 == 比较。窗口覆盖限速/请求体校验逻辑。
+        # 登录路由必须经由它而非自行 == 比较。
         auth_src = (SRC / "endstone_lumenbridge" / "webui" / "auth.py").read_text("utf-8")
         verify_section = auth_src[auth_src.index("def verify_password"):auth_src.index("def verify_password") + 1600]
         check("verify_password 恒时比较（compare_digest）", "compare_digest" in verify_section,
               "verify_password 未使用 compare_digest")
-        login_section = server_src[server_src.index("api/auth/login"):server_src.index("api/auth/login") + 1400]
-        check("登录经由 auth_util.verify_password", "auth_util.verify_password" in login_section,
+        auth_api_src = (SRC / "endstone_lumenbridge" / "webui" / "routes" / "auth_api.py").read_text("utf-8")
+        check("登录经由 auth_util.verify_password", "auth_util.verify_password" in auth_api_src,
               "登录路由未调用 verify_password")
 
         # 6. 时序测试：错误密码和正确密码响应时间不应有显著差异

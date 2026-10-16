@@ -298,15 +298,22 @@ class AdapterHub:
         for adapter in self.connected():
             adapter.send_pack(pack)
 
+    def _connected_primary(self) -> OneBotAdapter | None:
+        """已连接的主适配器；无在线实例返回 None。"""
+        adapter = self.primary()
+        if adapter is None or not adapter.is_connected:
+            return None
+        return adapter
+
     def call_api(
         self,
         pack: dict[str, Any],
         callback: Callable[[Any], None] | None = None,
         timeout: float = 10.0,
     ) -> None:
-        adapter = self.primary()
+        adapter = self._connected_primary()
         # 无在线实例时立即回 None，不等满超时
-        if adapter is None or not adapter.is_connected:
+        if adapter is None:
             if callback:
                 callback(None)
             return
@@ -319,8 +326,8 @@ class AdapterHub:
         callback: Callable[[Any], None] | None = None,
         timeout: float = 10.0,
     ) -> None:
-        adapter = self.primary()
-        if adapter is None or not adapter.is_connected:
+        adapter = self._connected_primary()
+        if adapter is None:
             if callback:
                 callback(None)
             return
@@ -363,8 +370,8 @@ class AdapterHub:
 
         def _delegate(*args: Any, **kwargs: Any) -> Any:
             if name in _PRIMARY_METHODS:
-                adapter = self.primary()
-                if adapter is None or not adapter.is_connected:
+                adapter = self._connected_primary()
+                if adapter is None:
                     if name.startswith("get_"):
                         self._fail_callback(args, kwargs)
                     return None

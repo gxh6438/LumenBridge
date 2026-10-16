@@ -16,6 +16,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from ..i18n import t as _t
+from .textutil import match_command_prefix, message_text
 
 if TYPE_CHECKING:
     from ..plugin import LumenBridgePlugin
@@ -28,19 +29,6 @@ _CQ_AT_QQ_RE = re.compile(r"\[CQ:at,qq=([^\],\s&#]+)\]")
 
 # OneBot at 段的“全体成员”特殊值，不作为可添加的标识
 _AT_ALL = "all"
-
-
-def _message_text(pack: dict[str, Any]) -> str:
-    """提取消息可比对纯文本（text 段拼接；@ 段天然分离不干扰命令识别）。"""
-    segments = pack.get("message")
-    if isinstance(segments, list):
-        parts = [
-            str((seg.get("data") or {}).get("text") or "")
-            for seg in segments
-            if isinstance(seg, dict) and seg.get("type") == "text"
-        ]
-        return "".join(parts).strip()
-    return str(pack.get("raw_message", "") or "").strip()
 
 
 def extract_at_ids(pack: dict[str, Any]) -> list[str]:
@@ -78,15 +66,8 @@ class AdminCommandModule:
         self.bus.on("message.group.normal", self._on_group_message)
 
     def _on_group_message(self, pack: dict[str, Any], reply: Any) -> None:
-        text = _message_text(pack)
-        # 快速预筛：命令必以 / 开头，绝大多数群消息零成本跳过
-        if not text or not text.startswith("/"):
-            return
-        lowered = text.casefold()
-        for cmd in _ADD_ADMIN_COMMANDS:
-            if lowered.startswith(cmd.casefold()):
-                self._handle_add_admin(pack, reply)
-                return
+        if match_command_prefix(message_text(pack), _ADD_ADMIN_COMMANDS):
+            self._handle_add_admin(pack, reply)
 
     def _handle_add_admin(self, pack: dict[str, Any], reply: Any) -> None:
         adapter_id = str(pack.get("_lumen_adapter_id", "") or "")

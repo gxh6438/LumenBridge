@@ -32,7 +32,7 @@ from endstone_lumenbridge.modules.regex_engine import (
 )
 from endstone_lumenbridge.onebot import message as msg_builder
 from endstone_lumenbridge.onebot.message import set_local_image_roots
-from endstone_lumenbridge.onebot.qqofficial_adapter import _extract_payload
+from endstone_lumenbridge.onebot.qqofficial.utils import extract_payload as _extract_payload
 from endstone_lumenbridge.subplugin import loader as subplugin_loader
 from endstone_lumenbridge.subplugin.loader import SubPluginManager
 

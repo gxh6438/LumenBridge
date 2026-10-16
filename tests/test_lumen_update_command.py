@@ -300,5 +300,114 @@ class UpdateCommandTests(unittest.TestCase):
         self.assertIn("download failed", joined)
 
 
+class FrameworkUpdateCommandTests(unittest.TestCase):
+    """/lumen update framework [-y]：一键流程与网络容错。"""
+
+    @classmethod
+    def setUpClass(cls):
+        from endstone_lumenbridge import plugin as plugin_module
+
+        cls.plugin_module = plugin_module
+        cls.PluginCls = plugin_module.LumenBridgePlugin
+
+    def _plugin(self, marketplace):
+        plugin = self.PluginCls.__new__(self.PluginCls)
+        plugin.marketplace = marketplace
+        plugin.subplugin_manager = None
+        plugin._tee_logger = _FakeLogger()
+        plugin.run_on_main = lambda fn, delay=1: fn()
+        return plugin
+
+    def _run(self, plugin, args):
+        sender = _FakeSender()
+        with patch.object(self.plugin_module.threading, "Thread", _SyncThread):
+            plugin._handle_framework_update_command(sender, args)
+        return sender
+
+    @staticmethod
+    def _market(calls, *, staged=None, info=None, reload_outcome=None):
+        market = SimpleNamespace(enabled=True)
+
+        def _staged():
+            calls.append("staged")
+            return staged
+
+        def _framework_info():
+            calls.append("info")
+            if isinstance(info, BaseException):
+                raise info
+            return info
+
+        def _stage(**_kw):
+            calls.append("stage")
+            return {"to_version": "1.1.0"}
+
+        def _safe_reload(**_kw):
+            calls.append("safe_reload")
+            if isinstance(reload_outcome, BaseException):
+                raise reload_outcome
+            return reload_outcome or {"ok": True, "to_version": "1.1.0"}
+
+        market.staged_framework_update = _staged
+        market.framework_update_info = _framework_info
+        market.stage_framework_update = _stage
+        market.safe_framework_reload = _safe_reload
+        return market
+
+    def test_y_one_click_check_download_auto_reload(self):
+        """-y 无暂存：检查→下载→无需确认自动热重载（一键全流程）。"""
+        calls: list[str] = []
+        market = self._market(calls, info={"available": True, "latest": {"version": "1.1.0"}, "current_version": "1.0.0"})
+        sender = self._run(self._plugin(market), ["-y"])
+        self.assertEqual(calls, ["staged", "info", "stage", "safe_reload"])
+        joined = "\n".join(sender.messages)
+        self.assertIn("自动热重载", joined)  # framework_auto_staging 文案
+        self.assertIn("热重载完成", joined)
+
+    def test_y_with_staged_reloads_in_command_context(self):
+        """-y 已有暂存：命令执行阶段直接热重载（execute_framework_reload）。"""
+        calls: list[str] = []
+        market = self._market(calls, staged={"to_version": "1.1.0", "wheel": "w.whl", "sha256": "0" * 64})
+        market.execute_framework_reload = lambda **_kw: (calls.append("execute_reload") or {"ok": True, "to_version": "1.1.0"})
+        sender = self._run(self._plugin(market), ["-y"])
+        self.assertEqual(calls, ["staged", "execute_reload"])
+        self.assertTrue(any("热重载完成" in m for m in sender.messages))
+
+    def test_y_no_update_reports_latest(self):
+        calls: list[str] = []
+        market = self._market(calls, info={"available": False, "current_version": "1.0.0"})
+        sender = self._run(self._plugin(market), ["-y"])
+        self.assertEqual(calls, ["staged", "info"])
+        self.assertTrue(any("已是最新版本" in m for m in sender.messages))
+
+    def test_y_network_timeout_short_message(self):
+        """网络超时：直接提示「网络超时」，不甩异常堆栈详情。"""
+        calls: list[str] = []
+        market = self._market(calls, info=TimeoutError("timed out"))
+        sender = self._run(self._plugin(market), ["-y"])
+        self.assertEqual(calls, ["staged", "info"])
+        joined = "\n".join(sender.messages)
+        self.assertIn("网络超时", joined)
+        self.assertNotIn("timed out", joined)  # 不透出底层异常文本
+        self.assertNotIn("准备失败", joined)
+
+    def test_y_network_error_short_message(self):
+        calls: list[str] = []
+        market = self._market(calls, info=MarketplaceError("无法连接市场服务"))
+        sender = self._run(self._plugin(market), ["-y"])
+        joined = "\n".join(sender.messages)
+        self.assertIn("网络连接失败", joined)
+        self.assertNotIn("无法连接市场服务", joined)
+
+    def test_without_y_stages_only_no_reload(self):
+        """不带 -y：仅检查下载并提示手动确认，不触发热重载。"""
+        calls: list[str] = []
+        market = self._market(calls, info={"available": True, "latest": {"version": "1.1.0"}, "current_version": "1.0.0"})
+        sender = self._run(self._plugin(market), [])
+        self.assertEqual(calls, ["info", "stage"])  # 无 staged / safe_reload
+        joined = "\n".join(sender.messages)
+        self.assertIn("手动确认", joined)
+
+
 if __name__ == "__main__":
     unittest.main()

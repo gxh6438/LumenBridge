@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from ..onebot.message import at as at_segment
 from ..onebot.message import image as image_segment
 from ..i18n import t as _t
+from .textutil import join_text_segments
 
 if TYPE_CHECKING:
     from ..plugin import LumenBridgePlugin
@@ -244,10 +245,16 @@ class RegexEngineModule:
                 return updated
         return rules
 
+    def _clear_pattern_cache(self) -> None:
+        # getattr 兜底：测试桩经 __new__ 构造时不走 __init__
+        cache = getattr(self, "_pattern_cache", None)
+        if cache:
+            cache.clear()
+
     def reload_rules(self) -> int:
         """重载规则库，返回规则数量"""
         self.rules = self._load_rules()
-        getattr(self, "_pattern_cache", None) and self._pattern_cache.clear()
+        self._clear_pattern_cache()
         return len(self.rules)
 
     def save_rules(self, rules: list[dict[str, Any]]) -> None:
@@ -256,7 +263,7 @@ class RegexEngineModule:
         rules = [r for r in rules if isinstance(r, dict)]
         self._write_rules_atomic(rules)
         self.rules = rules
-        getattr(self, "_pattern_cache", None) and self._pattern_cache.clear()
+        self._clear_pattern_cache()
         self.logger.info(_t("regex_engine.log.rules_saved", count=len(rules)))
 
     def _compile_cached(self, pattern: str, flags: str, rule_name: Any) -> "re.Pattern[str] | None":
@@ -632,14 +639,7 @@ class RegexEngineModule:
     @staticmethod
     def _rebuild_raw_message(message: Any) -> str:
         if isinstance(message, list):
-            parts: list[str] = []
-            for seg in message:
-                if not isinstance(seg, dict) or seg.get("type") != "text":
-                    continue
-                data = seg.get("data")
-                if isinstance(data, dict):
-                    parts.append(str(data.get("text", "")))
-            return "".join(parts)
+            return join_text_segments(message)
         return str(message or "")
 
     def _on_group_message(self, pack: dict[str, Any], _reply: Any) -> None:

@@ -221,30 +221,33 @@ class SubPluginManager:
         found.sort(key=_priority_of)
         return found
 
+    def _load_batch(self) -> int:
+        """按依赖拓扑序加载发现的全部子插件，返回成功加载数（须持 _lock）。"""
+        for sp in self._order_by_requirements(self.discover()):
+            dup = self.subplugins.get(sp.name)
+            if dup is not None and dup.folder != sp.folder:
+                self.logger.warning(
+                    _t(
+                        "subplugin_runtime.log.name_conflict",
+                        name=sp.name,
+                        old=dup.folder.name,
+                        new=sp.folder.name,
+                    )
+                )
+                continue
+            if not sp.manifest.get("load", True):
+                self.logger.info(_t("subplugin_runtime.log.disabled", name=sp.name))
+                sp.loaded = False
+                sp.error = ""
+                self.subplugins[sp.name] = sp
+                continue
+            self._load_one(sp)
+        return sum(1 for sp in self.subplugins.values() if sp.loaded)
+
     def load_all(self) -> None:
         with self._lock:
             self._purge_pycache(self.plugins_dir)
-            # 拓扑排序：被依赖的子插件先加载
-            for sp in self._order_by_requirements(self.discover()):
-                dup = self.subplugins.get(sp.name)
-                if dup is not None and dup.folder != sp.folder:
-                    self.logger.warning(
-                        _t(
-                            "subplugin_runtime.log.name_conflict",
-                            name=sp.name,
-                            old=dup.folder.name,
-                            new=sp.folder.name,
-                        )
-                    )
-                    continue
-                if not sp.manifest.get("load", True):
-                    self.logger.info(_t("subplugin_runtime.log.disabled", name=sp.name))
-                    sp.loaded = False
-                    sp.error = ""
-                    self.subplugins[sp.name] = sp
-                    continue
-                self._load_one(sp)
-            count = sum(1 for sp in self.subplugins.values() if sp.loaded)
+            count = self._load_batch()
         self.logger.info(_t("subplugin_runtime.log.load_complete", count=count))
 
     def _purge_pycache(self, folder: Path) -> None:
@@ -620,26 +623,7 @@ class SubPluginManager:
         with self._lock:
             for name in list(self.subplugins):
                 self._unload_one(name)
-            for sp in self._order_by_requirements(self.discover()):
-                dup = self.subplugins.get(sp.name)
-                if dup is not None and dup.folder != sp.folder:
-                    self.logger.warning(
-                        _t(
-                            "subplugin_runtime.log.name_conflict",
-                            name=sp.name,
-                            old=dup.folder.name,
-                            new=sp.folder.name,
-                        )
-                    )
-                    continue
-                if not sp.manifest.get("load", True):
-                    self.logger.info(_t("subplugin_runtime.log.disabled", name=sp.name))
-                    sp.loaded = False
-                    sp.error = ""
-                    self.subplugins[sp.name] = sp
-                    continue
-                self._load_one(sp)
-            return sum(1 for sp in self.subplugins.values() if sp.loaded)
+            return self._load_batch()
 
     def reload_one(self, name: str) -> bool:
         """热重载单个子插件（全程持 _lock 避免与并发 install/uninstall 竞态）"""
@@ -680,7 +664,7 @@ class SubPluginManager:
                     return False
                 manifest.update(mdata)
             if not manifest.get("load", True):
-                self.logger.warning(f"[子插件] {name} 插件已被禁用，拒绝重载")
+                self.logger.warning(_t("subplugin_runtime.log.reload_disabled", name=name))
                 return False
             if sp:
                 self._unload_one(name)
@@ -860,7 +844,7 @@ class SubPluginManager:
                 return False, _t("subplugin_runtime.log.install_not_zip"), ""
             except RuntimeError:
                 # 加密 ZIP 在 zf.open/read 时抛 RuntimeError
-                return False, "ZIP 已加密或不支持，无法安装", ""
+                return False, _t("subplugin_runtime.log.install_zip_encrypted"), ""
             except OSError as e:
                 # 解压写盘失败（磁盘满/权限等）：中止安装而非向上抛裸异常
                 return False, _t("subplugin_runtime.log.install_extract_failed", error=e), ""

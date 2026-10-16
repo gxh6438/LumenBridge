@@ -2385,6 +2385,9 @@ document.addEventListener("click", (e) => {
   /* 更新中心卡片：单独更新按钮 */
   const spuUpdateBtn = e.target.closest("[data-spu-update]");
   if (spuUpdateBtn) { updateSpuFromCard(spuUpdateBtn); return; }
+  /* 市场卡片：更新按钮优先于安装按钮与卡片整体点击 */
+  const marketUpdateBtn = e.target.closest(".market-update-btn[data-id]");
+  if (marketUpdateBtn) { updateFromMarketCard(marketUpdateBtn.dataset.id || ""); return; }
   /* 市场卡片：安装按钮优先于卡片整体点击（原 stopPropagation 语义） */
   const marketInstallBtn = e.target.closest(".market-install-btn[data-id]");
   if (marketInstallBtn) { installMarketPlugin(marketInstallBtn.dataset.id || ""); return; }
@@ -3347,12 +3350,13 @@ function uploadZip(file) {
     if (xhr.status === 401) { logout(true); return; }
     try {
       const data = JSON.parse(xhr.responseText);
-      if (data.code === 200) {
-        const loaded = !data.data || data.data.loaded !== false;
-        toast(data.msg || t("subplugins.install_success"), !loaded);
+      if (data.code === 200 && data.data && data.data.task_id) {
+        // 上传完成 → 安装转后台任务（依赖补全/热重载由任务窗展示进度）
         closeModal("install-modal");
-        loadSubplugins();
-        loadCustomPages();
+        watchMarketTask(data.data.task_id, t("subplugins.install_success"), (ok, task) => {
+          const loaded = ok && task && task.result && task.result.loaded !== false;
+          if (ok && !loaded) toast(t("subplugins.install_reload_hint"), true);
+        });
       } else {
         toast(data.msg || t("subplugins.install_failed"), true);
       }
@@ -3365,15 +3369,15 @@ function uploadZip(file) {
 async function installFromUrl() {
   const url = document.getElementById("install-url").value.trim();
   if (!url) { toast(t("subplugins.install_url_required"), true); return; }
-  toast(t("subplugins.install_downloading"));
   try {
     const res = await api("POST", "/api/subplugins/install/url", { url });
-    const loaded = !res.data || res.data.loaded !== false;
-    toast(res.msg || t("subplugins.install_success"), !loaded);
     closeModal("install-modal");
     document.getElementById("install-url").value = "";
-    loadSubplugins();
-    loadCustomPages();
+    // URL 下载 + 安装 + 依赖补全全在任务窗展示进度
+    watchMarketTask(res.data.task_id, t("subplugins.install_success"), (ok, task) => {
+      const loaded = ok && task && task.result && task.result.loaded !== false;
+      if (ok && !loaded) toast(t("subplugins.install_reload_hint"), true);
+    });
   } catch (e) { toast(t("subplugins.install_failed", { error: e.message }), true); }
 }
 
@@ -3417,13 +3421,14 @@ function uploadUpdateZip(file) {
     if (xhr.status === 401) { logout(true); return; }
     try {
       const data = JSON.parse(xhr.responseText);
-      if (data.code === 200) {
-        const loaded = !data.data || data.data.loaded !== false;
-        // 模板含 {name} 占位符，必须传参，否则 toast 显示字面量 {name}
-        toast(data.msg || t("subplugins.update_success", { name: updateModalPluginName() }), !loaded);
+      if (data.code === 200 && data.data && data.data.task_id) {
+        // 上传完成 → 安装转后台任务（依赖补全/热重载由任务窗展示进度）
         closeModal("update-modal");
-        loadSubplugins();
-        loadCustomPages();
+        // 模板含 {name} 占位符，必须传参，否则 toast 显示字面量 {name}
+        watchMarketTask(data.data.task_id, t("subplugins.update_success", { name: updateModalPluginName() }), (ok, task) => {
+          const loaded = ok && task && task.result && task.result.loaded !== false;
+          if (ok && !loaded) toast(t("subplugins.install_reload_hint"), true);
+        });
       } else {
         toast(data.msg || t("subplugins.update_failed", { name: updateModalPluginName() }), true);
       }
@@ -3436,15 +3441,15 @@ function uploadUpdateZip(file) {
 async function updateFromUrl() {
   const url = document.getElementById("update-url").value.trim();
   if (!url) { toast(t("subplugins.install_url_required"), true); return; }
-  toast(t("subplugins.update_downloading"));
   try {
     const res = await api("POST", "/api/subplugins/install/url", { url });
-    const loaded = !res.data || res.data.loaded !== false;
-    toast(res.msg || t("subplugins.update_success", { name: updateModalPluginName() }), !loaded);
     closeModal("update-modal");
     document.getElementById("update-url").value = "";
-    loadSubplugins();
-    loadCustomPages();
+    // URL 下载 + 安装 + 依赖补全全在任务窗展示进度
+    watchMarketTask(res.data.task_id, t("subplugins.update_success", { name: updateModalPluginName() }), (ok, task) => {
+      const loaded = ok && task && task.result && task.result.loaded !== false;
+      if (ok && !loaded) toast(t("subplugins.install_reload_hint"), true);
+    });
   } catch (e) { toast(t("subplugins.update_failed", { name: updateModalPluginName() }) + " (" + (e.message || "") + ")", true); }
 }
 
@@ -4450,6 +4455,67 @@ function scrollToTop() {
 
 let marketTaskTimer = null;
 let frameworkUpdateTimer = null;
+let marketInstalled = {}; // 市场 ID -> {name, version, update_available, latest_version}
+
+async function loadMarketInstalled() {
+  try {
+    const res = await api("GET", "/api/market/installed");
+    marketInstalled = (res.data && typeof res.data === "object" && !Array.isArray(res.data)) ? res.data : {};
+  } catch (e) { marketInstalled = {}; }
+  updateMarketInstalledBadges();
+}
+
+/* 已装按钮状态：已安装徽章 + 按需更新按钮（安装/更新完成后局部刷新，不重载列表） */
+function applyMarketInstallBtnState(btn) {
+  if (!btn) return;
+  const info = marketInstalled[btn.dataset.id || ""];
+  if (info) {
+    btn.textContent = t("marketplace.installed_state");
+    btn.disabled = true;
+    btn.classList.add("installed");
+  } else {
+    btn.textContent = t("marketplace.install_button");
+    btn.disabled = false;
+    btn.classList.remove("installed");
+  }
+}
+
+function updateMarketInstalledBadges() {
+  document.querySelectorAll(".market-install-btn[data-id]").forEach(applyMarketInstallBtnState);
+  document.querySelectorAll(".market-update-btn[data-id]").forEach((btn) => {
+    const info = marketInstalled[btn.dataset.id || ""];
+    btn.style.display = info && info.update_available ? "" : "none";
+  });
+  const detailBtn = document.getElementById("market-detail-install-btn");
+  if (detailBtn && marketDetailCurrent) applyMarketDetailBtnState(detailBtn, marketDetailCurrent.id);
+}
+
+/* 市场详情弹窗底部按钮：未安装→安全安装；已装有更新→更新插件；已装无更新→已安装（禁用） */
+function applyMarketDetailBtnState(btn, marketId) {
+  if (!btn) return;
+  const info = marketInstalled[marketId || ""];
+  if (info && info.update_available) {
+    btn.textContent = t("marketplace.update_button");
+    btn.disabled = false;
+    btn.classList.remove("installed");
+  } else if (info) {
+    btn.textContent = t("marketplace.installed_state");
+    btn.disabled = true;
+    btn.classList.add("installed");
+  } else {
+    btn.textContent = t("marketplace.install_button");
+    btn.disabled = false;
+    btn.classList.remove("installed");
+  }
+}
+
+/* 市场卡片「更新」按钮：进入与子插件页面一致的市场更新流程（选版本→应用） */
+async function updateFromMarketCard(marketId) {
+  const info = marketInstalled[marketId];
+  if (!info || !info.name) return;
+  if (!subpluginMarketCache[info.name]) await loadSubplugins();
+  startMarketUpdateFlow(info.name);
+}
 
 async function loadMarketplacePage() {
   const status = document.getElementById("marketplace-status");
@@ -4483,7 +4549,10 @@ async function loadMarketplace() {
   status.textContent = t("marketplace.loading");
   list.innerHTML = `<div style="color:var(--muted);padding:12px">${esc(t("marketplace.loading"))}</div>`;
   try {
-    const res = await api("GET", `/api/market/plugins?limit=48&q=${encodeURIComponent(query)}&sort=${encodeURIComponent(sort)}`);
+    const [res] = await Promise.all([
+      api("GET", `/api/market/plugins?limit=48&q=${encodeURIComponent(query)}&sort=${encodeURIComponent(sort)}`),
+      loadMarketInstalled(),
+    ]);
     if (generation !== marketplaceGeneration) return;
     const data = res.data || {};
     const items = Array.isArray(data.items) ? data.items : [];
@@ -4494,6 +4563,7 @@ async function loadMarketplace() {
     }
     list.innerHTML = items.map((item) => {
       const title = item.title || item.id || "";
+      const inst = marketInstalled[item.id || ""] || null;
       const initial = String(title).trim().charAt(0).toUpperCase() || "?";
       // 封面走后端代理：浏览器直连市场站点会因混合内容/防盗链 Cookie 失败
       const cover = item.cover_url
@@ -4517,7 +4587,8 @@ async function loadMarketplace() {
             </div>
             <div class="market-actions">
               <button class="btn small ghost" data-id="${esc(item.id || "")}">${esc(t("marketplace.detail_button"))}</button>
-              <button class="btn small market-install-btn" data-id="${esc(item.id || "")}">${esc(t("marketplace.install_button"))}</button>
+              <button class="btn small market-update-btn" data-id="${esc(item.id || "")}" style="${inst && inst.update_available ? "" : "display:none"}">${esc(t("marketplace.update_card_button"))}</button>
+              <button class="btn small market-install-btn${inst ? " installed" : ""}" data-id="${esc(item.id || "")}"${inst ? " disabled" : ""}>${esc(inst ? t("marketplace.installed_state") : t("marketplace.install_button"))}</button>
             </div>
           </div>
         </div>
@@ -4602,7 +4673,7 @@ function watchMarketTask(taskId, successMessage, onDone) {
       clearInterval(marketTaskTimer); marketTaskTimer = null;
       if (task.success) {
         toast(successMessage || task.msg || t("marketplace.task_success"));
-        loadSubplugins(); loadCustomPages();
+        loadSubplugins(); loadCustomPages(); loadMarketInstalled();
         setTimeout(() => { if (taskLogState && !taskLogState.doneHandled) closeTaskLogModal(); }, 2000);
       } else {
         toast(task.msg || t("marketplace.task_failed"), true);
@@ -4639,6 +4710,9 @@ function currentMarketDetailId() {
 function installFromMarketDetail() {
   const detail = marketDetailCurrent;
   if (!detail) return;
+  // 已装有更新：详情按钮即更新入口（与子插件页面更新流程一致）；未安装走安装
+  const info = marketInstalled[detail.id || ""];
+  if (info && info.update_available) { updateFromMarketCard(detail.id || ""); return; }
   installMarketPlugin(detail.id, "");
 }
 
@@ -4656,7 +4730,7 @@ async function openMarketDetail(marketId) {
     const detail = res.data || {};
     marketDetailCurrent = detail;
     renderMarketDetail(detail);
-    if (installBtn) installBtn.disabled = false;
+    applyMarketDetailBtnState(installBtn, detail.id);
   } catch (e) {
     content.innerHTML = `<div style="color:var(--muted);padding:12px 0">${esc(e.message || t("marketplace.detail_failed"))}</div>`;
   }
@@ -5337,11 +5411,13 @@ async function dispatchDepsWay(way, kind, dep, url, btnEl) {
     } else {
       try {
         btnEl.disabled = true;
-        toast(t("subplugins.install_downloading"));
+        // URL 下载 + 安装 + 依赖补全走任务进度窗（与其他安装入口一致）
         const res = await api("POST", "/api/subplugins/install/url", { url });
-        const loaded = !res.data || res.data.loaded !== false;
-        toast(res.msg || t("subplugins.install_success"), !loaded);
-        await refreshDepsSources(name);
+        watchMarketTask(res.data.task_id, t("subplugins.install_success"), (ok, task) => {
+          const loaded = ok && task && task.result && task.result.loaded !== false;
+          if (ok && !loaded) toast(t("subplugins.install_reload_hint"), true);
+          refreshDepsSources(name);
+        });
       } catch (e) { toast(e.message || t("subplugins.install_failed", { error: e.message }), true); }
       btnEl.disabled = false;
     }
@@ -5383,10 +5459,13 @@ function uploadDepsSpZip(file) {
     if (xhr.status === 401) { logout(true); return; }
     try {
       const data = JSON.parse(xhr.responseText);
-      if (data.code === 200) {
-        const loaded = !data.data || data.data.loaded !== false;
-        toast(data.msg || t("subplugins.install_success"), !loaded);
-        if (depsModalPlugin) refreshDepsSources(depsModalPlugin);
+      if (data.code === 200 && data.data && data.data.task_id) {
+        // 上传完成 → 安装转后台任务（依赖补全/热重载由任务窗展示进度）
+        watchMarketTask(data.data.task_id, t("subplugins.install_success"), (ok, task) => {
+          const loaded = ok && task && task.result && task.result.loaded !== false;
+          if (ok && !loaded) toast(t("subplugins.install_reload_hint"), true);
+          if (depsModalPlugin) refreshDepsSources(depsModalPlugin);
+        });
       } else {
         toast(data.msg || t("subplugins.install_failed", { error: "" }), true);
       }

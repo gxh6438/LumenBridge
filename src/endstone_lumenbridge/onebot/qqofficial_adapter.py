@@ -28,26 +28,15 @@ from ..i18n import t as _t
 from ..vendor import import_websockets
 from .adapter import USER_AGENT, _WS_STATE_OPEN
 from .qqofficial.constants import (
-    ACTIVE_STACK_FLUSH,
-    ACTIVE_STACK_MAX,
     API_DOMAIN,
     AUTH_FAIL_CODES,
-    BIZ_ACTIVE_REJECTED,
-    BIZ_EVENT_ID_INVALID,
-    BIZ_MSG_ID_EXPIRED,
-    CT_MEDIA_API,
-    CT_SEGMENT_PREFIX,
     DEFAULT_CONNECT_INTERVAL,
     DEFAULT_INTENTS,
-    EVENT_ID_WINDOW,
     HTTP_TIMEOUT,
     INTENT_FALLBACK_THRESHOLD,
     INTENT_GROUP_MEMBER,
     INTERACTION_ACK_DELAY,
     INTERACTION_ACK_MAX,
-    LOCAL_MEDIA_MAX,
-    MEDIA_FILE_TYPE,
-    OFFICIAL_RAW_EVENTS,
     OP_DISPATCH,
     OP_HEARTBEAT,
     OP_HEARTBEAT_ACK,
@@ -56,10 +45,6 @@ from .qqofficial.constants import (
     OP_INVALID_SESSION,
     OP_RECONNECT,
     OP_RESUME,
-    PASSIVE_MAX_SEQ_GROUP,
-    PASSIVE_POOL_MAX,
-    PASSIVE_WINDOW_C2C,
-    PASSIVE_WINDOW_GROUP,
     RECONNECT_BASE_DELAY,
     RECONNECT_MAX_DELAY,
     SANDBOX_DOMAIN,
@@ -75,55 +60,9 @@ from .qqofficial.constants import (
 from .qqofficial.credentials import CredentialsStore
 from .qqofficial.sender import MessageSender
 from .qqofficial.translate import EventTranslator
-from .qqofficial.utils import (
-    ApiHTTPError,
-    biz_code,
-    content_of,
-    extract_payload,
-    mention_segments,
-    plain_content,
-)
+from .qqofficial.utils import ApiHTTPError
 
 websockets = import_websockets()
-
-# 历史版本常量 / 函数自本模块导入（tests/test_qqofficial.py 与文档引用），
-# 下划线名保持不变以兼容 monkeypatch。
-_API_DOMAIN = API_DOMAIN
-_SANDBOX_DOMAIN = SANDBOX_DOMAIN
-_TOKEN_URL = TOKEN_URL
-_HTTP_TIMEOUT = HTTP_TIMEOUT
-_RECONNECT_BASE_DELAY = RECONNECT_BASE_DELAY
-_RECONNECT_MAX_DELAY = RECONNECT_MAX_DELAY
-_PASSIVE_WINDOW_GROUP = PASSIVE_WINDOW_GROUP
-_PASSIVE_WINDOW_C2C = PASSIVE_WINDOW_C2C
-_PASSIVE_MAX_SEQ = PASSIVE_MAX_SEQ_GROUP  # 群聊 5 次（C2C 为 4 次，见 credentials）
-_PASSIVE_POOL_MAX = PASSIVE_POOL_MAX
-_EVENT_ID_WINDOW = EVENT_ID_WINDOW
-_ACTIVE_STACK_MAX = ACTIVE_STACK_MAX
-_ACTIVE_STACK_FLUSH = ACTIVE_STACK_FLUSH
-_SEND_RETRY_MAX = SEND_RETRY_MAX
-_SEND_RETRY_DELAY_TEXT = SEND_RETRY_DELAY_TEXT
-_SEND_RETRY_DELAY_MEDIA = SEND_RETRY_DELAY_MEDIA
-_BIZ_ACTIVE_REJECTED = BIZ_ACTIVE_REJECTED
-_BIZ_EVENT_ID_INVALID = BIZ_EVENT_ID_INVALID
-_BIZ_MSG_ID_EXPIRED = BIZ_MSG_ID_EXPIRED
-_DEFAULT_CONNECT_INTERVAL = DEFAULT_CONNECT_INTERVAL
-_AUTH_FAIL_CODES = AUTH_FAIL_CODES
-_SESSION_RESET_CODES = SESSION_RESET_CODES
-_SESSION_ENDED = SESSION_ENDED
-_SESSION_RECONNECT = SESSION_RECONNECT
-_SESSION_INVALID = SESSION_INVALID
-_DEFAULT_INTENTS = DEFAULT_INTENTS
-_OFFICIAL_RAW_EVENTS = OFFICIAL_RAW_EVENTS
-_MEDIA_FILE_TYPE = MEDIA_FILE_TYPE
-_CT_SEGMENT = CT_SEGMENT_PREFIX
-_CT_MEDIA_API = CT_MEDIA_API
-_LOCAL_MEDIA_MAX = LOCAL_MEDIA_MAX
-_biz_code = biz_code
-_extract_payload = extract_payload
-_content_of = content_of
-_plain_content = plain_content
-_mention_segments = mention_segments
 
 
 class QQOfficialAdapter:
@@ -238,68 +177,9 @@ class QQOfficialAdapter:
         # mode_name 已含适配器名，无需再按 "{name} ({mode})" 拼接
         return self.mode_name
 
-    # 历史内部接口（tests/test_qqofficial.py 及文档引用），转发到子模块。
-    @property
-    def _passive(self) -> dict[str, Any]:
-        return self.credentials.passive
-
-    @property
-    def _event_ids(self) -> dict[str, Any]:
-        return self.credentials.event_ids
-
-    @property
-    def _active_stack(self) -> dict[str, Any]:
-        return self.credentials.active_stack
-
-    def _cache_passive(self, target: str, msg_id: str, window: float) -> None:
-        self.credentials.cache_passive(target, msg_id, window)
-
-    def _take_passive(self, target: str) -> tuple[str, int] | None:
-        return self.credentials.take_passive(target)
-
-    def _cache_event_id(self, target: str, event_id: Any) -> None:
-        self.credentials.cache_event_id(target, event_id)
-
-    def _take_event_id(self, target: str) -> str:
-        return self.credentials.take_event_id(target)
-
-    def _push_active_stack(
-        self, kind: str, target: str, content: str, media: dict[str, Any] | None
-    ) -> None:
-        self.credentials.push_active((kind, target, content, media))
-
-    async def _flush_active_stack(self, target: str) -> None:
-        await self.sender.flush_active_stack(target)
-
-    async def _post_message(
-        self, kind: str, target: str, body: dict[str, Any], has_media: bool
-    ) -> str:
-        return await self.sender.post_message(kind, target, body, has_media)
-
-    async def _upload_media(self, kind: str, target: str, media: dict[str, Any]) -> str:
-        return await self.sender.upload_media(kind, target, media)
-
-    async def _on_dispatch(self, msg: dict[str, Any]) -> None:
-        await self.translator.on_dispatch(msg)
-
-    async def _emit_group_message(self, data: dict[str, Any]) -> None:
-        await self.translator._emit_group_message(data)
-
-    async def _emit_c2c_message(self, data: dict[str, Any]) -> None:
-        await self.translator._emit_c2c_message(data)
-
-    def _emit_robot_added(self, data: dict[str, Any]) -> None:
-        self.translator._emit_robot_added(data)
-
-    def _emit_robot_removed(self, data: dict[str, Any]) -> None:
-        self.translator._emit_robot_removed(data)
-
-    def _emit_friend_change(self, data: dict[str, Any], notice_type: str) -> None:
-        self.translator._emit_friend_change(data, notice_type)
-
     def _retry_params(self) -> tuple[int, float, float]:
-        """发送重试参数 (max, 文本间隔, 富媒体间隔)；读模块级常量便于测试 monkeypatch。"""
-        return _SEND_RETRY_MAX, _SEND_RETRY_DELAY_TEXT, _SEND_RETRY_DELAY_MEDIA
+        """发送重试参数 (max, 文本间隔, 富媒体间隔)；读本模块命名空间支持测试 monkeypatch。"""
+        return SEND_RETRY_MAX, SEND_RETRY_DELAY_TEXT, SEND_RETRY_DELAY_MEDIA
 
     def start(self) -> None:
         if self._running:
@@ -611,7 +491,7 @@ class QQOfficialAdapter:
             if self._running:
                 code = getattr(ws, "close_code", None)
                 if isinstance(code, int) and (
-                    code in _SESSION_RESET_CODES or code in _AUTH_FAIL_CODES
+                    code in SESSION_RESET_CODES or code in AUTH_FAIL_CODES
                 ):
                     if not self.suppress_connection_log:
                         self.logger.warning(_t("qqofficial.session_reset_code", code=code))
@@ -660,7 +540,7 @@ class QQOfficialAdapter:
             if isinstance(seq, int) and seq > 0 and seq <= self._last_seq:
                 # Resume 重放去重：序号 <= 已处理最大序号的是断线前的重放，丢弃
                 return None
-            await self._on_dispatch(msg)
+            await self.translator.on_dispatch(msg)
             # 派发成功后才推进序号：先推进则派发异常时该事件被去重永久丢失
             if isinstance(seq, int) and seq > 0:
                 self._last_seq = seq
@@ -889,12 +769,6 @@ class QQOfficialAdapter:
             if callback:
                 callback({"ok": False, "error": "未知消息归属，无法撤回"})
             return
-        loop = self._loop
-        if loop is None or not loop.is_running():
-            self.logger.warning(_t("qqofficial.recall_no_loop", id=key[:24]))
-            if callback:
-                callback({"ok": False, "error": "适配器事件循环未运行"})
-            return
 
         async def _recall() -> Any:
             path = (
@@ -936,12 +810,6 @@ class QQOfficialAdapter:
                 callback({"ok": False, "error": "未知申请（flag 无记录或已被处理）"})
             return
         group_openid, member_openid = target
-        loop = self._loop
-        if loop is None or not loop.is_running():
-            self.logger.warning(_t("qqofficial.join_request_no_loop"))
-            if callback:
-                callback({"ok": False, "error": "适配器事件循环未运行"})
-            return
 
         async def _approve() -> Any:
             body: dict[str, Any] = {
@@ -986,24 +854,17 @@ class QQOfficialAdapter:
         callback(info)
 
     def get_group_list(self, callback: Callable[[Any], None]) -> None:
-        """官方无群列表接口：以配置 + 动态发现的 group_openid 本地兜底。"""
-        seen = list(self.groups)
-        seen += [g for g in self._discovered_groups if g not in self.groups]
-        callback([{"group_id": g, "group_name": str(g)} for g in seen])
+        """官方无群列表接口：以配置 + 动态发现的 group_openid 并集兜底。"""
+        known = list(self.groups)
+        known += [g for g in self._discovered_groups if g not in self.groups]
+        callback([{"group_id": g, "group_name": str(g)} for g in known])
 
     def get_group_info(
         self, group_id: Any, callback: Callable[[Any], None] | None = None
     ) -> None:
         """群信息本地兜底：配置中的 openid 视为已互通群；未配置时对所有群生效。"""
-        key = str(group_id)
-        known = {str(g) for g in self.groups}
-        info = (
-            {"group_id": key, "group_name": key, "member_count": 0, "max_member_count": 0}
-            if not known or key in known or key in self._discovered_groups
-            else None
-        )
         if callback:
-            callback(info)
+            callback(self._local_group_info(str(group_id)))
 
     def call_api(
         self,
@@ -1049,6 +910,14 @@ class QQOfficialAdapter:
 
         future.add_done_callback(_done)
 
+    @staticmethod
+    def _ban_expire_str(seconds: int) -> str:
+        """禁言到期时间（官方要求东八区 ISO 格式）。"""
+        expire = datetime.fromtimestamp(
+            time.time() + seconds, tz=timezone(timedelta(hours=8))
+        )
+        return expire.strftime("%Y-%m-%dT%H:%M:%S+08:00")
+
     def set_group_ban(
         self,
         group_id: Any,
@@ -1084,13 +953,10 @@ class QQOfficialAdapter:
                 "mute_expire_at": "",
             }
         else:
-            expire = datetime.fromtimestamp(
-                time.time() + seconds, tz=timezone(timedelta(hours=8))
-            )
             member = {
                 "op": "add",
                 "member_openid": member_openid,
-                "mute_expire_at": expire.strftime("%Y-%m-%dT%H:%M:%S+08:00"),
+                "mute_expire_at": self._ban_expire_str(seconds),
             }
         body = {"members": [member]}
 
@@ -1133,16 +999,12 @@ class QQOfficialAdapter:
             if callback:
                 callback(None)
             return
-        expire = datetime.fromtimestamp(
-            time.time() + seconds, tz=timezone(timedelta(hours=8))
-        )
-        expire_str = expire.strftime("%Y-%m-%dT%H:%M:%S+08:00")
         body = {
             "members": [
                 {
                     "op": "add",
                     "member_openid": m,
-                    "mute_expire_at": expire_str,
+                    "mute_expire_at": self._ban_expire_str(seconds),
                 }
                 for m in members
             ]
@@ -1226,59 +1088,13 @@ class QQOfficialAdapter:
         timeout: float = 10.0,
     ) -> None:
         """OneBot action 分发：已映射的动作转发官方端点，其余告警降级回调 None。"""
-        p = params or {}
-        if action == "send_group_msg":
-            self.send_group_msg(p.get("group_id"), p.get("message"))
-            if callback:
-                callback(None)
-        elif action == "send_private_msg":
-            self.send_private_msg(p.get("user_id"), p.get("message"))
-            if callback:
-                callback(None)
-        elif action == "delete_msg":
-            self.delete_msg(p.get("message_id"), callback)
-        elif action == "set_group_add_request":
-            self.set_group_add_request(
-                str(p.get("flag") or ""),
-                str(p.get("sub_type") or "add"),
-                bool(p.get("approve", True)),
-                str(p.get("reason") or ""),
-                callback,
-            )
-        elif action == "set_group_ban":
-            self.set_group_ban(
-                p.get("group_id"), p.get("user_id"), int(p.get("duration") or 0), callback
-            )
-        elif action == "set_group_ban_batch":
-            self.set_group_ban_batch(
-                p.get("group_id"), p.get("user_ids") or [], int(p.get("duration") or 0), callback
-            )
-        elif action == "get_group_restrict_chat_setting":
-            self.get_group_restrict_chat_setting(p.get("group_id"), callback)
-        elif action == "get_group_bot_state":
-            self.get_group_bot_state(p.get("group_id"), callback)
-        elif action == "get_group_join_request_list":
-            self.get_group_join_request_list(
-                p.get("group_id"),
-                str(p.get("cursor") or ""),
-                int(p.get("limit") or 20),
-                callback,
-            )
-        elif action == "respond_interaction":
-            # 互动事件回应（按钮/快捷菜单点击）：抢占兜底自动回应自定义 code
-            self.respond_interaction(
-                p.get("interaction_id"), int(p.get("code") or 0), callback
-            )
-        elif action == "get_group_info":
-            self._get_group_info_async(p.get("group_id"), callback)
-        elif action == "get_group_list":
-            self.get_group_list(callback or (lambda _: None))
-        elif action == "get_login_info":
-            self.get_login_info(callback or (lambda _: None))
-        else:
+        handler = _ACTION_HANDLERS.get(action)
+        if handler is None:
             self.logger.warning(_t("qqofficial.unsupported_action", action=action))
             if callback:
                 callback(None)
+            return
+        handler(self, params or {}, callback)
 
     def _get_group_info_async(
         self, group_id: Any, callback: Callable[[Any], None] | None
@@ -1344,3 +1160,95 @@ class QQOfficialAdapter:
             return None
 
         return _unsupported
+
+
+def _h_send_group_msg(ad: "QQOfficialAdapter", p: dict[str, Any], callback: Any) -> None:
+    ad.send_group_msg(p.get("group_id"), p.get("message"))
+    if callback:
+        callback(None)
+
+
+def _h_send_private_msg(ad: "QQOfficialAdapter", p: dict[str, Any], callback: Any) -> None:
+    ad.send_private_msg(p.get("user_id"), p.get("message"))
+    if callback:
+        callback(None)
+
+
+def _h_delete_msg(ad: "QQOfficialAdapter", p: dict[str, Any], callback: Any) -> None:
+    ad.delete_msg(p.get("message_id"), callback)
+
+
+def _h_set_group_add_request(ad: "QQOfficialAdapter", p: dict[str, Any], callback: Any) -> None:
+    ad.set_group_add_request(
+        str(p.get("flag") or ""),
+        str(p.get("sub_type") or "add"),
+        bool(p.get("approve", True)),
+        str(p.get("reason") or ""),
+        callback,
+    )
+
+
+def _h_set_group_ban(ad: "QQOfficialAdapter", p: dict[str, Any], callback: Any) -> None:
+    ad.set_group_ban(
+        p.get("group_id"), p.get("user_id"), int(p.get("duration") or 0), callback
+    )
+
+
+def _h_set_group_ban_batch(ad: "QQOfficialAdapter", p: dict[str, Any], callback: Any) -> None:
+    ad.set_group_ban_batch(
+        p.get("group_id"), p.get("user_ids") or [], int(p.get("duration") or 0), callback
+    )
+
+
+def _h_get_group_restrict_chat_setting(ad: "QQOfficialAdapter", p: dict[str, Any], callback: Any) -> None:
+    ad.get_group_restrict_chat_setting(p.get("group_id"), callback)
+
+
+def _h_get_group_bot_state(ad: "QQOfficialAdapter", p: dict[str, Any], callback: Any) -> None:
+    ad.get_group_bot_state(p.get("group_id"), callback)
+
+
+def _h_get_group_join_request_list(ad: "QQOfficialAdapter", p: dict[str, Any], callback: Any) -> None:
+    ad.get_group_join_request_list(
+        p.get("group_id"),
+        str(p.get("cursor") or ""),
+        int(p.get("limit") or 20),
+        callback,
+    )
+
+
+def _h_respond_interaction(ad: "QQOfficialAdapter", p: dict[str, Any], callback: Any) -> None:
+    # 互动事件回应（按钮/快捷菜单点击）：抢占兜底自动回应自定义 code
+    ad.respond_interaction(
+        p.get("interaction_id"), int(p.get("code") or 0), callback
+    )
+
+
+def _h_get_group_info(ad: "QQOfficialAdapter", p: dict[str, Any], callback: Any) -> None:
+    ad._get_group_info_async(p.get("group_id"), callback)
+
+
+def _h_get_group_list(ad: "QQOfficialAdapter", p: dict[str, Any], callback: Any) -> None:
+    ad.get_group_list(callback or (lambda _: None))
+
+
+def _h_get_login_info(ad: "QQOfficialAdapter", p: dict[str, Any], callback: Any) -> None:
+    ad.get_login_info(callback or (lambda _: None))
+
+
+# OneBot action → 官方端点处理器（签名统一 (adapter, params, callback)）
+_ACTION_HANDLERS = {
+    "send_group_msg": _h_send_group_msg,
+    "send_private_msg": _h_send_private_msg,
+    "delete_msg": _h_delete_msg,
+    "set_group_add_request": _h_set_group_add_request,
+    "set_group_ban": _h_set_group_ban,
+    "set_group_ban_batch": _h_set_group_ban_batch,
+    "get_group_restrict_chat_setting": _h_get_group_restrict_chat_setting,
+    "get_group_bot_state": _h_get_group_bot_state,
+    "get_group_join_request_list": _h_get_group_join_request_list,
+    "respond_interaction": _h_respond_interaction,
+    "get_group_info": _h_get_group_info,
+    "get_group_list": _h_get_group_list,
+    "get_login_info": _h_get_login_info,
+}

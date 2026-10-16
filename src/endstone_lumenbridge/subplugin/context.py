@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -299,8 +300,7 @@ class Storage:
                     return json.loads(path.read_text(encoding="utf-8"))
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     # 损坏时先备份再写默认值，避免直接覆盖用户数据
-                    import time as _time
-                    backup = path.with_suffix(path.suffix + f".corrupt-{int(_time.time())}")
+                    backup = path.with_suffix(path.suffix + f".corrupt-{int(time.time())}")
                     try:
                         path.replace(backup)
                     except OSError:
@@ -595,8 +595,11 @@ class WebBridge:
         if not need_auth:
             # 免鉴权 API 任何能连到端口的客户端都可调用，注册时即告警
             self._logger.warning(
-                f"registerApi: {str(method).upper()} {full} 以 need_auth=False 注册，"
-                f"未持 token 的客户端也可访问，请确认安全风险"
+                _t(
+                    "subplugin_runtime.log.register_api_noauth",
+                    method=str(method).upper(),
+                    path=full,
+                )
             )
         if webui:
             webui.register_api(method, path, handler, need_auth)
@@ -955,23 +958,22 @@ class LumenContext:
         if self.QClient is not None:
             self.QClient.call_action(action, params, callback=callback, timeout=timeout)
 
-    def on(self, event: str, handler: Callable[..., Any]) -> Callable[..., Any]:
-        bus = self._bus
+    def _bus_for_registration(self, event: str) -> Any:
+        """事件注册前置检查：context 已清理 / 总线不可用时拒绝注册。"""
         if self._disposed:
             raise RuntimeError(f"[{self.pluginName}] Subplugin context has been cleaned up, event {event!r} registration rejected")
+        bus = self._bus
         if bus is None:
             raise RuntimeError(f"[{self.pluginName}] LumenBridge is disabled, event {event!r} registration rejected")
-        bus.on(event, handler)
+        return bus
+
+    def on(self, event: str, handler: Callable[..., Any]) -> Callable[..., Any]:
+        self._bus_for_registration(event).on(event, handler)
         self._handlers.append((event, handler))
         return handler
 
     def once(self, event: str, handler: Callable[..., Any]) -> Callable[..., Any]:
-        bus = self._bus
-        if self._disposed:
-            raise RuntimeError(f"[{self.pluginName}] Subplugin context has been cleaned up, event {event!r} registration rejected")
-        if bus is None:
-            raise RuntimeError(f"[{self.pluginName}] LumenBridge is disabled, event {event!r} registration rejected")
-        bus.once(event, handler)
+        self._bus_for_registration(event).once(event, handler)
         self._handlers.append((event, handler))
         return handler
 
