@@ -36,7 +36,7 @@ features:
 
 # LumenBridge 文档中心
 
-> 版本 1.0.12 · MIT License · 面向 Endstone（Minecraft 基岩版专用服务器插件框架）
+> 版本 1.0.12 · Apache-2.0 License · 面向 Endstone（Minecraft 基岩版专用服务器插件框架）
 
 欢迎来到 LumenBridge（流明桥）官方文档。文档按「入门 → 使用 → 开发」三层组织，每篇独立成文，方便按需查阅与维护。
 
