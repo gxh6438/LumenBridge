@@ -8,7 +8,7 @@ version = "1.0.12"
 description = "LumenBridge - Endstone 群服互通框架：OneBot v11 双向消息同步、白名单绑定、正则触发引擎、多适配器连接与 AstrBot 全平台中继"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "MIT"
+license = "Apache-2.0"
 authors = [{ name = "LumenBridge" }]
 keywords = ["endstone", "minecraft", "bedrock", "qq", "onebot", "bridge"]
 
@@ -20,3 +20,6 @@ lumenbridge = "endstone_lumenbridge.plugin:LumenBridgePlugin"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/endstone_lumenbridge"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"THIRD_PARTY_NOTICES.md" = "endstone_lumenbridge/THIRD_PARTY_NOTICES.md"

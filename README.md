@@ -2,7 +2,32 @@
 
 **Endstone 群服互通框架 · OneBot v11 双向消息同步 · QQ 官方机器人 · 全平台中继**
 
-[插件市场](https://market.mxcraft.vip/) · [文档中心](https://gxh6438.github.io/LumenBridge/) · [MIT License](#许可)
+[插件市场](https://market.mxcraft.vip/) · [文档中心](https://gxh6438.github.io/LumenBridge/) · [Apache-2.0 License](#许可)
+
+---
+
+## 致谢与开源声明
+
+LumenBridge 的诞生离不开开源社区的滋养，我们要在一切之前，向以下项目郑重致谢：
+
+### ⭐ 特别感谢 [SparkBridge3](https://github.com/SparkBridge/SparkBridge3)
+
+**LumenBridge 的部分核心模块衍生自 SparkBridge3**（LeviLamina 平台的 BDS QQ 机器人框架，Apache-2.0 许可证）。在 LumenBridge 立项之初，我们让 AI 完整阅读了 SparkBridge3 的源码并复刻了部分功能设计——具体而言：
+
+- **正则触发引擎**：`rules.json` 规则数据模型的字段结构（`triggerType` / `pattern` / `eventType` / `conditions` / `actions`）、条件三元组模型、内置动作命名与默认规则场景，源自 SparkBridge3 的 `sb3_regex` 插件；
+- **群服互通**：同步配置键名与默认消息模板文案（`[玩家] %s 进服` / `[群聊] %s: %s` 等），源自 SparkBridge3 的 `sb3_mc` 插件；
+- **事件命名体系**（`message.group.normal` 等）沿用 SparkBridge3 的命名方式。
+
+**我们由衷感谢 [SparkBridge3](https://github.com/SparkBridge/SparkBridge3) 与 [endstone-qqsync-plugin](https://github.com/yuexps/endstone-qqsync-plugin) 这两个开源项目**——SparkBridge3 以 Apache-2.0 协议开放了清晰的源码与设计，LumenBridge 的早期开发直接受益于此；endstone-qqsync-plugin 的线程模型设计也给了我们很大启发。请大家也去给这两个项目点一个 Star。
+
+完整的衍生声明、修改清单与许可证义务履行情况，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+### 其他致谢
+
+- [websockets](https://github.com/python-websockets/websockets)（BSD-3-Clause）— 已内置打包于本插件
+- [Prism](https://prismjs.com/)（MIT）与 [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator)（MIT）— WebUI 内置组件
+
+此外，本插件部分代码由 AI 协助编写。
 
 ---
 
@@ -30,7 +55,13 @@ LumenBridge 的核心是一个**多适配器并行引擎**。每个适配器实�
 
 ### QQ 官方机器人全覆盖
 
-原生实现 QQ 开放平台网关协议，**46 种事件类型全覆盖**——群消息、私聊、频道消息、全部 notice 与扩展事件，无一遗漏。内置被动凭据池管理、主动消息补发机制与发送重试矩阵。扫码授权后 AppID 与 AppSecret 自动填入，无需手动复制粘贴。
+原生实现 QQ 开放平台网关协议，**46 种事件类型全覆盖**——群消息、私聊、频道消息、全部 notice 与扩展事件，无一遗漏。内置被动凭据池管理、主动消息补发机制、发送重试矩阵与按钮键盘互动消息。扫码授权后 AppID 与 AppSecret 自动填入，无需手动复制粘贴。
+
+### 事件翻译层
+
+QQ 官方机器人的事件在内部统一翻译为 OneBot v11 语义，子插件无需感知消息来自个人号还是官方机器人——同一套代码同时服务两个域。
+
+---
 
 ## 核心功能
 
@@ -44,7 +75,7 @@ LumenBridge 的核心是一个**多适配器并行引擎**。每个适配器实�
 
 ### 正则触发引擎
 
-基于 `rules.json` 的可编程消息 / 事件触发器，支持条件校验、变量替换（`$userId` / `$groupId` / `$nickname`）、多动作序列、自定义动作类型。规则支持图形编辑与 JSON 编辑两种模式，**保存即热加载**，无需重启。规则按优先级从上到下执行，支持"阻断后续"短路逻辑。
+基于 `rules.json` 的可编程消息 / 事件触发器，支持条件校验、变量替换、多动作序列、自定义动作类型。内置 10 个消息变量（`$userId` / `$groupId` / `$nickname` / `$rawMessage` / `$card` / `$role` / `$domain` 等），另有正则捕获组（`$1`…）与动作上下文变量（`$result` 等）。规则支持图形编辑与 JSON 编辑两种模式，**保存即热加载**。规则按优先级从上到下执行，支持「阻断后续」短路逻辑，并内置 ReDoS 防护。
 
 ### Web 管理面板
 
@@ -55,14 +86,16 @@ LumenBridge 的核心是一个**多适配器并行引擎**。每个适配器实�
 | **总览** | 适配器连接状态、CPU / 内存实时环形仪表盘、在线玩家、白名单 / 正则 / 子插件计数、运行环境信息 |
 | **核心配置** | 基础配置表单编辑 + JSON 双模式、连接适配器卡片管理、背景图上传、语言设置 |
 | **正则** | 规则增删改、事件类型选择、条件配置、动作序列编辑、规则优先级排序 |
-| **子插件** | 安装 / 启用 / 禁用 / 热重载 / 卸载、在线编辑源码、依赖管理 |
+| **子插件** | 安装 / 启用 / 禁用 / 热重载 / 卸载、在线编辑源码、依赖一键补全 |
 | **插件市场** | 在线浏览、搜索、安装子插件，SHA-256 完整性校验 |
-| **包管理** | 查看 / 安装 / 卸载 pip 依赖 |
-| **实时日志** | 服务器控制台日志实时流 |
+| **包管理** | 查看 / 安装 / 卸载 pip 依赖（内置 32 项受保护包名单，防止破坏服务器本体） |
+| **实时日志** | 级别筛选、关键词过滤与命中高亮、暂停 / 继续、连接状态指示 |
+
+安全设计：PBKDF2 密码哈希、版本化可撤销 Token、登录防爆破、Host 校验。
 
 ### 子插件体系
 
-完整的 Python 子插件 API，支持热重载、第三方 pip 依赖声明、i18n 国际化。已实现OneBot v11协议穿透，子插件可以获取OneBot v11所有事件！以及Endstone所有API！同时，LumenBridge内置官Bot事件翻译，OneBot插件接入官Bot无缝衔接！
+完整的 Python 子插件 API，支持热重载、第三方 pip 依赖声明（含 Endstone 插件级依赖与版本比较）、i18n 国际化、自定义 Web 页面注册。已实现 OneBot v11 协议穿透——子插件可接收 OneBot v11 全部事件、直达 Endstone 所有 API；官方机器人事件经翻译层自动适配，OneBot 生态插件接入无缝衔接。
 
 ### 插件市场
 
@@ -83,7 +116,7 @@ LumenBridge 的核心是一个**多适配器并行引擎**。每个适配器实�
 
 ### 安装
 
-将 `endstone_lumenbridge-1.0.12-py3-none-any.whl` 放入 Endstone 的 `plugins/` 目录，启动服务器即可。插件无任何外部 pip 依赖。
+从 [Releases](https://github.com/gxh6438/LumenBridge/releases) 下载最新 `endstone_lumenbridge-x.y.z-py3-none-any.whl`，放入 Endstone 的 `plugins/` 目录，启动服务器即可。插件无任何外部 pip 依赖。
 
 ### 三步配置
 
@@ -93,7 +126,7 @@ LumenBridge 的核心是一个**多适配器并行引擎**。每个适配器实�
 
 ```text
 plugins/
-├── endstone_lumenbridge-1.0.12-py3-none-any.whl
+├── endstone_lumenbridge-x.y.z-py3-none-any.whl
 └── lumenbridge/
     ├── config.json          # 基础配置
     ├── connections.json     # 连接配置（适配器卡片）
@@ -155,27 +188,18 @@ def on_group_message(pack, reply):
 | 项目 | 规格 |
 | --- | --- |
 | 版本 | 1.0.12 |
-| 许可证 | MIT |
+| 许可证 | Apache-2.0（衍生自 SparkBridge3 的部分同样遵循 Apache-2.0） |
 | 语言 | Python 3.11+ |
 | 框架 | Endstone 0.11+ |
 | 协议 | OneBot v11 / QQ 开放平台 API |
 | 外部依赖 | 零（websockets 已内置） |
 | 国际化 | 简体中文 / 繁体中文 / 英文 |
-| 测试覆盖 | 23 个测试文件、172+ 项回归测试 |
-
----
-
-## 特别鸣谢
-
-功能设计参考了以下开源项目：
-
-- [SparkBridge3](https://github.com/SparkBridge/SparkBridge3) (Apache-2.0) — 群服互通功能设计参考
-- [endstone-qqsync-plugin](https://github.com/yuexps/endstone-qqsync-plugin) (MIT) — 线程模型参考
-
-本插件部分代码由 AI 协助编写。
+| 测试覆盖 | 37 个测试文件、454 项测试用例 |
 
 ---
 
 ## 许可
 
-本项目采用 **MIT License**。使用本插件前请阅读[用户使用条例与免责声明](docs/guide/terms.md)。
+本项目采用 **Apache License 2.0**（完整文本见 [LICENSE](LICENSE)）。部分模块衍生自 [SparkBridge3](https://github.com/SparkBridge/SparkBridge3)（Apache-2.0），衍生关系与修改清单详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，该声明随 wheel 产物一同分发。
+
+使用本插件前请阅读[用户使用条例与免责声明](docs/guide/terms.md)。

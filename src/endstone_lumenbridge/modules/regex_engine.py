@@ -63,7 +63,7 @@ DEFAULT_RULES: list[dict[str, Any]] = [
         "flags": "",
         "eventType": "",
         "conditions": [
-            {"field": "userRole", "operator": "==", "value": "sparkadmin"}
+            {"field": "userRole", "operator": "==", "value": "lumenadmin"}
         ],
         "actions": [
             {"type": "executeCommand", "params": "$1"},
@@ -411,8 +411,8 @@ class RegexEngineModule:
                 # 宽松字符串比较：兼容 QQ 官方域的 openid 管理员
                 if str(pack.get("user_id", "")) in self.plugin.config_manager.admin_keys:
                     roles.append("admin")
-                    # 兼容旧配置的 "sparkadmin"
-                    roles.append("sparkadmin")
+                    # 后台管理员额外获得 lumenadmin 专属角色（区别于群管理员）
+                    roles.append("lumenadmin")
                 ok = value in roles if operator == "==" else (
                     value not in roles if operator == "!=" else False
                 )

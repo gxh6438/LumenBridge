@@ -66,7 +66,7 @@
 
 | field | 说明 |
 |-------|------|
-| `userRole` | 发送者角色：`owner` / `admin` / `member`，LumenBridge 管理员额外视为 `admin`（兼容旧配置的 `sparkadmin`） |
+| `userRole` | 发送者角色：`owner` / `admin` / `member`，LumenBridge 后台管理员额外视为 `admin` 与 `lumenadmin` |
 | `userId` | 发送者 QQ 号/openid/玩家名 |
 | `groupId` | 群号 |
 | 其他字段 | 直接取事件包同名字段（字符串比较） |
