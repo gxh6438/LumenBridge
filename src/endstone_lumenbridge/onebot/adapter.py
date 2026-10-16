@@ -542,10 +542,17 @@ class OneBotAdapter:
                 self._requeue_head(pack)
                 await asyncio.sleep(2.0)
 
-    def send_pack(self, pack: dict[str, Any]) -> None:
-        """线程安全的数据包发送入口（外部线程可直接调用）"""
+    def _live_loop(self) -> asyncio.AbstractEventLoop | None:
+        """返回可安全提交任务的事件循环；未运行或已关闭返回 None。"""
         loop = self._loop
         if not self._running or loop is None or loop.is_closed():
+            return None
+        return loop
+
+    def send_pack(self, pack: dict[str, Any]) -> None:
+        """线程安全的数据包发送入口（外部线程可直接调用）"""
+        loop = self._live_loop()
+        if loop is None:
             return
 
         async def _enqueue() -> None:
@@ -569,8 +576,8 @@ class OneBotAdapter:
         timeout: float = API_TIMEOUT,
     ) -> None:
         """发送带 echo 的 API 请求；回执到达后在 WS 线程回调 callback(data)"""
-        loop = self._loop
-        if not self._running or loop is None or loop.is_closed():
+        loop = self._live_loop()
+        if loop is None:
             if callback:
                 callback(None)
             return
@@ -581,6 +588,13 @@ class OneBotAdapter:
         # 新 echo + 浅拷贝：避免 echo 冲突覆盖 pending Future，且不改写调用方字典
         echo = uuid.uuid4().hex
         pack = {**pack, "echo": echo}
+
+        def _safe_callback(data: Any) -> None:
+            # 回调异常不能逃逸到事件循环：记录后吞掉
+            try:
+                callback(data)
+            except Exception:
+                self.logger.exception("OneBot API callback error")
 
         async def _request() -> None:
             q = self._send_queue
@@ -594,18 +608,11 @@ class OneBotAdapter:
             await q.put(pack)
             try:
                 data = await asyncio.wait_for(fut, timeout=timeout)
-                try:
-                    callback(data)
-                except Exception:
-                    # 回调异常不能逃逸到事件循环：记录后吞掉
-                    self.logger.exception("OneBot API callback error")
+                _safe_callback(data)
             except asyncio.TimeoutError:
                 self._pending.pop(echo, None)
                 self.logger.warning(_t("adapter.api_timeout", action=pack.get('action')))
-                try:
-                    callback(None)
-                except Exception:
-                    self.logger.exception("OneBot API callback error")
+                _safe_callback(None)
             except asyncio.CancelledError:
                 self._pending.pop(echo, None)
                 # stop() 取消 pending Future 时回调 None，让调用方立即感知失败

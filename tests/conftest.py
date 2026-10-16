@@ -29,6 +29,13 @@ class _ColorFormatStub:
         return ""
 
 
+class _QuietLogger:
+    def info(self, _msg, *args, **kwargs):
+        pass
+
+    warning = error = debug = critical = info
+
+
 class _CommandSenderWrapperStub:
     """endstone 0.11 CommandSenderWrapper 哑类。
 
@@ -105,9 +112,25 @@ def _install_endstone_stubs() -> None:
         event.event_handler = _event_handler
 
     # endstone.plugin：plugin.py 的 Plugin 基类
+    # logger/server/data_folder 为只读 property（与真实 endstone 一致），
+    # 使 mock.patch.object(cls, name, new=...) 可在类级遮蔽。
     plugin = _ensure_module("endstone.plugin")
     if not hasattr(plugin, "Plugin"):
-        plugin.Plugin = type("Plugin", (), {})
+
+        class _PluginStub:
+            @property
+            def logger(self):
+                return _QuietLogger()
+
+            @property
+            def server(self):
+                return None
+
+            @property
+            def data_folder(self):
+                return ""
+
+        plugin.Plugin = _PluginStub
 
     # endstone.logger：Logger 哑类（部分子插件 / 探测脚本引用）
     logger_mod = _ensure_module("endstone.logger")

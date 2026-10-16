@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from endstone_lumenbridge.config import DEFAULT_CONFIG
 from endstone_lumenbridge.i18n import get_i18n
 from endstone_lumenbridge.plugin import LumenBridgePlugin
-from endstone_lumenbridge.webui.server import build_config_labels
+from endstone_lumenbridge.webui.sensitive import build_config_labels
 
 
 def leaf_paths(value, prefix: str = "") -> list[str]:

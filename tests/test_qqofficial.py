@@ -100,7 +100,7 @@ def test_inbound_group_message() -> None:
         "content": "<@!102000001> 你好服务器",
         "author": {"member_openid": "MEMBER1", "username": "Steve"},
     }
-    run_async(ad._emit_group_message(data))
+    run_async(ad.translator._emit_group_message(data))
     packs = [p for e, p in ad.bus.events if e == "onebot.pack"]
     check("群消息生成 onebot.pack", len(packs) == 1)
     pack = packs[0]
@@ -125,7 +125,7 @@ def test_inbound_group_message() -> None:
           and pack["anonymous"] is None and isinstance(pack["message"], list))
     check(
         "被动凭据已入池",
-        "GRPOPENID1" in ad._passive and ad._passive["GRPOPENID1"][0][0] == "MSG1",
+        "GRPOPENID1" in ad.credentials.passive and ad.credentials.passive["GRPOPENID1"][0][0] == "MSG1",
     )
 
 
@@ -136,7 +136,7 @@ def test_inbound_c2c_message() -> None:
         "content": "私聊你好",
         "author": {"user_openid": "USEROPEN1", "username": "Alex"},
     }
-    run_async(ad._emit_c2c_message(data))
+    run_async(ad.translator._emit_c2c_message(data))
     packs = [p for e, p in ad.bus.events if e == "onebot.pack"]
     check("C2C 生成消息包", len(packs) == 1 and packs[0]["message_type"] == "private")
     check(
@@ -169,7 +169,7 @@ def test_inbound_attachments() -> None:
         return {"file_info": "https://dl.example.com/video.mp4"}
 
     ad._api_request = fake_api  # type: ignore[method-assign]
-    run_async(ad._emit_group_message(data))
+    run_async(ad.translator._emit_group_message(data))
     pack = [p for e, p in ad.bus.events if e == "onebot.pack"][0]
     segs = pack["message"]
     check("附件转 image 段", segs[1]["type"] == "image" and segs[1]["data"]["url"].startswith("https://cdn"))
@@ -186,7 +186,7 @@ def test_inbound_mention_position() -> None:
         "content": "<@!102000001> 你好<@!MEMBER2>你好呀",
         "author": {"member_openid": "MEMBER1", "username": "Steve"},
     }
-    run_async(ad._emit_group_message(data))
+    run_async(ad.translator._emit_group_message(data))
     pack = [p for e, p in ad.bus.events if e == "onebot.pack"][0]
     segs = pack["message"]
     check(
@@ -210,7 +210,7 @@ def test_inbound_mention_position() -> None:
         "content": "<@!102000001>嗨 <@!MEMBER2> 早<faceType=1,id=4,ext=\"{}\">",
         "author": {"member_openid": "MEMBER1"},
     }
-    run_async(ad._emit_group_message(data2))
+    run_async(ad.translator._emit_group_message(data2))
     segs2 = [p for e, p in ad.bus.events if e == "onebot.pack"][-1]["message"]
     check(
         "@ 间距保留 / 表情转文本",
@@ -222,82 +222,82 @@ def test_inbound_mention_position() -> None:
 
 
 def test_passive_seq() -> None:
-    from endstone_lumenbridge.onebot.qqofficial_adapter import _PASSIVE_WINDOW_GROUP
+    from endstone_lumenbridge.onebot.qqofficial.constants import PASSIVE_WINDOW_GROUP as _PASSIVE_WINDOW_GROUP
 
     ad = make_adapter()
-    ad._cache_passive("GRP1", "MSG_X", _PASSIVE_WINDOW_GROUP)
-    first = ad._take_passive("GRP1")
-    second = ad._take_passive("GRP1")
+    ad.credentials.cache_passive("GRP1", "MSG_X", _PASSIVE_WINDOW_GROUP)
+    first = ad.credentials.take_passive("GRP1")
+    second = ad.credentials.take_passive("GRP1")
     check("被动凭据 msg_seq 递增", first == ("MSG_X", 1) and second == ("MSG_X", 2))
-    ad._cache_passive("GRP2", "MSG_Y", -1.0)
-    check("过期凭据返回 None", ad._take_passive("GRP2") is None)
+    ad.credentials.cache_passive("GRP2", "MSG_Y", -1.0)
+    check("过期凭据返回 None", ad.credentials.take_passive("GRP2") is None)
 
 
 def test_passive_pool() -> None:
     """凭据池（Gensokyo 懒池）：优先未用过的最新条目、5 次上限、池容量上限。"""
-    from endstone_lumenbridge.onebot.qqofficial_adapter import (
-        _PASSIVE_MAX_SEQ,
-        _PASSIVE_POOL_MAX,
-        _PASSIVE_WINDOW_GROUP,
+    from endstone_lumenbridge.onebot.qqofficial.constants import (
+        PASSIVE_MAX_SEQ_GROUP as _PASSIVE_MAX_SEQ,
+        PASSIVE_POOL_MAX as _PASSIVE_POOL_MAX,
+        PASSIVE_WINDOW_GROUP as _PASSIVE_WINDOW_GROUP,
     )
 
     ad = make_adapter()
     # 两条凭据入池：旧 msg_id 已用 1 次，新 msg_id 未用
-    ad._cache_passive("GRP", "OLD", _PASSIVE_WINDOW_GROUP)
-    ad._take_passive("GRP")  # OLD 消耗一次
-    ad._cache_passive("GRP", "NEW", _PASSIVE_WINDOW_GROUP)
-    taken = ad._take_passive("GRP")
+    ad.credentials.cache_passive("GRP", "OLD", _PASSIVE_WINDOW_GROUP)
+    ad.credentials.take_passive("GRP")  # OLD 消耗一次
+    ad.credentials.cache_passive("GRP", "NEW", _PASSIVE_WINDOW_GROUP)
+    taken = ad.credentials.take_passive("GRP")
     check("池优先取未用过的最新凭据", taken == ("NEW", 1), str(taken))
     # NEW 用尽 5 次后回落到仍有额度的 OLD
     for _ in range(_PASSIVE_MAX_SEQ - 1):
-        ad._take_passive("GRP")
-    fallback = ad._take_passive("GRP")
+        ad.credentials.take_passive("GRP")
+    fallback = ad.credentials.take_passive("GRP")
     check("最新凭据用尽后回落旧凭据", fallback == ("OLD", 2), str(fallback))
     # OLD 再用 3 次（共 5 次）后池内全部耗尽 → None
     for _ in range(3):
-        ad._take_passive("GRP")
-    check("池内凭据全部用尽返回 None", ad._take_passive("GRP") is None)
+        ad.credentials.take_passive("GRP")
+    check("池内凭据全部用尽返回 None", ad.credentials.take_passive("GRP") is None)
     # 同一 msg_id 重复入池去重
-    ad._cache_passive("DEDUP", "M1", _PASSIVE_WINDOW_GROUP)
-    ad._cache_passive("DEDUP", "M1", _PASSIVE_WINDOW_GROUP)
-    check("同一 msg_id 入池去重", len(ad._passive["DEDUP"]) == 1)
+    ad.credentials.cache_passive("DEDUP", "M1", _PASSIVE_WINDOW_GROUP)
+    ad.credentials.cache_passive("DEDUP", "M1", _PASSIVE_WINDOW_GROUP)
+    check("同一 msg_id 入池去重", len(ad.credentials.passive["DEDUP"]) == 1)
     # 池容量上限
     for i in range(_PASSIVE_POOL_MAX + 3):
-        ad._cache_passive("CAP", f"M{i}", _PASSIVE_WINDOW_GROUP)
-    check("凭据池容量上限", len(ad._passive["CAP"]) == _PASSIVE_POOL_MAX)
+        ad.credentials.cache_passive("CAP", f"M{i}", _PASSIVE_WINDOW_GROUP)
+    check("凭据池容量上限", len(ad.credentials.passive["CAP"]) == _PASSIVE_POOL_MAX)
 
 
 def test_event_id_credential() -> None:
     """入群 event_id：缓存→复用→过期。"""
-    from endstone_lumenbridge.onebot.qqofficial_adapter import _EVENT_ID_WINDOW
+    from endstone_lumenbridge.onebot.qqofficial.constants import EVENT_ID_WINDOW as _EVENT_ID_WINDOW
 
     ad = make_adapter()
-    ad._emit_robot_added({
+    ad.translator._emit_robot_added({
         "group_openid": "GRPOPENID1",
         "op_member_openid": "ADMIN1",
         "event_id": "EVT_JOIN_1",
     })
-    check("入群 event_id 已缓存", ad._take_event_id("GRPOPENID1") == "EVT_JOIN_1")
-    check("event_id 窗口内可复用", ad._take_event_id("GRPOPENID1") == "EVT_JOIN_1")
-    check("无 event_id 的目标返回空串", ad._take_event_id("NOPE") == "")
-    ad._event_ids["GRPOPENID1"] = ("EVT_JOIN_1", time.time() + _EVENT_ID_WINDOW - 1e9)
-    check("过期 event_id 返回空串", ad._take_event_id("GRPOPENID1") == "")
+    check("入群 event_id 已缓存", ad.credentials.take_event_id("GRPOPENID1") == "EVT_JOIN_1")
+    check("event_id 窗口内可复用", ad.credentials.take_event_id("GRPOPENID1") == "EVT_JOIN_1")
+    check("无 event_id 的目标返回空串", ad.credentials.take_event_id("NOPE") == "")
+    ad.credentials.event_ids["GRPOPENID1"] = ("EVT_JOIN_1", time.time() + _EVENT_ID_WINDOW - 1e9)
+    check("过期 event_id 返回空串", ad.credentials.take_event_id("GRPOPENID1") == "")
 
 
 def test_biz_code() -> None:
-    from endstone_lumenbridge.onebot.qqofficial_adapter import ApiHTTPError, _biz_code
+    from endstone_lumenbridge.onebot.qqofficial.utils import ApiHTTPError, biz_code
 
-    check("解析业务码 22009", _biz_code(ApiHTTPError(400, '{"code": 22009, "message": "x"}')) == 22009)
-    check("解析业务码 40034025", _biz_code(ApiHTTPError(400, '{"code":40034025}')) == 40034025)
-    check("无业务码返回 0", _biz_code(ApiHTTPError(500, "oops")) == 0)
+    check("解析业务码 22009", biz_code(ApiHTTPError(400, '{"code": 22009, "message": "x"}')) == 22009)
+    check("解析业务码 40034025", biz_code(ApiHTTPError(400, '{"code":40034025}')) == 40034025)
+    check("无业务码返回 0", biz_code(ApiHTTPError(500, "oops")) == 0)
 
 
 def test_post_message_matrix() -> None:
     """重试矩阵：超时重试递增 msg_seq / 22009 直接入栈 / 40034025 清 event_id 重发。"""
     import endstone_lumenbridge.onebot.qqofficial_adapter as qm
 
-    old_text, old_media = qm._SEND_RETRY_DELAY_TEXT, qm._SEND_RETRY_DELAY_MEDIA
-    qm._SEND_RETRY_DELAY_TEXT = qm._SEND_RETRY_DELAY_MEDIA = 0.01
+    old_text, old_media = qm.SEND_RETRY_DELAY_TEXT, qm.SEND_RETRY_DELAY_MEDIA
+    qm.SEND_RETRY_DELAY_TEXT = qm.SEND_RETRY_DELAY_MEDIA = 0.01
     try:
         # 1) 超时重试：前两次网络异常，第三次成功；msg_seq 随重试递增
         ad = make_adapter()
@@ -310,7 +310,7 @@ def test_post_message_matrix() -> None:
             return {}
 
         ad._api_request = flaky  # type: ignore[assignment]
-        result = run_async(ad._post_message("group", "GRP1", {"content": "hi", "msg_seq": 1, "msg_id": "M"}, False))
+        result = run_async(ad.sender.post_message("group", "GRP1", {"content": "hi", "msg_seq": 1, "msg_id": "M"}, False))
         check("超时重试后成功", result == "ok" and len(calls) == 3)
         check("重试时 msg_seq 递增", calls[0]["body"]["msg_seq"] == 1 and calls[2]["body"]["msg_seq"] == 3)
         check("群路径正确", calls[0]["path"] == "/v2/groups/GRP1/messages")
@@ -324,7 +324,7 @@ def test_post_message_matrix() -> None:
             raise qm.ApiHTTPError(400, '{"code": 22009, "message": "active limit"}')
 
         ad2._api_request = reject  # type: ignore[assignment]
-        result2 = run_async(ad2._post_message("private", "USER1", {"content": "hi"}, False))
+        result2 = run_async(ad2.sender.post_message("private", "USER1", {"content": "hi"}, False))
         check("22009 判定 rejected 不重试", result2 == "rejected" and len(rejected_calls) == 1)
 
         # 3) 40034025：event_id 无效 → 清除后重发一次成功
@@ -338,7 +338,7 @@ def test_post_message_matrix() -> None:
             return {}
 
         ad3._api_request = bad_event  # type: ignore[assignment]
-        result3 = run_async(ad3._post_message("group", "GRP1", {"content": "hi", "event_id": "EVT"}, False))
+        result3 = run_async(ad3.sender.post_message("group", "GRP1", {"content": "hi", "event_id": "EVT"}, False))
         check("40034025 清 event_id 重发成功", result3 == "ok" and len(event_calls) == 2)
         check("重发时 event_id 已清除", "event_id" not in event_calls[1])
 
@@ -349,28 +349,28 @@ def test_post_message_matrix() -> None:
             raise TimeoutError("down")
 
         ad4._api_request = always_timeout  # type: ignore[assignment]
-        result4 = run_async(ad4._post_message("group", "GRP1", {"content": "hi"}, False))
+        result4 = run_async(ad4.sender.post_message("group", "GRP1", {"content": "hi"}, False))
         check("重试耗尽判定 failed", result4 == "failed")
     finally:
-        qm._SEND_RETRY_DELAY_TEXT, qm._SEND_RETRY_DELAY_MEDIA = old_text, old_media
+        qm.SEND_RETRY_DELAY_TEXT, qm.SEND_RETRY_DELAY_MEDIA = old_text, old_media
 
 
 def test_active_stack() -> None:
     """22009 补发栈：入栈上限、被动回复后借额度补发、每次上限、凭据耗尽即止。"""
-    from endstone_lumenbridge.onebot.qqofficial_adapter import (
-        _ACTIVE_STACK_FLUSH,
-        _ACTIVE_STACK_MAX,
-        _PASSIVE_WINDOW_GROUP,
+    from endstone_lumenbridge.onebot.qqofficial.constants import (
+        ACTIVE_STACK_FLUSH as _ACTIVE_STACK_FLUSH,
+        ACTIVE_STACK_MAX as _ACTIVE_STACK_MAX,
+        PASSIVE_WINDOW_GROUP as _PASSIVE_WINDOW_GROUP,
     )
 
     ad = make_adapter()
     for i in range(_ACTIVE_STACK_MAX + 2):
-        ad._push_active_stack("group", "GRP1", f"msg{i}", None)
-    check("补发栈每目标上限", len(ad._active_stack["GRP1"]) == _ACTIVE_STACK_MAX)
-    check("栈按入队顺序排列", ad._active_stack["GRP1"][0][2] == "msg0")
+        ad.credentials.push_active(("group", "GRP1", f"msg{i}", None))
+    check("补发栈每目标上限", len(ad.credentials.active_stack["GRP1"]) == _ACTIVE_STACK_MAX)
+    check("栈按入队顺序排列", ad.credentials.active_stack["GRP1"][0][2] == "msg0")
 
     # 被动凭据入池（1 条 msg_id = 5 次额度），栈内 5 条待补发
-    ad._cache_passive("GRP1", "FRESH", _PASSIVE_WINDOW_GROUP)
+    ad.credentials.cache_passive("GRP1", "FRESH", _PASSIVE_WINDOW_GROUP)
     sent: list[dict[str, Any]] = []
 
     async def ok_api(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
@@ -379,30 +379,30 @@ def test_active_stack() -> None:
 
     ad._api_request = ok_api  # type: ignore[assignment]
     # 第一次 flush：每次至多 _ACTIVE_STACK_FLUSH 条
-    run_async(ad._flush_active_stack("GRP1"))
+    run_async(ad.sender.flush_active_stack("GRP1"))
     check(
         "首次补发条数受每次上限约束",
-        len(sent) == _ACTIVE_STACK_FLUSH and len(ad._active_stack["GRP1"]) == _ACTIVE_STACK_MAX - _ACTIVE_STACK_FLUSH,
-        f"sent={len(sent)} left={len(ad._active_stack.get('GRP1', []))}",
+        len(sent) == _ACTIVE_STACK_FLUSH and len(ad.credentials.active_stack["GRP1"]) == _ACTIVE_STACK_MAX - _ACTIVE_STACK_FLUSH,
+        f"sent={len(sent)} left={len(ad.credentials.active_stack.get('GRP1', []))}",
     )
     check("补发均携带被动凭据", all(b.get("msg_id") == "FRESH" for b in sent))
     seqs = [b["msg_seq"] for b in sent]
     check("补发 msg_seq 递增不重复", seqs == sorted(set(seqs)), str(seqs))
 
     # 第二次 flush：清空剩余栈（凭据 5 次额度刚好用完）
-    run_async(ad._flush_active_stack("GRP1"))
-    check("第二次补发清空栈内剩余", len(ad._active_stack.get("GRP1", [])) == 0)
+    run_async(ad.sender.flush_active_stack("GRP1"))
+    check("第二次补发清空栈内剩余", len(ad.credentials.active_stack.get("GRP1", [])) == 0)
     total_seqs = [b["msg_seq"] for b in sent]
     check("累计补发 5 条且 seq 覆盖 1..5", sorted(total_seqs) == [1, 2, 3, 4, 5], str(total_seqs))
 
     # 凭据耗尽后 flush 直接返回，不再发送
     sent.clear()
-    run_async(ad._flush_active_stack("GRP1"))
+    run_async(ad.sender.flush_active_stack("GRP1"))
     check("无凭据时不补发", len(sent) == 0)
 
 
 def test_extract_payload() -> None:
-    from endstone_lumenbridge.onebot.qqofficial_adapter import _extract_payload
+    from endstone_lumenbridge.onebot.qqofficial.utils import extract_payload as _extract_payload
 
     text, media = _extract_payload("纯文本")
     check("纯文本无媒体", text == "纯文本" and media is None)
@@ -473,7 +473,7 @@ def test_keyboard_segments() -> None:
 
 def test_extract_keyboard() -> None:
     """keyboard 段提取：模板（id 键）/ inline、与富媒体互斥、纯键盘无正文。"""
-    from endstone_lumenbridge.onebot.qqofficial_adapter import _extract_payload
+    from endstone_lumenbridge.onebot.qqofficial.utils import extract_payload as _extract_payload
     from endstone_lumenbridge.onebot.message import button, keyboard
 
     text, att = _extract_payload([keyboard("tpl_9")])
@@ -610,7 +610,7 @@ def test_mention_markdown_body() -> None:
     其余文本同步做 markdown 转义（防 * # < 被客户端误解析）。
     """
     from endstone_lumenbridge.onebot.qqofficial.sender import _payload_body
-    from endstone_lumenbridge.onebot.qqofficial_adapter import _extract_payload
+    from endstone_lumenbridge.onebot.qqofficial.utils import extract_payload as _extract_payload
 
     text, media = _extract_payload(
         [{"type": "at", "data": {"qq": "ABC123OPENID"}}, {"type": "text", "data": {"text": " 欢迎新成员！"}}]
@@ -648,7 +648,7 @@ def test_at_marker_converter() -> None:
     一并归一化为官方格式；id 原样保留（openid / unionid 均可）。
     覆盖 at 段、text 段字面量、纯字符串消息（子插件直拼字符串）三条路径。
     """
-    from endstone_lumenbridge.onebot.qqofficial_adapter import _extract_payload
+    from endstone_lumenbridge.onebot.qqofficial.utils import extract_payload as _extract_payload
     from endstone_lumenbridge.onebot.qqofficial.sender import _payload_body
 
     # at 段 → 官方文本链
@@ -774,7 +774,7 @@ def test_inbound_qqbot_at() -> None:
         "content": '<qqbot-at-user id="102000001" /> 你好<qqbot-at-user id="MEMBER9"/>在吗',
         "author": {"member_openid": "MEMBER1", "username": "Steve"},
     }
-    run_async(ad._emit_group_message(data))
+    run_async(ad.translator._emit_group_message(data))
     pack = [p for e, p in ad.bus.events if e == "onebot.pack"][0]
     segs = pack["message"]
     check(
@@ -813,13 +813,13 @@ def test_upload_media_body() -> None:
         return {"file_info": "FILEINFO1", "file_uuid": "UUID1"}
 
     ad._api_request = fake_api  # type: ignore[method-assign]
-    fi = run_async(ad._upload_media("group", "GRP1", {"type": "image", "url": "https://x/i.png", "data": None}))
+    fi = run_async(ad.sender.upload_media("group", "GRP1", {"type": "image", "url": "https://x/i.png", "data": None}))
     path, body = captured[0]
     check("files 接口路径", path == "/v2/groups/GRP1/files")
     check("url 上传请求体", body == {"file_type": 1, "srv_send_msg": False, "url": "https://x/i.png"})
     check("file_info 返回", fi == "FILEINFO1")
     run_async(
-        ad._upload_media("private", "USER1", {"type": "record", "url": None, "data": b"abc"})
+        ad.sender.upload_media("private", "USER1", {"type": "record", "url": None, "data": b"abc"})
     )
     path2, body2 = captured[1]
     check("C2C files 路径", path2 == "/v2/users/USER1/files")
@@ -828,23 +828,23 @@ def test_upload_media_body() -> None:
 
 def test_notice_events() -> None:
     ad = make_adapter()
-    ad._emit_robot_added({"group_openid": "GRP9", "op_member_openid": "OP1"})
-    ad._emit_robot_removed({"group_openid": "GRP9", "op_member_openid": "OP2"})
-    ad._emit_friend_change({"openid": "USER77"}, "friend_add")
-    ad._emit_friend_change({"openid": "USER77"}, "friend_del")
+    ad.translator._emit_robot_added({"group_openid": "GRP9", "op_member_openid": "OP1"})
+    ad.translator._emit_robot_removed({"group_openid": "GRP9", "op_member_openid": "OP2"})
+    ad.translator._emit_friend_change({"openid": "USER77"}, "friend_add")
+    ad.translator._emit_friend_change({"openid": "USER77"}, "friend_del")
     # 管理员 关闭/开启 机器人主动消息（GROUP_MSG_REJECT / GROUP_MSG_RECEIVE）
     asyncio.run(
-        ad._on_dispatch({"t": "GROUP_MSG_REJECT", "d": {"group_openid": "GRP9", "op_member_openid": "OP3"}})
+        ad.translator.on_dispatch({"t": "GROUP_MSG_REJECT", "d": {"group_openid": "GRP9", "op_member_openid": "OP3"}})
     )
     asyncio.run(
-        ad._on_dispatch({"t": "GROUP_MSG_RECEIVE", "d": {"group_openid": "GRP9", "op_member_openid": "OP3"}})
+        ad.translator.on_dispatch({"t": "GROUP_MSG_RECEIVE", "d": {"group_openid": "GRP9", "op_member_openid": "OP3"}})
     )
     # 用户 关闭/开启 机器人主动消息推送（C2C_MSG_REJECT / C2C_MSG_RECEIVE）
     asyncio.run(
-        ad._on_dispatch({"t": "C2C_MSG_REJECT", "d": {"openid": "USER77"}})
+        ad.translator.on_dispatch({"t": "C2C_MSG_REJECT", "d": {"openid": "USER77"}})
     )
     asyncio.run(
-        ad._on_dispatch({"t": "C2C_MSG_RECEIVE", "d": {"openid": "USER77"}})
+        ad.translator.on_dispatch({"t": "C2C_MSG_RECEIVE", "d": {"openid": "USER77"}})
     )
     packs = [p for e, p in ad.bus.events if e == "onebot.pack"]
     check("notice 事件共 8 条", len(packs) == 8)
@@ -888,7 +888,7 @@ def test_notice_events() -> None:
 def test_robot_removed_cleanup() -> None:
     """移群清理：动态发现记录 + 被动池 / event_id / 补发栈全部清空。"""
     ad = make_adapter(groups=[])
-    ad._emit_robot_added({"group_openid": "GRPX", "op_member_openid": "OP1", "event_id": "EVT1"})
+    ad.translator._emit_robot_added({"group_openid": "GRPX", "op_member_openid": "OP1", "event_id": "EVT1"})
     ad.credentials.cache_passive("GRPX", "M1", 300.0)
     ad.credentials.push_active(("group", "GRPX", "hello", None))
     check(
@@ -897,7 +897,7 @@ def test_robot_removed_cleanup() -> None:
         and ad.credentials.take_event_id("GRPX") == "EVT1"
         and ad.credentials.active_size("GRPX") == 1,
     )
-    ad._emit_robot_removed({"group_openid": "GRPX", "op_member_openid": "OP2"})
+    ad.translator._emit_robot_removed({"group_openid": "GRPX", "op_member_openid": "OP2"})
     check("移群清空动态发现记录", "GRPX" not in ad._discovered_groups)
     check(
         "移群清空全部回复凭据",
@@ -908,7 +908,7 @@ def test_robot_removed_cleanup() -> None:
     # 配置群：凭据同样清理（移群后必失效），但 groups 配置本身不动
     ad2 = make_adapter()
     ad2.credentials.cache_passive("GRPOPENID1", "M2", 300.0)
-    ad2._emit_robot_removed({"group_openid": "GRPOPENID1", "op_member_openid": "OP3"})
+    ad2.translator._emit_robot_removed({"group_openid": "GRPOPENID1", "op_member_openid": "OP3"})
     check("配置群凭据同样清理", ad2.credentials.take_passive("GRPOPENID1") is None)
     check("配置 groups 不被移群改动", list(ad2.groups) == ["GRPOPENID1"])
 
@@ -918,7 +918,7 @@ def test_full_event_dispatch() -> None:
     ad = make_adapter()
 
     async def dispatch(event: str, data: dict[str, Any]) -> None:
-        await ad._on_dispatch({"t": event, "d": data})
+        await ad.translator.on_dispatch({"t": event, "d": data})
 
     # 频道消息（1<<30）
     asyncio.run(dispatch("AT_MESSAGE_CREATE", {
@@ -1034,7 +1034,7 @@ def test_full_event_dispatch() -> None:
 
 def test_extra_intents() -> None:
     """extra_intents：构造参数钳制 + Identify 位合并 + connections 校验。"""
-    from endstone_lumenbridge.onebot.qqofficial_adapter import _DEFAULT_INTENTS
+    from endstone_lumenbridge.onebot.qqofficial.constants import DEFAULT_INTENTS as _DEFAULT_INTENTS
 
     # 构造参数：合法值保留，非法值回退 0
     ad = make_adapter(extra_intents=(1 << 24) | (1 << 1))
@@ -1271,7 +1271,7 @@ def test_inbound_reference_reply() -> None:
             "ext": ["ref_msg_idx=REFIDX_aaa==", "msg_idx=REFIDX_zzz=="],
         },
     }
-    run_async(ad._emit_c2c_message(data))
+    run_async(ad.translator._emit_c2c_message(data))
     pack = [p for e, p in ad.bus.events if e == "onebot.pack"][0]
     segs = pack["message"]
     check("C2C 引用生成 reply 段", segs and segs[0]["type"] == "reply")
@@ -1302,7 +1302,7 @@ def test_inbound_reference_reply() -> None:
         ],
         "message_scene": {"source": "default", "ext": ["ref_msg_idx=REFIDX_bbb=="]},
     }
-    run_async(ad2._emit_group_message(data2))
+    run_async(ad2.translator._emit_group_message(data2))
     pack2 = [p for e, p in ad2.bus.events if e == "onebot.pack"][0]
     segs2 = pack2["message"]
     check("群引用生成 reply 段", segs2[0]["type"] == "reply")
@@ -1325,7 +1325,7 @@ def test_inbound_reference_blank_content() -> None:
         "msg_elements": [{"msg_idx": "REFIDX_ccc==", "content": "=== 消息 1 ===\n[消息内容] 今天的学习计划已完成"}],
         "message_scene": {"source": "default", "ext": ["ref_msg_idx=REFIDX_ccc=="]},
     }
-    run_async(ad._emit_group_message(data))
+    run_async(ad.translator._emit_group_message(data))
     pack = [p for e, p in ad.bus.events if e == "onebot.pack"][0]
     segs = pack["message"]
     check("纯引用 reply 段在前", segs[0]["type"] == "reply")
@@ -1347,7 +1347,7 @@ def test_inbound_chat_record_forward() -> None:
         "author": {"member_openid": "MEMBER1", "username": "Steve"},
         "msg_elements": [{"msg_idx": "REFIDX_ddd==", "content": "=== 消息 1 ===\n[消息内容] 合并的聊天记录"}],
     }
-    run_async(ad._emit_group_message(data))
+    run_async(ad.translator._emit_group_message(data))
     pack = [p for e, p in ad.bus.events if e == "onebot.pack"][0]
     segs = pack["message"]
     check("聊天记录转 forward 段", segs and segs[0]["type"] == "forward")
@@ -1366,7 +1366,7 @@ def test_inbound_mentions_field() -> None:
         "author": {"member_openid": "MEMBER1", "username": "Steve"},
         "mentions": [{"member_openid": "MEMBER2", "username": "Alex"}],
     }
-    run_async(ad._emit_group_message(data))
+    run_async(ad.translator._emit_group_message(data))
     pack = [p for e, p in ad.bus.events if e == "onebot.pack"][0]
     ats = [s for s in pack["message"] if s["type"] == "at"]
     check("mentions 补齐 at 段", len(ats) == 1 and ats[0]["data"]["qq"] == "MEMBER2")
@@ -1381,7 +1381,7 @@ def test_inbound_mentions_field() -> None:
         "author": {"member_openid": "MEMBER1", "username": "Steve"},
         "mentions": [{"member_openid": "MEMBER2", "username": "Alex"}],
     }
-    run_async(ad2._emit_group_message(data2))
+    run_async(ad2.translator._emit_group_message(data2))
     pack2 = [p for e, p in ad2.bus.events if e == "onebot.pack"][0]
     ats2 = [s for s in pack2["message"] if s["type"] == "at"]
     check("内联 at 不重复", len(ats2) == 1)
@@ -1406,7 +1406,7 @@ def test_inbound_voice_asr() -> None:
             }
         ],
     }
-    run_async(ad._emit_group_message(data))
+    run_async(ad.translator._emit_group_message(data))
     pack = [p for e, p in ad.bus.events if e == "onebot.pack"][0]
     segs = pack["message"]
     record = [s for s in segs if s["type"] == "record"]
@@ -1439,7 +1439,7 @@ def test_delete_msg_private() -> None:
             "content": "你好",
             "author": {"user_openid": "USEROPEN9", "username": "Alex"},
         }
-        run_async(ad._emit_c2c_message(data))
+        run_async(ad.translator._emit_c2c_message(data))
         results: list[Any] = []
         ad.delete_msg("MSG_DEL1", results.append)
         for _ in range(50):
@@ -1716,7 +1716,7 @@ class ResumeReplayDedupTests(unittest.TestCase):
         async def fake_dispatch(msg: dict) -> None:
             dispatched.append(msg["s"])
 
-        ad._on_dispatch = fake_dispatch  # type: ignore[method-assign]
+        ad.translator.on_dispatch = fake_dispatch  # type: ignore[method-assign]
 
         def feed(seq: int) -> None:
             raw = json.dumps({"op": 0, "s": seq, "t": "GROUP_MESSAGE_CREATE", "d": {}})

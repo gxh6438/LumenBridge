@@ -17,6 +17,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import tempfile
 import zipfile
 import threading
@@ -25,7 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from .subplugin.requires import (
     PluginRequirement,
@@ -40,6 +41,8 @@ if TYPE_CHECKING:
 
 # requires 递归解析的最大层级：超过视为循环依赖（A→B→A）或恶意嵌套
 _MAX_REQUIREMENT_DEPTH = 8
+# 市场更新检查默认间隔（6 小时）
+_DEFAULT_CHECK_INTERVAL = 21600
 
 _MARKET_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
 _VERSION_RE = re.compile(r"^[0-9A-Za-z.+-]{3,80}$")
@@ -89,6 +92,33 @@ class _RouteNotFoundError(MarketplaceError):
 
     def __init__(self) -> None:
         super().__init__("市场服务返回 HTTP 404")
+
+
+def network_failure_kind(exc: BaseException) -> str:
+    """沿 __cause__ 链识别网络失败类别，供命令层给出简洁提示。
+
+    返回 "timeout"（连接/读取超时）、"network"（其它网络故障）或 ""（非网络错误）。
+    """
+    cur: BaseException | None = exc
+    for _ in range(8):
+        if cur is None:
+            break
+        if isinstance(cur, (TimeoutError, socket.timeout)):
+            return "timeout"
+        if isinstance(cur, urllib.error.URLError):
+            reason = getattr(cur, "reason", None)
+            if isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(reason or "").lower():
+                return "timeout"
+            return "network"
+        cur = cur.__cause__
+    if isinstance(exc, OSError) and not isinstance(exc, urllib.error.URLError):
+        return ""
+    text = str(exc).lower()
+    if "timed out" in text or "timeout" in text:
+        return "timeout"
+    if isinstance(exc, MarketplaceError) and ("无法连接" in str(exc) or "无法访问" in str(exc)):
+        return "network"
+    return ""
 
 
 class MarketplaceClient:
@@ -473,8 +503,7 @@ class MarketplaceClient:
                 if exc.code == "csrf_failed":
                     continue
                 raise
-        assert last_error is not None
-        raise last_error
+        raise last_error or MarketplaceError("市场写操作失败")
 
     def browse(self, *, search: str = "", category: str = "", sort: str = "score", page: int = 1, limit: int = 24) -> dict[str, Any]:
         safe_sort = sort if sort in {"time", "likes", "downloads", "score"} else "score"
@@ -980,39 +1009,99 @@ class MarketplaceClient:
             dependencies = release.get("dependencies", [])
             if not isinstance(dependencies, list):
                 dependencies = []
-            dep_ok, dep_message = self._install_declared_dependencies(
-                name, [str(x) for x in dependencies], upgrade=upgrade_dependencies, log=log, progress=progress
+            result = self._complete_install(
+                name, message,
+                dependencies=[str(x) for x in dependencies],
+                upgrade_dependencies=upgrade_dependencies, log=log, progress=progress,
+                _dep_depth=_dep_depth, _dep_chain=_dep_chain,
             )
-            requirements = self.install_plugin_requirements(
-                name, log=log, progress=progress,
-                _dep_depth=_dep_depth + 1, _dep_chain=_dep_chain + (name,),
-            )
-            loaded = False
-            with manager._lock:
-                installed = manager.subplugins.get(name)
-                loaded = bool(installed and installed.loaded)
-            return {
-                "name": name,
-                "market_id": market_id,
-                "version": release["version"],
-                "installed": True,
-                "loaded": loaded,
-                "message": message,
-                "dependencies_ok": dep_ok,
-                "dependencies_message": dep_message,
-                "requirements_ok": bool(requirements.get("ok")),
-                "requirements_message": str(requirements.get("message") or ""),
-                "requirements_installed": list(requirements.get("installed") or []),
-                "missing_requirements": list(requirements.get("missing") or []) + list(requirements.get("endstone_missing") or []),
-                "endstone_missing": list(requirements.get("endstone_missing") or []),
-                "restart_required": not loaded,
-            }
+            result["market_id"] = market_id
+            result["version"] = release["version"]
+            return result
         finally:
             if not cleaned.is_set():
                 try:
                     os.unlink(path)
                 except OSError:
                     pass
+
+    def _complete_install(
+        self, name: str, message: str, *, dependencies: list[str],
+        upgrade_dependencies: bool = False, log=None, progress=None,
+        _dep_depth: int = 0, _dep_chain: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        """安装落盘后的公共收尾：pip 依赖 → 插件级依赖 → 结果汇总。
+
+        ``_dep_depth`` 传调用方所在层级（内部再 +1），与递归安装的层级
+        计数保持一致。
+        """
+        log = log or (lambda _msg: None)
+        progress = progress or (lambda _pct, _label="": None)
+        manager = self.plugin.subplugin_manager
+        dep_ok, dep_message = self._install_declared_dependencies(
+            name, dependencies, upgrade=upgrade_dependencies, log=log, progress=progress
+        )
+        requirements = self.install_plugin_requirements(
+            name, log=log, progress=progress,
+            _dep_depth=_dep_depth + 1, _dep_chain=_dep_chain + (name,),
+        )
+        loaded = False
+        version = ""
+        if manager is not None:
+            with manager._lock:
+                installed = manager.subplugins.get(name)
+                loaded = bool(installed and installed.loaded)
+                if installed is not None:
+                    version = str(installed.manifest.get("version") or "")
+        return {
+            "name": name,
+            "version": version,
+            "installed": True,
+            "loaded": loaded,
+            "message": message,
+            "dependencies_ok": dep_ok,
+            "dependencies_message": dep_message,
+            "requirements_ok": bool(requirements.get("ok")),
+            "requirements_message": str(requirements.get("message") or ""),
+            "requirements_installed": list(requirements.get("installed") or []),
+            "missing_requirements": list(requirements.get("missing") or []) + list(requirements.get("endstone_missing") or []),
+            "endstone_missing": list(requirements.get("endstone_missing") or []),
+            "restart_required": not loaded,
+        }
+
+    def install_subplugin_zip(self, zip_path: str | Path, *, log=None, progress=None) -> dict[str, Any]:
+        """从本地 ZIP 安装子插件并补齐声明的依赖（URL / 上传安装共用管线）。
+
+        与 :meth:`install` 共用依赖补全与结果结构；ZIP 落盘与可运行是
+        两个状态，``loaded=False`` 时结果带 ``restart_required``。
+        """
+        log = log or (lambda _msg: None)
+        progress = progress or (lambda _pct, _label="": None)
+        manager = self.plugin.subplugin_manager
+        if manager is None:
+            raise MarketplaceError("子插件管理器不可用")
+        path = str(zip_path)
+
+        def _install_zip() -> Any:
+            return manager.install_from_zip(path)
+
+        log("正在安装子插件...")
+        progress(60, "正在安装子插件")
+        outcome = self._run_on_main_wait(_install_zip)
+        if not isinstance(outcome, tuple) or len(outcome) != 3:
+            raise MarketplaceError("子插件安装器返回无效结果")
+        ok, message, name = bool(outcome[0]), str(outcome[1]), str(outcome[2])
+        if not ok:
+            raise MarketplaceError(message)
+        log(f"子插件 {name} 安装成功")
+        dependencies: list[str] = []
+        with manager._lock:
+            installed = manager.subplugins.get(name)
+            if installed is not None and isinstance(installed.manifest.get("dependencies"), list):
+                dependencies = [str(x) for x in installed.manifest["dependencies"] if x]
+        return self._complete_install(
+            name, message, dependencies=dependencies, log=log, progress=progress,
+        )
 
     def cached_updates(self) -> dict[str, dict[str, Any]]:
         """返回 WebUI 可安全读取的最近更新检查快照。"""
@@ -1061,9 +1150,9 @@ class MarketplaceClient:
             return {}
         now = int(time.time())
         try:
-            interval = max(60, min(7 * 86400, int(self.config.get("check_interval_seconds", 21600))))
+            interval = max(60, min(7 * 86400, int(self.config.get("check_interval_seconds", _DEFAULT_CHECK_INTERVAL))))
         except (TypeError, ValueError):
-            interval = 21600
+            interval = _DEFAULT_CHECK_INTERVAL
 
         to_check: list[tuple[str, str, str]] = []  # (name, market_id, local_version)
         cached_results: dict[str, dict[str, Any]] = {}
@@ -1315,6 +1404,8 @@ class MarketplaceClient:
         # 幂等复用：同版本同哈希已暂存时跳过重复下载
         receipt_path = Path(self.plugin.data_folder) / "data" / "framework_update.json"
         plugins_dir = Path(self.plugin.data_folder).parent
+        if not plugins_dir.is_dir():
+            raise MarketplaceError(f"无法确定 Endstone plugins 目录：{plugins_dir}")
         target = plugins_dir / f"endstone_lumenbridge-{version}-py3-none-any.whl"
         if receipt_path.is_file() and target.is_file():
             try:
@@ -1352,10 +1443,6 @@ class MarketplaceClient:
             if dist_name != "endstone_lumenbridge" or wheel_version != version:
                 raise MarketplaceError("wheel 元数据与市场发布版本不匹配")
 
-            plugins_dir = Path(self.plugin.data_folder).parent
-            if not plugins_dir.is_dir():
-                raise MarketplaceError(f"无法确定 Endstone plugins 目录：{plugins_dir}")
-            target = plugins_dir / f"endstone_lumenbridge-{version}-py3-none-any.whl"
             stage = plugins_dir / f".{target.name}.download"
             backup_dir = plugins_dir / ".lumenbridge_update_backups" / time.strftime("%Y%m%d-%H%M%S")
             try:
@@ -1625,18 +1712,72 @@ class MarketplaceClient:
             ghost.plugin_loader.enable_plugin(ghost)
         return ghost
 
+    def _ghost_two_phase_reload(
+        self,
+        *,
+        channel: str,
+        timeout: float,
+        on_reload: "Callable[[Any, Any, Callable[..., None]], None]",
+        on_error: "Callable[[Exception, Any, Any, Callable[..., None]], None]",
+    ) -> dict[str, Any]:
+        """经幽灵所有者执行两阶段热重载的公共骨架。
+
+        phase1（tick T）disable_plugins() 禁用全部插件，cancelTasks 只置
+        标志不动队列；tick T+1 心跳开头 removeCancelledTasks 在任务迭代
+        之外安全清理；phase2（tick T+1）执行 on_reload 里的 server.reload()
+        ——无已取消任务，不会改写正在迭代的队列 → 无悬垂引用。
+
+        on_reload / on_error 接收 (ghost, glog, finish)；on_error 内的恢复
+        动作同样不得直接 reload，须经 ghost 再走两阶段调度。
+        """
+        try:
+            self.plugin.note_reload_intent()
+        except Exception:  # noqa: BLE001
+            pass
+
+        ghost = self._make_reload_ghost()
+        glog = ghost.logger
+        pm = self.plugin.server.plugin_manager
+        scheduler = self.plugin.server.scheduler
+        glog.info(f"[{channel}] 热重载通道就绪")
+
+        done = threading.Event()
+        outcome: dict[str, Any] = {}
+
+        def _finish(**kv) -> None:
+            outcome.update(kv)
+            done.set()
+
+        def phase1() -> None:
+            glog.info(f"[{channel}] phase1: 禁用全部插件（任务取消仅置标志）")
+            try:
+                pm.disable_plugins()
+                glog.info(f"[{channel}] phase1: 插件已全部禁用")
+            except Exception as exc:  # noqa: BLE001
+                glog.error(f"[{channel}] phase1 失败：{exc!r}")
+                _finish(ok=False, error=f"禁用插件阶段失败：{exc}")
+
+        def phase2() -> None:
+            glog.info(f"[{channel}] phase2: 执行 server.reload()")
+            try:
+                on_reload(ghost, glog, _finish)
+            except Exception as exc:  # noqa: BLE001
+                glog.error(f"[{channel}] phase2 失败：{exc!r}")
+                on_error(exc, ghost, glog, _finish)
+
+        scheduler.run_task(ghost, phase1, delay=5)
+        scheduler.run_task(ghost, phase2, delay=6)
+
+        if not done.wait(timeout=timeout):
+            return {"ok": False, "error": f"热重载超时（{timeout:g} 秒）未完成，请检查服务器日志确认结果"}
+        return outcome
+
     def safe_framework_reload(self, *, log=None, timeout: float = 180.0) -> dict[str, Any]:
         """在任意线程（如 WebUI 后台任务线程）安全触发框架热重载。
 
-        以"幽灵所有者"（见 :meth:`_make_reload_ghost`）调度两阶段任务——
-        - phase1（tick T）：disable_plugins() 禁用全部插件，cancelTasks 只置标志不动队列；
-        - tick T+1 心跳开头 removeCancelledTasks() 在任务迭代之外安全清理；
-        - phase2（tick T+1）：server.reload()——无已取消任务，不会改写
-          正在迭代的队列 → 无悬垂引用。
-
-        失败回滚同样必须两阶段（先 disable 再 restore+reload），原因同上。
-
-        阻塞到完成或超时；期间 WebUI 面板短暂不可访问，前端应轮询健康检查。
+        两阶段调度见 :meth:`_ghost_two_phase_reload`；失败回滚同样必须
+        两阶段（先 disable 再 restore+reload）。阻塞到完成或超时；期间
+        WebUI 面板短暂不可访问，前端应轮询健康检查。
         """
         receipt = self.staged_framework_update()
         if receipt is None:
@@ -1649,83 +1790,54 @@ class MarketplaceClient:
         plugins_dir = Path(self.plugin.data_folder).parent
         target = plugins_dir / str(receipt.get("wheel") or "")
         backup_directory = str(receipt.get("backup_directory") or "")
-
-        # phase1 禁用插件（on_disable）先于 server.reload()，须提前标记 reload 意图
-        try:
-            self.plugin.note_reload_intent()
-        except Exception:  # noqa: BLE001
-            pass
-
-        ghost = self._make_reload_ghost()
-        glog = ghost.logger
-        glog.info(f"[Update] WebUI 热重载通道就绪，目标版本 v{version}")
         log(f"正在通过安全通道热重载至 v{version}...")
 
-        done = threading.Event()
-        outcome: dict[str, Any] = {}
+        def on_reload(ghost, glog, finish) -> None:
+            server.reload()
+            new_plugin = pm.get_plugin("lumenbridge")
+            if new_plugin is None or not pm.is_plugin_enabled(new_plugin):
+                raise RuntimeError("热重载后未检测到已启用的 LumenBridge 插件")
+            glog.info(f"[Update] 热重载完成，当前版本 v{new_plugin.version}")
+            finish(ok=True, to_version=str(new_plugin.version))
 
-        def _finish(**kv) -> None:
-            outcome.update(kv)
-            done.set()
+        def on_error(exc, ghost, glog, finish) -> None:
+            glog.error("[Update] 开始两阶段回滚")
 
-        def phase1() -> None:
-            glog.info("[Update] phase1: 禁用全部插件（任务取消仅置标志）")
-            try:
-                pm.disable_plugins()
-                glog.info("[Update] phase1: 插件已全部禁用")
-            except Exception as exc:  # noqa: BLE001
-                glog.error(f"[Update] phase1 失败：{exc!r}")
-                _finish(ok=False, error=f"禁用插件阶段失败：{exc}")
+            def phase3() -> None:
+                glog.info("[Update] phase3: 回滚前禁用全部插件")
+                try:
+                    pm.disable_plugins()
+                except Exception as inner:  # noqa: BLE001
+                    glog.error(f"[Update] phase3 失败：{inner!r}")
 
-        def phase2() -> None:
-            glog.info("[Update] phase2: 执行 server.reload()")
-            try:
-                server.reload()
-                new_plugin = pm.get_plugin("lumenbridge")
-                if new_plugin is None or not pm.is_plugin_enabled(new_plugin):
-                    raise RuntimeError("热重载后未检测到已启用的 LumenBridge 插件")
-                glog.info(f"[Update] 热重载完成，当前版本 v{new_plugin.version}")
-                _finish(ok=True, to_version=str(new_plugin.version))
-            except Exception as exc:  # noqa: BLE001
-                glog.error(f"[Update] phase2 热重载失败：{exc!r}，开始两阶段回滚")
-                # 任务内直接二次 reload 会改写迭代队列，须再走两阶段回滚
-                scheduler.run_task(ghost, phase3, delay=2)
-                scheduler.run_task(ghost, phase4, delay=4)
+            def phase4() -> None:
+                try:
+                    if not self._restore_backup_wheel(target, backup_directory, plugins_dir):
+                        glog.error("[Update] 回滚失败：未能放回旧 wheel，请重启服务器恢复运行")
+                        finish(ok=False, error="回滚失败，请重启服务器恢复 LumenBridge 运行")
+                        return
+                    server.reload()
+                    recovered = pm.get_plugin("lumenbridge")
+                    if recovered is not None and pm.is_plugin_enabled(recovered):
+                        glog.error(
+                            f"[Update] 已恢复旧版本 v{recovered.version} 运行；"
+                            "新版本更新失败，请检查服务器日志或联系开发者"
+                        )
+                        finish(ok=False, error="新版本启动失败，已自动回滚旧版本", recovered_version=str(recovered.version))
+                    else:
+                        glog.error("[Update] 回滚后仍未检测到已启用的 LumenBridge，请重启服务器")
+                        finish(ok=False, error="回滚后仍未恢复，请重启服务器")
+                except Exception as inner:  # noqa: BLE001
+                    glog.error(f"[Update] 回滚阶段出错：{inner!r}")
+                    finish(ok=False, error=f"回滚阶段出错：{inner}")
 
-        def phase3() -> None:
-            glog.info("[Update] phase3: 回滚前禁用全部插件")
-            try:
-                pm.disable_plugins()
-            except Exception as exc:  # noqa: BLE001
-                glog.error(f"[Update] phase3 失败：{exc!r}")
+            # 任务内直接二次 reload 会改写迭代队列，须再走两阶段回滚
+            scheduler.run_task(ghost, phase3, delay=2)
+            scheduler.run_task(ghost, phase4, delay=4)
 
-        def phase4() -> None:
-            try:
-                if not self._restore_backup_wheel(target, backup_directory, plugins_dir):
-                    glog.error("[Update] 回滚失败：未能放回旧 wheel，请重启服务器恢复运行")
-                    _finish(ok=False, error="回滚失败，请重启服务器恢复 LumenBridge 运行")
-                    return
-                server.reload()
-                recovered = pm.get_plugin("lumenbridge")
-                if recovered is not None and pm.is_plugin_enabled(recovered):
-                    glog.error(
-                        f"[Update] 已恢复旧版本 v{recovered.version} 运行；"
-                        "新版本更新失败，请检查服务器日志或联系开发者"
-                    )
-                    _finish(ok=False, error="新版本启动失败，已自动回滚旧版本", recovered_version=str(recovered.version))
-                else:
-                    glog.error("[Update] 回滚后仍未检测到已启用的 LumenBridge，请重启服务器")
-                    _finish(ok=False, error="回滚后仍未恢复，请重启服务器")
-            except Exception as exc:  # noqa: BLE001
-                glog.error(f"[Update] 回滚阶段出错：{exc!r}")
-                _finish(ok=False, error=f"回滚阶段出错：{exc}")
-
-        # 两阶段分属不同 tick，中间隔一次迭代外清理
-        scheduler.run_task(ghost, phase1, delay=5)
-        scheduler.run_task(ghost, phase2, delay=6)
-
-        if not done.wait(timeout=timeout):
-            return {"ok": False, "error": f"热重载超时（{timeout:g} 秒）未完成，请检查服务器日志确认结果"}
+        outcome = self._ghost_two_phase_reload(
+            channel="Update", timeout=timeout, on_reload=on_reload, on_error=on_error,
+        )
         if outcome.get("ok"):
             log(f"热重载完成，当前版本 v{outcome.get('to_version')}")
         return outcome
@@ -1733,57 +1845,29 @@ class MarketplaceClient:
     def safe_server_reload(self, *, log=None, timeout: float = 120.0) -> dict[str, Any]:
         """全服热重载（等同 /reload）：不替换任何文件，仅重启全部插件。
 
-        与 :meth:`safe_framework_reload` 共用两阶段 ghost 调度（先禁用再
-        reload，避免改写正在迭代的任务队列），但无暂存更新前置与 wheel
-        回滚。期间 WebUI 短暂下线，前端应轮询健康检查自动刷新。
+        与 :meth:`safe_framework_reload` 共用两阶段 ghost 调度，但无暂存
+        更新前置与 wheel 回滚。期间 WebUI 短暂下线，前端应轮询健康检查
+        自动刷新。
         """
         log = log or (lambda _msg: None)
         server = self.plugin.server
         pm = server.plugin_manager
-        scheduler = server.scheduler
-        try:
-            self.plugin.note_reload_intent()
-        except Exception:  # noqa: BLE001
-            pass
 
-        ghost = self._make_reload_ghost()
-        glog = ghost.logger
-        glog.info("[WebUI] 全服热重载通道就绪")
+        def on_reload(ghost, glog, finish) -> None:
+            server.reload()
+            new_plugin = pm.get_plugin("lumenbridge")
+            if new_plugin is None or not pm.is_plugin_enabled(new_plugin):
+                raise RuntimeError("热重载后未检测到已启用的 LumenBridge 插件")
+            glog.info(f"[WebUI] 全服热重载完成，LumenBridge v{new_plugin.version} 已恢复")
+            finish(ok=True, version=str(new_plugin.version))
+
+        def on_error(exc, ghost, glog, finish) -> None:
+            finish(ok=False, error=f"热重载失败：{exc}，请查看服务器日志")
+
         log("正在通过安全通道执行全服热重载...")
-
-        done = threading.Event()
-        outcome: dict[str, Any] = {}
-
-        def _finish(**kv) -> None:
-            outcome.update(kv)
-            done.set()
-
-        def phase1() -> None:
-            glog.info("[WebUI] phase1: 禁用全部插件（任务取消仅置标志）")
-            try:
-                pm.disable_plugins()
-            except Exception as exc:  # noqa: BLE001
-                glog.error(f"[WebUI] phase1 失败：{exc!r}")
-                _finish(ok=False, error=f"禁用插件阶段失败：{exc}")
-
-        def phase2() -> None:
-            glog.info("[WebUI] phase2: 执行 server.reload()")
-            try:
-                server.reload()
-                new_plugin = pm.get_plugin("lumenbridge")
-                if new_plugin is None or not pm.is_plugin_enabled(new_plugin):
-                    raise RuntimeError("热重载后未检测到已启用的 LumenBridge 插件")
-                glog.info(f"[WebUI] 全服热重载完成，LumenBridge v{new_plugin.version} 已恢复")
-                _finish(ok=True, version=str(new_plugin.version))
-            except Exception as exc:  # noqa: BLE001
-                glog.error(f"[WebUI] phase2 热重载失败：{exc!r}")
-                _finish(ok=False, error=f"热重载失败：{exc}，请查看服务器日志")
-
-        scheduler.run_task(ghost, phase1, delay=5)
-        scheduler.run_task(ghost, phase2, delay=6)
-
-        if not done.wait(timeout=timeout):
-            return {"ok": False, "error": f"热重载超时（{timeout:g} 秒）未完成，请检查服务器日志确认结果"}
+        outcome = self._ghost_two_phase_reload(
+            channel="WebUI", timeout=timeout, on_reload=on_reload, on_error=on_error,
+        )
         if outcome.get("ok"):
             log("全服热重载完成")
         return outcome

@@ -150,6 +150,19 @@ def test_configform_label():
     assert items[2].get("label", "limit") in ("limit", "")
 
 
+def _wait_market_task(token: str, task_id: str, timeout: float = 10.0) -> dict:
+    """轮询市场任务直到完成，返回任务快照。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        st, d = _req("GET", f"/api/market/task/{task_id}", token=token)
+        assert st == 200, d
+        task = d["data"]
+        if task.get("done"):
+            return task
+        time.sleep(0.05)
+    raise AssertionError("market task timeout")
+
+
 def test_webui_subplugin_api():
     """WebUI 子插件管理全链路（真实 HTTP）。"""
     from endstone_lumenbridge.subplugin.loader import SubPluginManager
@@ -175,7 +188,7 @@ def test_webui_subplugin_api():
         st, d = _req("GET", "/api/config/labels", token=token)
         assert st == 200 and d["data"]["whitelist.enable"]["label"] == "启用白名单绑定"
 
-        # multipart 上传安装
+        # multipart 上传安装（任务模式：受理后轮询任务结果）
         zip_path = _make_plugin_zip("web_sp", "1.0.0")
         zip_bytes = Path(zip_path).read_bytes()
         boundary = "----lumtestboundary"
@@ -185,7 +198,9 @@ def test_webui_subplugin_api():
         st, d = _req("POST", "/api/subplugins/install/upload", token=token,
                      raw_body=mp, ctype=f"multipart/form-data; boundary={boundary}")
         assert st == 200, d
-        assert d["data"]["name"] == "web_sp"
+        task = _wait_market_task(token, d["data"]["task_id"])
+        assert task["success"], task
+        assert task["result"]["name"] == "web_sp"
 
         # 文件列表
         st, d = _req("GET", "/api/subplugins/web_sp/files", token=token)
@@ -204,6 +219,16 @@ def test_webui_subplugin_api():
         # 目录穿越被拦截
         st, d = _req("GET", "/api/subplugins/web_sp/file?path=../../config.json", token=token)
         assert st == 403
+
+        # 市场已装映射：_market 来源子插件 → 市场 ID 映射（供市场卡片徽章/更新按钮）
+        with plugin.subplugin_manager._lock:
+            sp = plugin.subplugin_manager.subplugins["web_sp"]
+            sp.manifest["_market"] = {"source": "marketplace", "id": "web-sp-id"}
+        st, d = _req("GET", "/api/market/installed", token=token)
+        assert st == 200, d
+        entry = d["data"]["web-sp-id"]
+        assert entry["name"] == "web_sp" and entry["version"] == "1.0.0"
+        assert entry["update_available"] is False  # 无检查缓存时无更新态
 
         # 卸载
         st, d = _req("DELETE", "/api/subplugins/web_sp", token=token)

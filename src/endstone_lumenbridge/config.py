@@ -139,49 +139,44 @@ def _validate_patch_shape(patch: dict[str, Any], schema: dict[str, Any], prefix:
                 raise ConfigValidationError(f"{path} 必须是字符串")
 
 
+def _require_http_url(path: str, value: Any) -> None:
+    """非空值必须是合法 http(s) URL。"""
+    text = str(value).strip()
+    if not text:
+        return
+    parsed = urllib.parse.urlparse(text)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ConfigValidationError(f"{path} 必须是有效的 http:// 或 https:// 地址")
+
+
+def _require_range(path: str, value: Any, low: float, high: float, unit: str = "") -> None:
+    if not low <= float(value) <= high:
+        raise ConfigValidationError(f"{path} 必须位于 {low} 至 {high} {unit}之间".rstrip())
+
+
 def _validate_effective_config(config: dict[str, Any]) -> None:
     """校验合并后配置的跨字段与范围约束。"""
-    if not 1 <= config["webui"]["port"] <= 65535:
-        raise ConfigValidationError("webui.port 必须位于 1 至 65535 之间")
-    if not 0.1 <= float(config["regex_engine"]["command_timeout"]) <= 60:
-        raise ConfigValidationError("regex_engine.command_timeout 必须位于 0.1 至 60 秒之间")
-    if not 0 <= config["background"]["blur_strength"] <= 100:
-        raise ConfigValidationError("background.blur_strength 必须位于 0 至 100 之间")
-    if not 30 <= config["background"]["cache_seconds"] <= 86400:
-        raise ConfigValidationError("background.cache_seconds 必须位于 30 至 86400 秒之间")
-    if not 10 <= config["pip"]["timeout"] <= 3600:
-        raise ConfigValidationError("pip.timeout 必须位于 10 至 3600 秒之间")
-    if not 5 <= config["marketplace"]["timeout"] <= 120:
-        raise ConfigValidationError("marketplace.timeout 必须位于 5 至 120 秒之间")
-    if not 1024 * 1024 <= config["marketplace"]["max_download_bytes"] <= 128 * 1024 * 1024:
-        raise ConfigValidationError("marketplace.max_download_bytes 必须位于 1 至 128 MiB 之间")
-    if not 60 <= config["marketplace"]["check_interval_seconds"] <= 7 * 86400:
-        raise ConfigValidationError("marketplace.check_interval_seconds 必须位于 60 秒至 7 天之间")
-    if not 5 <= config["updates"]["timeout"] <= 120:
-        raise ConfigValidationError("updates.timeout 必须位于 5 至 120 秒之间")
+    _require_range("webui.port", config["webui"]["port"], 1, 65535)
+    _require_range("regex_engine.command_timeout", config["regex_engine"]["command_timeout"], 0.1, 60, "秒")
+    _require_range("background.blur_strength", config["background"]["blur_strength"], 0, 100)
+    _require_range("background.cache_seconds", config["background"]["cache_seconds"], 30, 86400, "秒")
+    _require_range("pip.timeout", config["pip"]["timeout"], 10, 3600, "秒")
+    _require_range("marketplace.timeout", config["marketplace"]["timeout"], 5, 120, "秒")
+    _require_range("marketplace.max_download_bytes", config["marketplace"]["max_download_bytes"], 1024 * 1024, 128 * 1024 * 1024)
+    _require_range("marketplace.check_interval_seconds", config["marketplace"]["check_interval_seconds"], 60, 7 * 86400, "秒")
+    _require_range("updates.timeout", config["updates"]["timeout"], 5, 120, "秒")
 
-    background_url = str(config["background"]["api_url"]).strip()
-    if background_url:
-        parsed_background = urllib.parse.urlparse(background_url)
-        if parsed_background.scheme not in {"http", "https"} or not parsed_background.netloc:
-            raise ConfigValidationError("background.api_url 必须是有效的 http:// 或 https:// 地址")
-    index_url = str(config["pip"]["index_url"]).strip()
-    if index_url:
-        parsed_index = urllib.parse.urlparse(index_url)
-        if parsed_index.scheme not in {"http", "https"} or not parsed_index.netloc:
-            raise ConfigValidationError("pip.index_url 必须是有效的 http:// 或 https:// 地址")
-    for path, value in (("marketplace.api_url", config["marketplace"]["api_url"]), ("updates.api_url", config["updates"]["api_url"])):
-        value = str(value).strip()
-        if value:
-            parsed_url = urllib.parse.urlparse(value)
-            if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
-                raise ConfigValidationError(f"{path} 必须是有效的 http:// 或 https:// 地址")
+    _require_http_url("background.api_url", config["background"]["api_url"])
+    _require_http_url("pip.index_url", config["pip"]["index_url"])
+    _require_http_url("marketplace.api_url", config["marketplace"]["api_url"])
+    _require_http_url("updates.api_url", config["updates"]["api_url"])
+
     # 密码仅在 webui 启用时必填：关闭 webui 清空密码不应致校验失败回退默认（会覆写用户文件）
     if config["webui"]["enable"] and not _is_nonempty_string(config["webui"]["password"]):
         raise ConfigValidationError("webui.password 不能为空（webui 启用时）")
-    for path, value in (("webui.secret", config["webui"]["secret"]),):
-        if not isinstance(value, str) or len(value) > 4096:
-            raise ConfigValidationError(f"{path} 必须是长度不超过 4096 的字符串")
+    secret = config["webui"]["secret"]
+    if not isinstance(secret, str) or len(secret) > 4096:
+        raise ConfigValidationError("webui.secret 必须是长度不超过 4096 的字符串")
 
 
 def _strip_deprecated_pip_fields(config: dict[str, Any]) -> tuple[dict[str, Any], bool]:
