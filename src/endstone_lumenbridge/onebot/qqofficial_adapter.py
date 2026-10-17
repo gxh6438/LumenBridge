@@ -37,6 +37,9 @@ from .qqofficial.constants import (
     INTENT_GROUP_MEMBER,
     INTERACTION_ACK_DELAY,
     INTERACTION_ACK_MAX,
+    OFFICIAL_BATCH_OP_LIMIT,
+    OFFICIAL_BLACKLIST_PAGE_LIMIT,
+    OFFICIAL_MEMBER_PAGE_LIMIT,
     OP_DISPATCH,
     OP_HEARTBEAT,
     OP_HEARTBEAT_ACK,
@@ -1080,6 +1083,197 @@ class QQOfficialAdapter:
 
         self._run_official_api(_query, callback)
 
+    # ---- 群成员 / 黑名单 / 踢人（官方内邀白名单接口组） ----
+    # 以下接口官方标注「内邀接入中」，未获白名单的机器人调用返回错误码 11253；
+    # _run_official_api 捕获后回调 None 并记录告警，子插件按 None 判定降级。
+
+    def set_group_kick(
+        self,
+        group_id: Any,
+        user_id: Any,
+        reject_add_request: bool = False,
+        callback: Callable[[Any], None] | None = None,
+    ) -> None:
+        """移出群成员（OneBot set_group_kick）。
+
+        官方端点 batch_remove_members 为内邀白名单接口（错误码 11253 = 未获
+        权限，回调 None）。reject_add_request=True 时同时加入群黑名单（对应
+        官方 add_to_member_blacklist，语义即 OneBot 的「拒绝此人再次加群」）。
+        """
+        group_openid = str(group_id or "")
+        member_openid = str(user_id or "")
+        if not group_openid or not member_openid:
+            if callback:
+                callback(None)
+            return
+
+        async def _kick() -> Any:
+            return await self._api_request(
+                "POST",
+                f"/v2/groups/{group_openid}/batch_remove_members",
+                {
+                    "member_openids": [member_openid],
+                    "add_to_member_blacklist": bool(reject_add_request),
+                },
+            )
+
+        self._run_official_api(_kick, callback)
+
+    def get_group_member_list(
+        self,
+        group_id: Any,
+        cursor: str = "",
+        callback: Callable[[Any], None] | None = None,
+    ) -> None:
+        """群成员列表（OneBot get_group_member_list，官方内邀白名单接口）。
+
+        传 cursor 时仅拉单页（回调官方原始结构 {members, next_cursor}，大群
+        自行分页）；不传时循环翻页聚合为 OneBot 风格扁平列表，页数上限
+        OFFICIAL_MEMBER_PAGE_LIMIT（每页 30 条）防失控。
+        """
+        group_openid = str(group_id or "")
+        if not group_openid:
+            if callback:
+                callback(None)
+            return
+
+        async def _query() -> Any:
+            path = f"/v2/groups/{group_openid}/members"
+            if cursor:
+                return await self._api_request(
+                    "GET", path, {"cursor": str(cursor)}
+                )
+            collected: list[Any] = []
+            cur = ""
+            for _ in range(OFFICIAL_MEMBER_PAGE_LIMIT):
+                r = await self._api_request(
+                    "GET", path, {"cursor": cur} if cur else None
+                )
+                if not isinstance(r, dict):
+                    return collected or r
+                collected.extend(r.get("members") or [])
+                cur = str(r.get("next_cursor") or "")
+                if not cur:
+                    break
+            return collected
+
+        self._run_official_api(_query, callback)
+
+    def get_group_member_info(
+        self,
+        group_id: Any,
+        user_id: Any,
+        callback: Callable[[Any], None] | None = None,
+    ) -> None:
+        """群成员信息（OneBot get_group_member_info，官方内邀白名单接口）。
+
+        回调 OneBot 风格 dict（user_id/nickname/role/joined_at/is_bot），
+        官方原始载荷挂 raw 键；官方 member_role 与 OneBot role 取值一致
+        （member/admin/owner），原样透传。
+        """
+        group_openid = str(group_id or "")
+        member_openid = str(user_id or "")
+        if not group_openid or not member_openid:
+            if callback:
+                callback(None)
+            return
+
+        async def _query() -> Any:
+            r = await self._api_request(
+                "GET", f"/v2/groups/{group_openid}/members/{member_openid}"
+            )
+            if not isinstance(r, dict):
+                return r
+            return {
+                "user_id": str(r.get("member_openid") or member_openid),
+                "nickname": str(r.get("username") or ""),
+                "role": str(r.get("member_role") or "member"),
+                "is_bot": bool(r.get("bot")),
+                "joined_at": str(r.get("joined_at") or ""),
+                "union_openid": str(r.get("union_openid") or ""),
+                "raw": r,
+            }
+
+        self._run_official_api(_query, callback)
+
+    def get_group_blacklist(
+        self,
+        group_id: Any,
+        cursor: str = "",
+        callback: Callable[[Any], None] | None = None,
+    ) -> None:
+        """群黑名单查询（官方扩展动作，官方内邀白名单接口）。
+
+        传 cursor 时仅拉单页（回调官方原始结构 {users, next_cursor}）；
+        不传时翻页聚合为扁平列表（每页 limit=100，上限
+        OFFICIAL_BLACKLIST_PAGE_LIMIT）。
+        """
+        group_openid = str(group_id or "")
+        if not group_openid:
+            if callback:
+                callback(None)
+            return
+
+        async def _query() -> Any:
+            path = f"/v2/groups/{group_openid}/member_blacklist"
+            if cursor:
+                return await self._api_request(
+                    "GET", path, {"cursor": str(cursor), "limit": 100}
+                )
+            collected: list[Any] = []
+            cur = ""
+            for _ in range(OFFICIAL_BLACKLIST_PAGE_LIMIT):
+                r = await self._api_request(
+                    "GET", path, {"cursor": cur, "limit": 100} if cur else None
+                )
+                if not isinstance(r, dict):
+                    return collected or r
+                collected.extend(r.get("users") or [])
+                cur = str(r.get("next_cursor") or "")
+                if not cur:
+                    break
+            return collected
+
+        self._run_official_api(_query, callback)
+
+    def set_group_blacklist(
+        self,
+        group_id: Any,
+        user_ids: Any,
+        add: bool = True,
+        callback: Callable[[Any], None] | None = None,
+    ) -> None:
+        """群黑名单操作（官方扩展动作，官方内邀白名单接口）。
+
+        add=True 加入黑名单（目标成员在群中时无法加入，官方语义）、
+        False 移出。单次官方限 20 个 openid，超出自动分批；多批时回调
+        {batches: [...各批官方响应...]}，单批回调官方原始响应。
+        """
+        group_openid = str(group_id or "")
+        ids = [str(x) for x in (user_ids or []) if str(x or "").strip()]
+        if not group_openid or not ids:
+            if callback:
+                callback(None)
+            return
+
+        async def _query() -> Any:
+            path = f"/v2/groups/{group_openid}/member_blacklist"
+            results: list[Any] = []
+            for i in range(0, len(ids), OFFICIAL_BATCH_OP_LIMIT):
+                results.append(
+                    await self._api_request(
+                        "POST",
+                        path,
+                        {
+                            "op": "add" if add else "del",
+                            "member_openids": ids[i : i + OFFICIAL_BATCH_OP_LIMIT],
+                        },
+                    )
+                )
+            return results[0] if len(results) == 1 else {"batches": results}
+
+        self._run_official_api(_query, callback)
+
     def call_action(
         self,
         action: str,
@@ -1236,6 +1430,44 @@ def _h_get_login_info(ad: "QQOfficialAdapter", p: dict[str, Any], callback: Any)
     ad.get_login_info(callback or (lambda _: None))
 
 
+def _h_set_group_kick(ad: "QQOfficialAdapter", p: dict[str, Any], callback: Any) -> None:
+    # OneBot v11 set_group_kick：reject_add_request=True 对应官方
+    # add_to_member_blacklist（拉黑即拒绝再次进群）
+    ad.set_group_kick(
+        p.get("group_id"),
+        p.get("user_id"),
+        bool(p.get("reject_add_request")),
+        callback,
+    )
+
+
+def _h_get_group_member_list(ad: "QQOfficialAdapter", p: dict[str, Any], callback: Any) -> None:
+    # cursor 可选：传则单页返回官方结构，不传则翻页聚合为 OneBot 风格列表
+    ad.get_group_member_list(
+        p.get("group_id"), str(p.get("cursor") or ""), callback
+    )
+
+
+def _h_get_group_member_info(ad: "QQOfficialAdapter", p: dict[str, Any], callback: Any) -> None:
+    ad.get_group_member_info(p.get("group_id"), p.get("user_id"), callback)
+
+
+def _h_get_group_blacklist(ad: "QQOfficialAdapter", p: dict[str, Any], callback: Any) -> None:
+    ad.get_group_blacklist(
+        p.get("group_id"), str(p.get("cursor") or ""), callback
+    )
+
+
+def _h_set_group_blacklist(ad: "QQOfficialAdapter", p: dict[str, Any], callback: Any) -> None:
+    # add: True=拉黑（默认）、False=移出黑名单；user_ids 超官方单批 20 自动分批
+    ad.set_group_blacklist(
+        p.get("group_id"),
+        p.get("user_ids") or [],
+        bool(p.get("add", True)),
+        callback,
+    )
+
+
 # OneBot action → 官方端点处理器（签名统一 (adapter, params, callback)）
 _ACTION_HANDLERS = {
     "send_group_msg": _h_send_group_msg,
@@ -1251,4 +1483,11 @@ _ACTION_HANDLERS = {
     "get_group_info": _h_get_group_info,
     "get_group_list": _h_get_group_list,
     "get_login_info": _h_get_login_info,
+    # 群成员管理组（官方内邀白名单接口；未获权限调用回调 None + 告警日志）
+    "set_group_kick": _h_set_group_kick,
+    "get_group_member_list": _h_get_group_member_list,
+    "get_group_member_info": _h_get_group_member_info,
+    # 群黑名单（OneBot v11 无标准动作，官方扩展命名）
+    "get_group_blacklist": _h_get_group_blacklist,
+    "set_group_blacklist": _h_set_group_blacklist,
 }

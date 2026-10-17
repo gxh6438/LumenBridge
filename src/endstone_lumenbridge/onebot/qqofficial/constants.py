@@ -118,9 +118,19 @@ OFFICIAL_RAW_EVENTS = frozenset({
     "GUILD_MEMBER_ADD",
     "GUILD_MEMBER_REMOVE",
     "GUILD_MEMBER_UPDATE",
+    # 订阅消息授权状态变更（1<<25，随群/单聊事件默认订阅）：
+    # 用户对订阅消息模板授权/拒绝时触发，OneBot v11 无对应语义，raw 转发
+    "SUBSCRIBE_MESSAGE_STATUS",
     # 注：私域频道消息 MESSAGE_CREATE / MESSAGE_DELETE（1<<9）已有语义翻译
     # （频道群消息 / group_recall，见 translate.py），不在此 raw 转发集内
 })
+
+# 官方分页接口的安全上限：群成员列表每页 30 条 / 黑名单每页最大 100 条，
+# 自动翻页聚合时的页数上限（34 页 ≈ 1020 人，防失控循环；60 QPM 频率内安全）
+OFFICIAL_MEMBER_PAGE_LIMIT = 34
+OFFICIAL_BLACKLIST_PAGE_LIMIT = 34
+# 黑名单/移除接口单次最多操作 20 个 openid（官方限制），超出自动分批
+OFFICIAL_BATCH_OP_LIMIT = 20
 
 # 被动回复窗口与每条消息可回复次数（官方 2026-06 文档「消息收发概述」）：
 #   群聊：5 分钟内最多回复 5 次；单聊：60 分钟内最多回复 4 次（2026-01-10 起）。

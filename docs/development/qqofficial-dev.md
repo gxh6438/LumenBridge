@@ -254,6 +254,15 @@ lumen.QClient.call_action(
 | `get_group_list(callback)` | 本地合成 | 官方无群列表接口；配置 `main_group` + 动态发现（流入事件学习）的 openid 汇总 |
 | `get_login_info(callback)` | 本地合成 | `{user_id: bot_qq, nickname: READY 昵称, app_id}`——官方 API 不回传机器人 QQ 号 |
 | `get_group_bot_state(group_openid, callback)` | `GET /v2/groups/{g}/bot_state`（官方扩展） | 机器人群内角色 / 主动消息开关 / 收消息设置 |
+| `set_group_kick(g, u, reject_add_request, cb)` | `POST /v2/groups/{g}/batch_remove_members`（**内邀白名单**） | 移出群成员；`reject_add_request=True` 同时拉黑（官方 `add_to_member_blacklist`）。错误码 11253 = 未获白名单权限，回调 `None` + 告警 |
+| `get_group_member_list(g, cursor="", cb)` | `GET /v2/groups/{g}/members`（**内邀白名单**） | 不传 `cursor` 自动翻页聚合为 OneBot 风格列表（上限 34 页）；传则单页回调官方原始结构 `{members, next_cursor}` |
+| `get_group_member_info(g, u, cb)` | `GET /v2/groups/{g}/members/{m}`（**内邀白名单**） | OneBot 风格映射（`user_id/nickname/role/is_bot/joined_at`），官方原始载荷挂 `raw` |
+| `get_group_blacklist(g, cursor="", cb)` | `GET /v2/groups/{g}/member_blacklist`（**内邀白名单**，官方扩展） | 翻页聚合（每页 100、上限 34 页）；传 `cursor` 单页 |
+| `set_group_blacklist(g, user_ids, add=True, cb)` | `POST /v2/groups/{g}/member_blacklist`（**内邀白名单**，官方扩展） | `add=True` 拉黑（成员在群中时官方拒绝）、`False` 移出；超官方单批 20 自动分批 |
+
+> **内邀白名单接口组**（群成员/黑名单/移除）：官方标注「内邀接入中」，未获
+> 权限的机器人调用返回错误码 `11253`。框架统一行为：捕获后回调 `None` 并记录
+> warning（`qqofficial.api_failed`），子插件按 `None` 判定降级、提示人工处理。
 
 本地兜底语义：配置了 `main_group` 时，列表内的 openid 视为已互通群；未配置时对所有已发现的群生效。
 
@@ -261,7 +270,7 @@ lumen.QClient.call_action(
 
 - **`call_api(pack)`**：官方域无 OneBot action 协议可透传，直接回调 `None`（个人号域的通用透传入口在官方域不可用）；
 - **`send_pack(pack)`**：OneBot 原始包与官方协议不兼容，忽略；
-- **其余未实现方法**（`__getattr__` 统一降级）：记 warning「不支持的官方域动作」并以 `None` 回调（末参为回调时）——不会抛 `AttributeError`，但功能不生效。典型不支持：踢人（`set_group_kick`）、设管（`set_group_admin`）、全体禁言（`set_group_whole_ban`）、好友点赞、群文件等。
+- **其余未实现方法**（`__getattr__` 统一降级）：记 warning「不支持的官方域动作」并以 `None` 回调（末参为回调时）——不会抛 `AttributeError`，但功能不生效。典型不支持：设管（`set_group_admin`）、全体禁言（`set_group_whole_ban`）、好友点赞、群文件、富媒体上传（`/v2/.../files`，官方域暂不支持发送图片/文件消息段）等。
 
 ### 调用示例
 

@@ -251,28 +251,67 @@
   margin: -4px 0 0; padding-bottom: 12px;
   border-bottom: 1px solid var(--divider);
 }
-.pc-search-wrap { position: relative; flex: 1; min-width: 0; display: flex; align-items: center; }
-.pc-search-wrap input { flex: 1; padding-left: 36px; padding-right: 34px; }
+/* ── 搜索框：命令面板风格（药丸形 + 聚焦发光 + 内嵌计数徽章 + “/” 快捷键提示）── */
+.pc-search-wrap {
+  position: relative; flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px;
+  height: 44px; padding: 0 12px 0 16px;
+  background: var(--input-bg);
+  border: 1px solid var(--divider);
+  border-radius: 999px;
+  transition: border-color .18s, box-shadow .18s, background .18s;
+}
+.pc-search-wrap:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 4px var(--accent-soft);
+  background: var(--glass-strong);
+}
+.pc-search-wrap input {
+  flex: 1; min-width: 0; height: 100%;
+  border: none !important; background: transparent !important; box-shadow: none !important;
+  padding: 0 4px !important; font-size: 14.5px;
+}
+.pc-search-wrap input:focus { box-shadow: none !important; border: none !important; }
 .pc-search-icon {
-  position: absolute; left: 12px; width: 15px; height: 15px;
-  color: var(--muted); pointer-events: none;
+  width: 16px; height: 16px; color: var(--muted); flex: 0 0 auto;
+  transition: color .18s, transform .18s;
 }
+.pc-search-wrap:focus-within .pc-search-icon { color: var(--accent); transform: scale(1.08); }
+/* 快捷键提示：聚焦或有内容时淡出 */
+.pc-search-kbd {
+  flex: 0 0 auto; font-family: inherit; font-size: 11.5px; font-weight: 600; line-height: 1;
+  color: var(--muted); background: var(--glass-strong);
+  border: 1px solid var(--divider); border-bottom-width: 2px;
+  border-radius: 6px; padding: 4px 8px;
+  transition: opacity .18s, transform .18s;
+}
+.pc-search-wrap:focus-within .pc-search-kbd,
+.pc-search-wrap.has-value .pc-search-kbd { opacity: 0; transform: scale(.8); pointer-events: none; }
+/* 清除按钮：有内容时弹出（scale + opacity 过渡），替换原文字 ✕ 为 SVG */
 .pc-search-clear {
-  position: absolute; right: 7px; width: 24px; height: 24px;
-  border: none; border-radius: 50%; background: rgba(120,120,128,.18);
-  color: var(--muted); font-size: 11px; line-height: 1; cursor: pointer;
+  position: absolute; right: 9px; width: 26px; height: 26px;
+  border: none; border-radius: 50%; background: rgba(120,120,128,.16);
+  color: var(--muted); cursor: pointer; padding: 0;
   display: flex; align-items: center; justify-content: center;
-  transition: background .15s, color .15s, transform .12s;
+  opacity: 0; transform: scale(.6); pointer-events: none;
+  transition: background .15s, color .15s, opacity .16s, transform .2s cubic-bezier(.3,1.4,.5,1);
 }
+.pc-search-wrap.has-value .pc-search-clear { opacity: 1; transform: scale(1); pointer-events: auto; }
 .pc-search-clear:hover { background: rgba(120,120,128,.32); color: var(--text); }
-.pc-search-clear:active { transform: scale(.88); }
-.pc-match-count { font-size: 12px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.pc-search-clear:active { transform: scale(.82); }
+.pc-search-clear svg { width: 12px; height: 12px; }
+/* 匹配计数：内嵌于搜索框右侧的胶囊徽章 */
+.pc-match-count {
+  flex: 0 0 auto; font-size: 11.5px; font-weight: 600; white-space: nowrap;
+  color: var(--accent); background: var(--accent-soft);
+  border-radius: 999px; padding: 4px 10px;
+  font-variant-numeric: tabular-nums;
+}
 .pc-match-count:empty { display: none; }
 /* 分组卡片：可折叠头部 + 计数徽章；content-visibility 跳过屏外渲染 */
 .pc-section {
-  border: 1px solid var(--divider); border-radius: 14px;
+  border: 1px solid var(--divider); border-radius: var(--radius-md);
   padding: 6px 14px 8px; margin: 10px 0 14px;
-  background: rgba(120,120,128,.05);
+  background: rgba(120,120,128,.04);
   content-visibility: auto;
   contain-intrinsic-size: auto 180px;
 }
@@ -315,7 +354,13 @@
 }
 .pc-row:hover { background: rgba(120,120,128,.05); }
 .pc-row:last-of-type { border-bottom: none; }
-.pc-row.modified { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.pc-row.modified {
+  background: rgba(10, 132, 255, .07);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+@media (prefers-color-scheme: dark) {
+  .pc-row.modified { background: rgba(10, 132, 255, .13); }
+}
 .pc-info { width: 250px; flex: 0 0 250px; min-width: 0; }
 .pc-name { font-size: 13.5px; font-weight: 620; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; line-height: 1.4; }
 .pc-key { font-size: 10.5px; color: var(--muted); font-family: "SF Mono", "JetBrains Mono", Consolas, monospace; font-weight: 400; }
@@ -346,37 +391,86 @@
 .pc-eye:hover { color: var(--accent); background: var(--accent-soft); }
 .pc-eye:active { transform: scale(.9); }
 .pc-eye svg { width: 16px; height: 16px; }
-/* 数字滑块 + 数字框联动：自定义轨道填充（--fill 由 JS 按当前值写入） */
-.pc-slider { display: flex; align-items: center; gap: 12px; }
+/* ── 数字滑块：加粗药丸轨道 + accent 光环拇指 + 拖拽数值气泡 ──
+   --fill 由 pcSliderSync 按当前值写入，同时驱动 WebKit 轨道填充渐变与气泡定位 */
+.pc-slider { display: flex; align-items: center; gap: 14px; }
+.pc-slider-track-wrap { position: relative; flex: 1; min-width: 0; }
 .pc-slider input[type=range] {
   -webkit-appearance: none; appearance: none;
-  flex: 1; min-width: 0; height: 26px;
+  display: block; width: 100%; height: 28px; margin: 0;
   background: transparent !important; border: none !important; padding: 0 !important;
   box-shadow: none !important; cursor: pointer;
 }
 .pc-slider input[type=range]::-webkit-slider-runnable-track {
-  height: 6px; border-radius: 3px;
-  background: linear-gradient(to right, var(--accent) var(--fill, 0%), rgba(120,120,128,.28) var(--fill, 0%));
+  height: 8px; border-radius: 999px;
+  background: linear-gradient(to right, var(--accent) var(--fill, 0%), rgba(120,120,128,.22) var(--fill, 0%));
 }
 .pc-slider input[type=range]::-webkit-slider-thumb {
-  -webkit-appearance: none; width: 20px; height: 20px; margin-top: -7px;
+  -webkit-appearance: none; width: 18px; height: 18px; margin-top: -5px;
   border-radius: 50%; background: #fff; border: none;
-  box-shadow: 0 1px 5px rgba(0,0,0,.28), 0 0 0 1px rgba(0,0,0,.05);
-  transition: transform .15s;
+  box-shadow: 0 1px 4px rgba(0,0,0,.22), 0 0 0 4.5px var(--accent-soft);
+  transition: transform .16s, box-shadow .16s;
 }
-.pc-slider input[type=range]:hover::-webkit-slider-thumb { transform: scale(1.08); }
-.pc-slider input[type=range]:active::-webkit-slider-thumb { transform: scale(1.18); }
-.pc-slider input[type=range]::-moz-range-track { height: 6px; border-radius: 3px; background: rgba(120,120,128,.28); }
-.pc-slider input[type=range]::-moz-range-progress { height: 6px; border-radius: 3px; background: var(--accent); }
+.pc-slider input[type=range]:hover::-webkit-slider-thumb {
+  transform: scale(1.12);
+  box-shadow: 0 1px 6px rgba(0,0,0,.26), 0 0 0 6px var(--accent-soft);
+}
+.pc-slider input[type=range]:active::-webkit-slider-thumb {
+  transform: scale(1.2);
+  box-shadow: 0 2px 8px rgba(0,0,0,.3), 0 0 0 8px var(--accent-soft);
+}
+.pc-slider input[type=range]:focus-visible { outline: none; }
+.pc-slider input[type=range]:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 1px 4px rgba(0,0,0,.22), 0 0 0 4.5px var(--accent-soft), 0 0 0 2px var(--accent);
+}
+.pc-slider input[type=range]::-moz-range-track { height: 8px; border-radius: 999px; background: rgba(120,120,128,.22); }
+.pc-slider input[type=range]::-moz-range-progress { height: 8px; border-radius: 999px; background: var(--accent); }
 .pc-slider input[type=range]::-moz-range-thumb {
-  width: 20px; height: 20px; border: none; border-radius: 50%; background: #fff;
-  box-shadow: 0 1px 5px rgba(0,0,0,.28), 0 0 0 1px rgba(0,0,0,.05);
+  width: 18px; height: 18px; border: none; border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 4px rgba(0,0,0,.22), 0 0 0 4.5px var(--accent-soft);
 }
-.pc-slider input[type=number] { width: 92px; flex: 0 0 92px; }
-/* 多选复选框组 */
-.pc-multi { display: flex; flex-wrap: wrap; gap: 8px 16px; padding-top: 4px; }
-.pc-multi-item { display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; user-select: none; }
-.pc-multi-item input { width: auto !important; margin: 0; accent-color: var(--accent); cursor: pointer; }
+/* 数值气泡：悬停/拖拽时浮现于拇指上方；clamp 防止两端溢出 */
+.pc-slider-bubble {
+  position: absolute; bottom: calc(100% + 6px);
+  left: clamp(24px, var(--fill, 0%), calc(100% - 24px));
+  transform: translateX(-50%) translateY(5px) scale(.85);
+  background: var(--glass-strong); color: var(--text);
+  border: 1px solid var(--glass-border); border-radius: 8px;
+  padding: 3px 9px; font-size: 11.5px; font-weight: 600;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+  box-shadow: 0 4px 14px rgba(0,0,0,.16);
+  opacity: 0; pointer-events: none;
+  transition: opacity .16s, transform .16s cubic-bezier(.3,1.4,.5,1);
+}
+.pc-slider-track-wrap:hover .pc-slider-bubble,
+.pc-slider-track-wrap:active .pc-slider-bubble,
+.pc-slider input[type=range]:focus-visible + .pc-slider-bubble {
+  opacity: 1; transform: translateX(-50%) translateY(0) scale(1);
+}
+/* 数字输入：等宽数字芯片（隐藏原生上下箭头，改由滑块/键入调节） */
+.pc-slider input[type=number] {
+  width: 96px; flex: 0 0 96px; height: 36px; padding: 0 6px !important;
+  text-align: center; font-size: 13px; border-radius: 10px;
+  font-family: "SF Mono", "JetBrains Mono", Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  -moz-appearance: textfield; appearance: textfield;
+}
+.pc-slider input[type=number]::-webkit-outer-spin-button,
+.pc-slider input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+/* ── 多选复选框组：可选芯片（选中态高亮，纯 CSS 无 JS 改动）── */
+.pc-multi { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 2px; }
+.pc-multi-item {
+  display: inline-flex; align-items: center; cursor: pointer; user-select: none;
+  padding: 6px 14px; border-radius: 999px; font-size: 13px; font-weight: 500;
+  border: 1px solid var(--divider); background: var(--input-bg); color: var(--muted);
+  transition: border-color .16s, background .16s, color .16s, box-shadow .16s;
+}
+.pc-multi-item:hover { border-color: rgba(120,120,128,.42); color: var(--text); }
+.pc-multi-item:has(input:checked) {
+  background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600;
+}
+.pc-multi-item input { position: absolute; opacity: 0; pointer-events: none; }
+.pc-multi-item:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* 数组 chips 编辑器 */
 .pc-array-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
 .pc-array-chips:empty { margin-bottom: 0; }

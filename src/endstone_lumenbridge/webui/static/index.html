@@ -695,12 +695,13 @@
       <button class="close-x" onclick="pcRequestClose()">✕</button>
     </h3>
     <div class="pc-toolbar">
-      <div class="pc-search-wrap">
+      <div class="pc-search-wrap" id="pc-search-wrap">
         <svg class="pc-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
         <input type="text" id="pc-search" data-i18n-placeholder="subplugins.config_search_ph" placeholder="搜索配置项…" oninput="pcFilterItems()">
-        <button type="button" class="pc-search-clear" id="pc-search-clear" onclick="pcClearSearch()" title="" data-i18n-title="common.clear" style="display:none">✕</button>
+        <span class="pc-match-count" id="pc-match-count"></span>
+        <button type="button" class="pc-search-clear" id="pc-search-clear" onclick="pcClearSearch()" title="" data-i18n-title="common.clear" aria-label="clear search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+        <kbd class="pc-search-kbd" title="press / to search">/</kbd>
       </div>
-      <span class="pc-match-count" id="pc-match-count"></span>
     </div>
     <div class="modal-body" id="plugin-config-body"></div>
     <div class="pc-footer">
