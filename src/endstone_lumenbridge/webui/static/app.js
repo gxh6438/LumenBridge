@@ -1538,6 +1538,8 @@ function renderPluginConfig(schema) {
   items.forEach((item, index) => {
     if (item.type === "array") pcRenderArrayChips(index);
   });
+  // 滑块初始化：写入 --fill 与气泡初值（否则 WebKit 轨道填充为 0%）
+  box.querySelectorAll("input[type=range]").forEach((r) => pcSliderSync(r));
   // 初始值快照：脏检测改为「当前值 vs 快照」对比，改回去（4→8→4）能正确清除标记
   pcInitialValues = pcSnapshotValues();
   // 事件委托：任意输入后按值对比刷新脏标记 + 恢复默认按钮可见性
@@ -1583,9 +1585,12 @@ function pcRenderRow(item, index) {
       `<label class="track" for="${id}"></label></div>`;
   } else if (item.type === "number") {
     if (item.min != null && item.max != null) {
-      // 滑块 + 数字框联动（AstrBot slider 风格）
+      // 滑块 + 数字框联动：加粗药丸轨道 + 拖拽数值气泡（气泡文案/位置由 pcSliderSync 写入 --fill 驱动）
       ctrl = `<div class="pc-slider">` +
+        `<div class="pc-slider-track-wrap">` +
         `<input type="range" id="${id}-range" min="${esc(item.min)}" max="${esc(item.max)}" step="${esc(item.step || 1)}" value="${esc(item.val)}" oninput="pcSliderSync(this)">` +
+        `<span class="pc-slider-bubble" aria-hidden="true"></span>` +
+        `</div>` +
         `<input type="number" id="${id}" value="${esc(item.val)}" onchange="pcSliderSync(this)">` +
         `</div>`;
     } else {
@@ -1705,7 +1710,10 @@ function pcSetControlValue(item, index, value) {
   } else if (item.type === "number") {
     el.value = value;
     const range = document.getElementById(`plugin-config-${index}-range`);
-    if (range) range.value = value;
+    if (range) {
+      range.value = value;
+      pcSliderSync(range); // 同步轨道填充与数值气泡
+    }
   } else if (item.type === "select") {
     const host = el.closest(".lumen-select");
     if (host) {
@@ -1780,8 +1788,9 @@ function pcFilterItems() {
   const input = document.getElementById("pc-search");
   if (!box || !input) return;
   const q = (input.value || "").toLowerCase().trim();
-  const clearBtn = document.getElementById("pc-search-clear");
-  if (clearBtn) clearBtn.style.display = q ? "" : "none";
+  // has-value 驱动清除按钮/快捷键提示的显隐（CSS 过渡接管，不再直接改 style.display）
+  const wrap = document.getElementById("pc-search-wrap");
+  if (wrap) wrap.classList.toggle("has-value", !!q);
   box.classList.toggle("pc-filtering", !!q);
   let hits = 0;
   box.querySelectorAll(".pc-row").forEach((row) => {
@@ -1843,13 +1852,26 @@ function pcToggleSecret(btn) {
   btn.innerHTML = show ? PC_EYE_OFF_SVG : PC_EYE_SVG;
 }
 
-/* 滑块 ↔ 数字框联动 */
+/* 滑块 ↔ 数字框联动 + 轨道填充/数值气泡刷新
+   --fill 百分比同时驱动 WebKit 轨道渐变填充与气泡水平定位；
+   之前从未写入 --fill，WebKit 下轨道填充一直是 0%（Firefox 走 -moz-range-progress 不受影响）。 */
 function pcSliderSync(el) {
   const index = el.id.replace("plugin-config-", "").replace("-range", "");
   const num = document.getElementById(`plugin-config-${index}`);
   const range = document.getElementById(`plugin-config-${index}-range`);
   if (el.type === "range" && num) num.value = el.value;
   if (el.type === "number" && range) range.value = el.value;
+  if (!range) return;
+  const min = Number(range.min), max = Number(range.max);
+  const v = Number(range.value);
+  const pct = max > min ? Math.min(1, Math.max(0, (v - min) / (max - min))) : 0;
+  const fill = (pct * 100).toFixed(2) + "%";
+  range.style.setProperty("--fill", fill);
+  const bubble = range.parentElement ? range.parentElement.querySelector(".pc-slider-bubble") : null;
+  if (bubble) {
+    bubble.textContent = Number.isFinite(v) ? v.toLocaleString() : "";
+    bubble.style.setProperty("--fill", fill);
+  }
 }
 
 /* 数组字段：chips 读写 */
@@ -1943,12 +1965,27 @@ function pcEditorApply() {
 
 /* Ctrl/Cmd+S 快捷保存（配置弹窗打开时） */
 document.addEventListener("keydown", (e) => {
+  const modal = document.getElementById("plugin-config-modal");
+  const modalOpen = modal && modal.classList.contains("show");
   if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
-    const modal = document.getElementById("plugin-config-modal");
-    if (modal && modal.classList.contains("show")) {
+    if (modalOpen) {
       e.preventDefault();
       savePluginConfig();
     }
+    return;
+  }
+  if (!modalOpen) return;
+  const search = document.getElementById("pc-search");
+  if (!search) return;
+  const tag = (document.activeElement && document.activeElement.tagName) || "";
+  // “/” 快速聚焦搜索（输入类控件内不拦截）；Esc 在搜索框内优先清空而非关弹窗
+  if (e.key === "/" && !/^(INPUT|TEXTAREA|SELECT)$/.test(tag) && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    search.focus();
+    search.select();
+  } else if (e.key === "Escape" && document.activeElement === search && search.value) {
+    e.preventDefault();
+    pcClearSearch();
   }
 });
 
@@ -1960,8 +1997,8 @@ async function openPluginConfig(name) {
   pcSetDirty(false);
   const searchEl = document.getElementById("pc-search");
   if (searchEl) searchEl.value = "";
-  const searchClear = document.getElementById("pc-search-clear");
-  if (searchClear) searchClear.style.display = "none";
+  const searchWrap = document.getElementById("pc-search-wrap");
+  if (searchWrap) searchWrap.classList.remove("has-value");
   const matchCount = document.getElementById("pc-match-count");
   if (matchCount) matchCount.textContent = "";
   document.getElementById("plugin-config-title").textContent = name + t("subplugins.config_title_suffix");

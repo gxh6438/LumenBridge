@@ -1494,6 +1494,8 @@ def main() -> int:
         test_set_group_ban_bodies,
         test_set_group_ban_batch_limit,
         test_call_action_dispatch,
+        test_member_and_blacklist_actions,
+        test_subscribe_message_status_event,
         test_get_group_info_official_fallback,
         test_inbound_reference_reply,
         test_inbound_reference_blank_content,
@@ -1620,8 +1622,30 @@ def test_call_action_dispatch() -> None:
         ad._loop = loop
         # 未知 action → 回调 None
         got: list[Any] = []
-        ad.call_action("set_group_kick", {"group_id": 1, "user_id": 2}, got.append)
+        ad.call_action("does_not_exist", {"x": 1}, got.append)
         check("未知 action 回调 None", got == [None])
+        # set_group_kick → 官方 batch_remove_members（内邀白名单端点）
+        calls.clear()
+        kicked: list[Any] = []
+        ad.call_action(
+            "set_group_kick",
+            {"group_id": "GRP1", "user_id": "MEM1", "reject_add_request": True},
+            kicked.append,
+        )
+        for _ in range(50):
+            if kicked:
+                break
+            time.sleep(0.02)
+        check(
+            "set_group_kick 端点",
+            any(p == "/v2/groups/GRP1/batch_remove_members" for _, p, _ in calls),
+        )
+        kick_body = next((b for _, p, b in calls if p.endswith("batch_remove_members")), {})
+        check(
+            "set_group_kick body（拉黑映射）",
+            kick_body.get("member_openids") == ["MEM1"]
+            and kick_body.get("add_to_member_blacklist") is True,
+        )
         # get_group_info → 官方端点优先
         info: list[Any] = []
         ad.call_action("get_group_info", {"group_id": "GRP1"}, info.append)
@@ -1647,6 +1671,165 @@ def test_call_action_dispatch() -> None:
         )
     finally:
         loop.call_soon_threadsafe(loop.stop())
+
+
+def test_member_and_blacklist_actions() -> None:
+    """群成员/黑名单动作（官方内邀白名单接口组）：端点、body、分页聚合、分批。"""
+    ad = make_adapter()
+    calls: list[tuple[str, str, Any]] = []
+
+    async def fake_api(method: str, path: str, body: Any = None) -> Any:
+        calls.append((method, path, body))
+        if path.endswith("/members/MEM1"):
+            return {
+                "member_openid": "MEM1", "username": "阳光小助手",
+                "member_role": "admin", "bot": False,
+                "joined_at": "2025-08-20T09:15:00+08:00", "union_openid": "UNION1",
+            }
+        if path.endswith("/members") and method == "GET":
+            cur = str((body or {}).get("cursor") or "")
+            # 两页：第一页 2 人带 next_cursor，第二页 1 人收尾
+            if cur == "PAGE2":
+                return {"members": [{"member_openid": "M3"}], "next_cursor": ""}
+            return {
+                "members": [{"member_openid": "M1"}, {"member_openid": "M2"}],
+                "next_cursor": "PAGE2",
+            }
+        if path.endswith("/member_blacklist") and method == "GET":
+            return {"users": [{"member_openid": "B1"}], "next_cursor": ""}
+        return {}
+
+    ad._api_request = fake_api  # type: ignore[method-assign]
+    loop, _t = _start_bg_loop()
+    try:
+        ad._loop = loop
+        # 成员信息：OneBot 风格映射 + raw 保留
+        got_info: list[Any] = []
+        ad.get_group_member_info("GRP1", "MEM1", got_info.append)
+        for _ in range(50):
+            if got_info:
+                break
+            time.sleep(0.02)
+        mi = got_info[0] if got_info else {}
+        check(
+            "成员信息映射",
+            mi.get("user_id") == "MEM1" and mi.get("nickname") == "阳光小助手"
+            and mi.get("role") == "admin" and mi.get("is_bot") is False,
+        )
+        check("成员信息保留 raw", mi.get("raw", {}).get("union_openid") == "UNION1")
+
+        # 成员列表：不传 cursor 自动翻页聚合两页
+        got_list: list[Any] = []
+        ad.get_group_member_list("GRP1", "", got_list.append)
+        for _ in range(50):
+            if got_list:
+                break
+            time.sleep(0.02)
+        check(
+            "成员列表翻页聚合",
+            got_list and [m.get("member_openid") for m in got_list[0]] == ["M1", "M2", "M3"],
+            str(got_list),
+        )
+
+        # 成员列表：传 cursor 单页（返回官方原始结构）
+        calls.clear()
+        got_page: list[Any] = []
+        ad.get_group_member_list("GRP1", "PAGE2", got_page.append)
+        for _ in range(50):
+            if got_page:
+                break
+            time.sleep(0.02)
+        check(
+            "成员列表 cursor 单页",
+            got_page and isinstance(got_page[0], dict) and "next_cursor" in got_page[0],
+        )
+
+        # 黑名单查询：聚合
+        got_bl: list[Any] = []
+        ad.get_group_blacklist("GRP1", "", got_bl.append)
+        for _ in range(50):
+            if got_bl:
+                break
+            time.sleep(0.02)
+        check(
+            "黑名单查询聚合",
+            got_bl and got_bl[0] == [{"member_openid": "B1"}],
+        )
+
+        # 黑名单操作：25 人自动分 2 批（官方单批限 20）
+        calls.clear()
+        ad.set_group_blacklist("GRP1", [f"B{i}" for i in range(25)], True, lambda _: None)
+        for _ in range(50):
+            if len(calls) >= 2:
+                break
+            time.sleep(0.02)
+        bl_calls = [c for c in calls if c[1].endswith("/member_blacklist")]
+        check("黑名单分批 2 次", len(bl_calls) == 2, str(calls))
+        if len(bl_calls) == 2:
+            check(
+                "黑名单批次切分 20+5",
+                len(bl_calls[0][2].get("member_openids")) == 20
+                and len(bl_calls[1][2].get("member_openids")) == 5
+                and bl_calls[0][2].get("op") == "add",
+            )
+
+        # 黑名单移出：op=del
+        calls.clear()
+        ad.set_group_blacklist("GRP1", ["B9"], False, lambda _: None)
+        for _ in range(50):
+            if calls:
+                break
+            time.sleep(0.02)
+        check(
+            "黑名单 del op",
+            calls and calls[0][2].get("op") == "del" and calls[0][2].get("member_openids") == ["B9"],
+        )
+
+        # 空参数拒绝且不调 API
+        calls.clear()
+        noop: list[Any] = []
+        ad.set_group_blacklist("GRP1", [], True, noop.append)
+        ad.set_group_kick("", "MEM1", False, noop.append)
+        ad.get_group_member_list("", "", noop.append)
+        check("空参数拒绝且不调 API", calls == [] and noop == [None, None, None])
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+
+
+def test_subscribe_message_status_event() -> None:
+    """SUBSCRIBE_MESSAGE_STATUS：已枚举的 raw 转发事件（不再走 unknown 兜底）。"""
+    from endstone_lumenbridge.onebot.qqofficial.constants import OFFICIAL_RAW_EVENTS
+
+    check(
+        "SUBSCRIBE_MESSAGE_STATUS 已枚举",
+        "SUBSCRIBE_MESSAGE_STATUS" in OFFICIAL_RAW_EVENTS,
+    )
+    # 事件分发层：枚举事件走 _emit_official_raw（notice.subscribe_message_status）
+    ad = make_adapter()
+    before = len(PASSED) + len(FAILED)  # noqa: F841 —— 快照计数仅用于日志定位
+
+    async def dispatch() -> None:
+        await ad.translator.on_dispatch({
+            "t": "SUBSCRIBE_MESSAGE_STATUS",
+            "d": {
+                "openid": "USER1",
+                "result": [
+                    {"template_id": 10001, "op": 1, "subscribe_id": "SUB1",
+                     "subscribe_ts": 1784276820, "update_ts": 1784276820}
+                ],
+            },
+        })
+
+    emitted = run_async(dispatch())
+    # 翻译层 emit 事件名为 onebot.pack，由分发器拆包后广播为 notice.subscribe_message_status
+    packs = [p for e, p in ad.bus.events
+             if p.get("notice_type") == "subscribe_message_status"]
+    check(
+        "事件原样 raw 转发",
+        bool(packs) and packs[0].get("user_id") == "USER1"
+        and packs[0].get("official_event") == "SUBSCRIBE_MESSAGE_STATUS",
+        str(ad.bus.events[-3:]),
+    )
 
 
 def test_get_group_info_official_fallback() -> None:

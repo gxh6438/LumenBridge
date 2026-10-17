@@ -187,7 +187,7 @@ def on_group_message(pack, reply):
 
 | 项目 | 规格 |
 | --- | --- |
-| 版本 | 1.0.12 |
+| 版本 | 1.0.14 |
 | 许可证 | Apache-2.0（衍生自 SparkBridge3 的部分同样遵循 Apache-2.0） |
 | 语言 | Python 3.11+ |
 | 框架 | Endstone 0.11+ |

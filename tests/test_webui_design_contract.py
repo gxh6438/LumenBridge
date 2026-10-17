@@ -49,6 +49,24 @@ class WebUiDesignContractTests(unittest.TestCase):
         self.assertIn('mergeNode(value, path + "." + key)', APP)
         self.assertIn("commands.status.allow_player", APP)
 
+    def test_config_modal_search_and_slider_contracts(self) -> None:
+        # 搜索框：命令面板结构（药丸容器 + 内嵌计数徽章 + kbd 提示 + SVG 清除钮），
+        # 显隐由 has-value 类驱动（不再用 style.display 直改）
+        self.assertIn('id="pc-search-wrap"', HTML)
+        self.assertIn('class="pc-match-count" id="pc-match-count"', HTML)
+        self.assertIn('class="pc-search-kbd"', HTML)
+        self.assertIn('classList.toggle("has-value"', APP)
+        self.assertNotIn('searchClear.style.display', APP)
+        # 滑块：pcSliderSync 必须写入 --fill（回归：此前从未写入，WebKit 轨道填充恒为 0%），
+        # 渲染后需有初始填充写入；气泡文案/定位同由 --fill 驱动
+        self.assertIn('range.style.setProperty("--fill"', APP)
+        self.assertIn('pcSliderSync(r)', APP)
+        self.assertIn('class="pc-slider-bubble"', APP)
+        self.assertIn(".pc-slider input[type=range]::-webkit-slider-runnable-track", CSS)
+        self.assertIn("var(--fill, 0%)", CSS)
+        # “/” 聚焦搜索快捷键存在
+        self.assertIn('e.key === "/"', APP)
+
 
 if __name__ == "__main__":
     unittest.main()
