@@ -301,6 +301,7 @@
             <button id="seg-rules-gui" class="active" onclick="setRulesMode('gui')" data-i18n="rules.graphic_edit">图形编辑</button>
             <button id="seg-rules-json" onclick="setRulesMode('json')" data-i18n="rules.json_source">JSON 源码</button>
           </div>
+          <button class="btn small ghost" onclick="openRuleTester()" data-i18n="rules.tester_button">测试规则</button>
           <button class="btn small" onclick="saveRules()" data-i18n="rules.save_reload">保存并热加载</button>
           <button class="btn small ghost" onclick="addRuleTemplate()" data-i18n="rules.add_rule">新增规则</button>
           <button class="btn small ghost" onclick="loadRules()" data-i18n="rules.refresh_button">刷新</button>
@@ -753,6 +754,27 @@
     <div class="toolbar" style="margin:16px 0 0;justify-content:flex-end">
       <button class="btn small ghost" onclick="closeModal('rule-editor-modal')" data-i18n="common.cancel">取消</button>
       <button class="btn small" onclick="saveRuleEditor()" data-i18n="subplugins.save_rule_button">保存规则</button>
+    </div>
+  </div>
+</div>
+
+<!-- 规则测试：聊天式沙盒（头像随机器人配置切换 QQ / LumenBridge） -->
+<div class="modal-mask" id="rule-tester-modal" data-closable="true" onclick="maskClick(event,'rule-tester-modal')">
+  <div class="modal glass rule-tester">
+    <h3 class="rt-head">
+      <span class="rt-title"><span class="rt-title-logo" id="rt-title-logo"></span><span data-i18n="rules.tester_title">规则测试</span></span>
+      <span class="rt-head-actions">
+        <button class="btn small ghost" onclick="rtClearHistory()" data-i18n="rules.tester_clear">清空对话</button>
+        <button class="close-x" onclick="closeModal('rule-tester-modal')">✕</button>
+      </span>
+    </h3>
+    <div class="modal-body rt-chat" id="rt-chat"></div>
+    <div class="rt-composer">
+      <div class="rt-input-row">
+        <span class="rt-role-host" id="rt-role-host"></span>
+        <input type="text" id="rt-input" data-i18n-placeholder="rules.tester_input_ph" placeholder="输入要测试的消息，Enter 发送" onkeydown="if(event.key==='Enter'){event.preventDefault();rtSend()}">
+        <button class="btn small" onclick="rtSend()" data-i18n="rules.tester_send">发送</button>
+      </div>
     </div>
   </div>
 </div>

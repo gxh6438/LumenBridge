@@ -435,10 +435,27 @@ body:has(.modal-mask.show) .log-box {
   background: var(--glass-strong); border: 1px solid var(--glass-border);
   border-radius: var(--radius-sm); box-shadow: var(--shadow);
   -webkit-backdrop-filter: blur(var(--blur)) saturate(1.8); backdrop-filter: blur(var(--blur)) saturate(1.8);
-  animation: lsDrop .18s ease;
+  animation: lsDrop .2s cubic-bezier(.2, .9, .3, 1);
 }
-@keyframes lsDrop { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+/* 上翻展开：下方空间不足时由 JS 切换，列表朝上打开，不再溢出弹窗可视区 */
+.lumen-select.open .ls-list.drop-up { top: auto; bottom: calc(100% + 6px); }
+@keyframes lsDrop { from { opacity: 0; transform: translateY(-6px) scale(.99); } to { opacity: 1; transform: translateY(0) scale(1); } }
 .lumen-select.open .ls-list { display: block; }
+/* 滚动渐隐提示：列表可滚时由 JS 维护 can-up / can-down，让用户知道上下还有选项 */
+.lumen-select .ls-list::before {
+  content: ""; position: sticky; top: 0; display: block; height: 14px;
+  margin-bottom: -14px; z-index: 1; pointer-events: none;
+  background: linear-gradient(to bottom, var(--glass-strong), transparent);
+  opacity: 0; transition: opacity .18s;
+}
+.lumen-select .ls-list::after {
+  content: ""; position: sticky; bottom: 0; display: block; height: 14px;
+  margin-top: -14px; z-index: 1; pointer-events: none;
+  background: linear-gradient(to top, var(--glass-strong), transparent);
+  opacity: 0; transition: opacity .18s;
+}
+.lumen-select .ls-list.can-up::before { opacity: 1; }
+.lumen-select .ls-list.can-down::after { opacity: 1; }
 .lumen-select .ls-option {
   padding: 9px 12px; border-radius: 9px; cursor: pointer; font-size: 14px;
   color: var(--text); transition: background .12s;

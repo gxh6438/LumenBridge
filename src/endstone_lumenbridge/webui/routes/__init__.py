@@ -72,6 +72,7 @@ AUTHED_ROUTES: list[Route] = [
     # ---- 功能模块 ----
     ("GET", _lit("/api/rules"), ModulesApi.api_rules_get),
     ("POST", _lit("/api/rules"), ModulesApi.api_rules_post),
+    ("POST", _lit("/api/rules/test"), ModulesApi.api_rules_test),
     ("POST", _lit("/api/rules/image"), ModulesApi.api_rules_image),
     ("GET", _lit("/api/whitelist"), ModulesApi.api_whitelist_get),
     ("GET", _lit("/api/whitelist/domains"), ModulesApi.api_whitelist_domains),

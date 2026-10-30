@@ -2305,10 +2305,90 @@ function onSelectOption(optEl) {
   }
 }
 
+/* ---------- 自定义下拉：边界感知定位 ----------
+   旧实现 absolute 向下展开，被弹窗 overflow 裁切也不自知：靠近弹窗底部时
+   列表溢出可视区几十像素、撑大滚动区（Windows 经典滚动条一出现内容就横跳），
+   用户还得手动滚动才能发现被藏起来的选项。
+   新实现：打开时测量滚动容器 / 视口的上下可用空间，不够就上翻展开，
+   高度按可用空间收缩，列表永远留在可视区内；弹窗滚动时实时重定位。 */
+function findSelectScrollport(el) {
+  let node = el.parentElement;
+  while (node && node !== document.body) {
+    const oy = getComputedStyle(node).overflowY;
+    if (oy === "auto" || oy === "scroll") return node;
+    node = node.parentElement;
+  }
+  return null;
+}
+
+let _openSelectState = null; // { host, scrollport, onScroll }
+
+function updateSelectFade(list) {
+  const scrollable = list.scrollHeight > list.clientHeight + 1;
+  list.classList.toggle("can-up", scrollable && list.scrollTop > 2);
+  list.classList.toggle("can-down", scrollable && list.scrollTop < list.scrollHeight - list.clientHeight - 2);
+}
+
+function positionOpenSelect(host) {
+  const list = host.querySelector(".ls-list");
+  if (!list) return;
+  const tr = host.getBoundingClientRect();
+  const port = _openSelectState && _openSelectState.scrollport
+    ? _openSelectState.scrollport.getBoundingClientRect() : null;
+  const topBound = port ? Math.max(port.top, 0) : 0;
+  const bottomBound = port ? Math.min(port.bottom, window.innerHeight) : window.innerHeight;
+  const gap = 6, footroom = 8;
+  const spaceBelow = bottomBound - tr.bottom - gap - footroom;
+  const spaceAbove = tr.top - topBound - gap - footroom;
+  // 先解除高度限制测出内容自然高度，再按可用空间收缩
+  list.style.maxHeight = "none";
+  const natH = Math.min(list.scrollHeight, 260);
+  const dropUp = spaceBelow < Math.min(natH, 160) && spaceAbove > spaceBelow;
+  const avail = dropUp ? spaceAbove : spaceBelow;
+  // 下限 110：极窄空间也强制保留可读高度，但比旧的 140 更不容易顶出视口
+  list.style.maxHeight = Math.max(110, Math.min(natH, avail)) + "px";
+  host.classList.toggle("drop-up", dropUp);
+  const sel = list.querySelector(".ls-option.selected");
+  if (sel) sel.scrollIntoView({ block: "nearest" });
+  updateSelectFade(list);
+}
+
+function openSelect(host) {
+  const scrollport = findSelectScrollport(host);
+  _openSelectState = {
+    host, scrollport,
+    onScroll: () => {
+      if (!host.classList.contains("open")) return;
+      requestAnimationFrame(() => positionOpenSelect(host));
+    },
+  };
+  host.classList.add("open");
+  if (scrollport) scrollport.addEventListener("scroll", _openSelectState.onScroll, { passive: true });
+  positionOpenSelect(host);
+}
+
+function closeSelect(host) {
+  host.classList.remove("open", "drop-up");
+  const list = host.querySelector(".ls-list");
+  if (list) {
+    list.classList.remove("can-up", "can-down");
+    list.style.maxHeight = "";
+  }
+  if (_openSelectState && _openSelectState.host === host) {
+    if (_openSelectState.scrollport && _openSelectState.onScroll)
+      _openSelectState.scrollport.removeEventListener("scroll", _openSelectState.onScroll);
+    _openSelectState = null;
+  }
+}
+
+function closeAllSelects() {
+  document.querySelectorAll(".lumen-select.open").forEach(closeSelect);
+}
+
 function toggleSelect(host) {
   const isOpen = host.classList.contains("open");
-  document.querySelectorAll(".lumen-select.open").forEach((el) => el.classList.remove("open"));
-  if (!isOpen) host.classList.add("open");
+  closeAllSelects();
+  if (!isOpen) openSelect(host);
 }
 
 function selectOption(host, value, label) {
@@ -2318,12 +2398,21 @@ function selectOption(host, value, label) {
     o.classList.toggle("selected", o.dataset.value === value);
     o.classList.toggle("empty", o.dataset.value === "" );
   });
-  host.classList.remove("open");
+  closeSelect(host);
 }
+
+/* 下拉列表自身滚动时刷新上下渐隐提示（scroll 不冒泡，用捕获） */
+document.addEventListener("scroll", (e) => {
+  const t = e.target;
+  if (t && t.classList && t.classList.contains("ls-list")) updateSelectFade(t);
+}, true);
+
+/* 视口尺寸变化时直接收起（重开成本低，避免错位） */
+window.addEventListener("resize", closeAllSelects);
 
 document.addEventListener("click", (e) => {
   if (!e.target.closest(".lumen-select")) {
-    document.querySelectorAll(".lumen-select.open").forEach((el) => el.classList.remove("open"));
+    closeAllSelects();
   }
 });
 
@@ -2520,6 +2609,36 @@ async function saveRules() {
   } catch (e) { toast(t("rules.save_failed", { error: e.message }), true); }
 }
 
+/* ---------- 自动保存并热加载 ----------
+   图形模式的每次改动（新增/编辑/复制/删除/排序）自动提交到后端并立即热加载，
+   不再要求用户手动点「保存并热加载」。JSON 源码模式仍保留手动保存。 */
+let _rulesAutoSaveTimer = null;
+
+function scheduleRulesAutoSave() {
+  if (rulesMode !== "gui") return;
+  clearTimeout(_rulesAutoSaveTimer);
+  _rulesAutoSaveTimer = setTimeout(() => {
+    rulesAutoSaveNow(false).catch(() => {});
+  }, 800);
+}
+
+/* silent=true：不弹成功提示（调用方自带提示语） */
+async function rulesAutoSaveNow(silent) {
+  if (rulesMode !== "gui") throw new Error("json mode");
+  try {
+    const res = await api("POST", "/api/rules", rulesData);
+    if (Array.isArray(res.data)) {
+      rulesData = res.data;
+      renderRulesList();
+      syncRulesJson();
+    }
+    if (!silent) toast(t("rules.auto_saved"));
+  } catch (e) {
+    toast(t("rules.auto_save_failed", { error: e.message }), true);
+    throw e;
+  }
+}
+
 
 function renderRulesList() {
   const box = document.getElementById("rules-list");
@@ -2589,6 +2708,7 @@ function moveRule(idx, dir) {
   rulesData[newIdx] = tmp;
   renderRulesList();
   syncRulesJson();
+  scheduleRulesAutoSave();
 }
 
 function duplicateRule(idx) {
@@ -2599,6 +2719,7 @@ function duplicateRule(idx) {
   renderRulesList();
   syncRulesJson();
   toast(t("rules.copied_hint"));
+  scheduleRulesAutoSave();
 }
 
 async function deleteRule(idx) {
@@ -2606,6 +2727,7 @@ async function deleteRule(idx) {
   rulesData.splice(idx, 1);
   renderRulesList();
   syncRulesJson();
+  scheduleRulesAutoSave();
 }
 
 function addRuleTemplate() {
@@ -2634,6 +2756,7 @@ function openRuleEditor(idx) {
   document.getElementById("rule-editor-title").textContent =
     idx < 0 ? t("rules.editor_new_title") : t("rules.editor_edit_title", { name: rule.name || idx });
   document.getElementById("rule-editor-body").innerHTML = renderRuleForm(rule);
+  updateRulePatternStatus();
   document.getElementById("rule-editor-modal").classList.add("show");
 }
 
@@ -2678,6 +2801,7 @@ function renderRuleForm(rule) {
     <div class="ctrl">
       <input type="text" id="rule-pattern" value="${esc(rule.pattern || "")}" placeholder="${esc(t("rules.form.keyword_placeholder"))}">
       <div style="margin-top:8px">${presetSelect}</div>
+      <div id="rule-pattern-status" class="rule-check-line"></div>
     </div>
   </div>
   <div class="form-row" id="rule-flags-row" style="${isMsg ? "" : "display:none"}">
@@ -2721,6 +2845,44 @@ function setRuleTriggerType(type) {
   document.getElementById("rule-flags-row").style.display = isMsg ? "" : "none";
   document.getElementById("rule-event-row").style.display = isMsg ? "none" : "";
 }
+
+/* ---------- 正则实时校验（小白不看文档也能配对规则） ----------
+   纯前端实现：JS RegExp 即时校验语法、提示 ReDoS 风险写法（与后端
+   _is_risky_pattern 同源启发式）。完整匹配测试见规则测试页（openRuleTester）。 */
+const _RULE_RISKY_REPEAT_RE = /\{\d{4,}/;           // 超大有界重复 a{100000}
+const _RULE_RISKY_NESTED_RE = /[+*}]\s*\)\s*[+*{]/;  // 嵌套量词 (a+)+
+
+function editorPatternFlags() {
+  const ic = document.getElementById("rule-flag-ignorecase");
+  return ic && ic.checked ? "i" : "";
+}
+
+function updateRulePatternStatus() {
+  const box = document.getElementById("rule-pattern-status");
+  if (!box) return;
+  const el = document.getElementById("rule-pattern");
+  const p = el ? el.value.trim() : "";
+  if (!p) { box.innerHTML = ""; return; }
+  if (p.length > 512) { box.innerHTML = `<span class="re-warn">${esc(t("rules.check.too_long"))}</span>`; return; }
+  if (_RULE_RISKY_REPEAT_RE.test(p) || _RULE_RISKY_NESTED_RE.test(p)) {
+    box.innerHTML = `<span class="re-warn">${esc(t("rules.check.risky"))}</span>`;
+    return;
+  }
+  try {
+    new RegExp(p, editorPatternFlags());
+    box.innerHTML = `<span class="re-ok">${esc(t("rules.check.valid"))}</span>`;
+  } catch (err) {
+    box.innerHTML = `<span class="re-bad">${esc(t("rules.check.invalid"))}${err && err.message ? "：" + esc(err.message) : ""}</span>`;
+  }
+}
+
+/* 事件委托：编辑器表单重渲染（模板套用/类型切换）后依然生效 */
+document.addEventListener("input", (e) => {
+  if (e.target.id === "rule-pattern") updateRulePatternStatus();
+});
+document.addEventListener("change", (e) => {
+  if (e.target.id === "rule-flag-ignorecase") updateRulePatternStatus();
+});
 
 function collectEditorConditions() {
   const list = document.getElementById("rule-conditions-list");
@@ -2868,6 +3030,7 @@ function applyRuleTemplate(value) {
     block: tpl.block !== false,
   };
   document.getElementById("rule-editor-body").innerHTML = renderRuleForm(rule);
+  updateRulePatternStatus();
   toast(t("rules.form.template_applied", { name: rule.name }));
 }
 
@@ -2896,7 +3059,7 @@ async function uploadRuleImage(input, idx) {
   input.value = "";
 }
 
-function saveRuleEditor() {
+async function saveRuleEditor() {
   const id = "rule_" + Date.now();
   const name = document.getElementById("rule-name").value.trim() || t("rules.unnamed_save");
   const enabled = document.getElementById("rule-enabled").checked;
@@ -2920,7 +3083,194 @@ function saveRuleEditor() {
   renderRulesList();
   syncRulesJson();
   closeModal("rule-editor-modal");
-  toast(t("rules.saved_toast", { action: t(editingRuleIndex < 0 ? "rules.saved_new" : "rules.saved_updated") }));
+  /* 编辑器保存立即提交并热加载；成功后再确认，失败时 rulesAutoSaveNow 已弹错误提示 */
+  try {
+    await rulesAutoSaveNow(true);
+    toast(t("rules.saved_toast", { action: t(editingRuleIndex < 0 ? "rules.saved_new" : "rules.saved_updated") }));
+  } catch { /* 已提示 */ }
+}
+
+/* ================= 规则测试（聊天式沙盒页） =================
+   工具栏「测试规则」打开独立对话页：发送消息 → 后端按当前规则库真实匹配
+   （Python re、条件判断、block 阻断语义），返回命中的规则与动作预览，
+   以聊天气泡呈现。执行类动作只预览不真实执行。
+   机器人头像：恰好配置一个机器人 QQ → QQ 企鹅；多个 / 未配置 → LumenBridge logo。 */
+
+const RT_ROLES = [
+  { value: "member", labelKey: "rules.tester_roles.member" },
+  { value: "admin", labelKey: "rules.tester_roles.admin" },
+  { value: "owner", labelKey: "rules.tester_roles.owner" },
+  { value: "lumenadmin", labelKey: "rules.tester_roles.lumenadmin" },
+];
+
+let rtHistory = [];          // { who: "user"|"bot"|"sys", name, html }
+let rtAvatarMode = "lumen";  // "qq" | "lumen"
+let rtAvatarChecked = false;
+let rtBusy = false;
+
+/* QQ 企鹅头像（内联 SVG） */
+function rtQqAvatarSvg(size) {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 48 48" role="img" aria-label="QQ">
+  <circle cx="24" cy="24" r="24" fill="#12B7F5"/>
+  <ellipse cx="24" cy="27.5" rx="12.5" ry="14" fill="#fff"/>
+  <ellipse cx="12.8" cy="26.5" rx="3.2" ry="7" fill="#1a1a1a" transform="rotate(18 12.8 26.5)"/>
+  <ellipse cx="35.2" cy="26.5" rx="3.2" ry="7" fill="#1a1a1a" transform="rotate(-18 35.2 26.5)"/>
+  <circle cx="20" cy="21.5" r="1.7" fill="#1a1a1a"/>
+  <circle cx="28" cy="21.5" r="1.7" fill="#1a1a1a"/>
+  <path d="M21.6 24.6 h4.8 l-2.4 3 z" fill="#ffa000"/>
+  <path d="M15 33.4 q9 4.6 18 0 l1.4 3.2 q-10.4 5 -20.8 0 z" fill="#ff4f4f"/>
+  <ellipse cx="19.2" cy="42" rx="2.8" ry="1.5" fill="#ffa000"/>
+  <ellipse cx="28.8" cy="42" rx="2.8" ry="1.5" fill="#ffa000"/>
+</svg>`;
+}
+
+/* LumenBridge 头像（项目自带 logo.png） */
+function rtLumenAvatarHtml(size) {
+  return `<img src="/logo.png" width="${size}" height="${size}" alt="LumenBridge" draggable="false">`;
+}
+
+function rtAvatarHtml(size) {
+  return rtAvatarMode === "qq" ? rtQqAvatarSvg(size) : rtLumenAvatarHtml(size);
+}
+
+/* 恰好一个启用的个人号机器人（配置了 QQ 号）→ 用 QQ 头像；其余情况 LumenBridge */
+async function rtDetectAvatar() {
+  try {
+    const { data } = await api("GET", "/api/connections");
+    const bots = (data.adapters || []).filter(
+      (a) => a && a.enabled !== false && (a.type || "onebot") !== "qqofficial" && Number(a.bot_qq) > 0
+    );
+    rtAvatarMode = bots.length === 1 ? "qq" : "lumen";
+  } catch { rtAvatarMode = "lumen"; }
+  rtAvatarChecked = true;
+}
+
+function rtApplyAvatar() {
+  const logo = document.getElementById("rt-title-logo");
+  if (logo) logo.innerHTML = rtAvatarHtml(26);
+  document.querySelectorAll("#rt-chat .rt-avatar").forEach((el) => { el.innerHTML = rtAvatarHtml(36); });
+}
+
+function openRuleTester() {
+  document.getElementById("rule-tester-modal").classList.add("show");
+  if (!document.getElementById("rt-role")) {
+    document.getElementById("rt-role-host").innerHTML =
+      buildSelect("rt-role", ruleOptions(RT_ROLES), "member", "");
+  }
+  if (!rtAvatarChecked) {
+    rtDetectAvatar().then(rtApplyAvatar);
+  } else {
+    rtApplyAvatar();
+  }
+  if (!rtHistory.length) rtPush({ who: "sys", html: esc(t("rules.tester_greet")) });
+  rtRender();
+  const inp = document.getElementById("rt-input");
+  if (inp) inp.focus();
+}
+
+function rtClearHistory() {
+  rtHistory = [];
+  rtPush({ who: "sys", html: esc(t("rules.tester_greet")) });
+  rtRender();
+}
+
+function rtPush(msg) {
+  rtHistory.push(msg);
+  rtRender();
+}
+
+function rtScrollBottom() {
+  const chat = document.getElementById("rt-chat");
+  if (chat) chat.scrollTop = chat.scrollHeight;
+}
+
+function rtRender() {
+  const chat = document.getElementById("rt-chat");
+  if (!chat) return;
+  chat.innerHTML = rtHistory.map((m) => {
+    if (m.who === "sys") return `<div class="rt-msg sys"><div class="rt-bubble sys">${m.html}</div></div>`;
+    // 发送者气泡：不带头像与昵称，仅右侧消息气泡
+    if (m.who === "user") {
+      return `<div class="rt-msg user"><div class="rt-bubble user">${m.html}</div></div>`;
+    }
+    if (m.typing) {
+      return `<div class="rt-msg bot">
+        <div class="rt-avatar">${rtAvatarHtml(36)}</div>
+        <div class="rt-bubblewrap"><div class="rt-sender">${esc(t("rules.tester_bot_name"))}</div><div class="rt-bubble bot typing"><span></span><span></span><span></span></div></div>
+      </div>`;
+    }
+    return `<div class="rt-msg bot">
+      <div class="rt-avatar">${rtAvatarHtml(36)}</div>
+      <div class="rt-bubblewrap"><div class="rt-sender">${esc(t("rules.tester_bot_name"))}</div><div class="rt-bubble bot">${m.html}</div></div>
+    </div>`;
+  }).join("");
+  rtScrollBottom();
+}
+
+async function rtSend() {
+  if (rtBusy) return;
+  const inp = document.getElementById("rt-input");
+  const text = (inp?.value || "").trim();
+  if (!text) return;
+  inp.value = "";
+  const role = document.getElementById("rt-role")?.value || "member";
+  // 发送者不设昵称输入：动作预览里的 $nickname / @目标 用默认昵称代入
+  const nick = t("rules.tester_default_nick");
+  rtPush({ who: "user", name: nick, html: esc(text) });
+  rtBusy = true;
+  rtPush({ who: "bot", typing: true, html: "" });
+  try {
+    const res = await api("POST", "/api/rules/test", { message: text, nickname: nick, role });
+    rtHistory[rtHistory.length - 1] = { who: "bot", html: rtResultHtml(res.data) };
+    rtRender();
+  } catch (e) {
+    rtHistory[rtHistory.length - 1] = { who: "bot", html: `<span class="re-bad">${esc(t("rules.tester_request_failed", { error: e.message }))}</span>` };
+    rtRender();
+  } finally {
+    rtBusy = false;
+  }
+}
+
+function rtActionLine(a) {
+  const labels = {
+    replyText: "rules.tester_act_reply",
+    replyAtText: "rules.tester_act_reply_at",
+    replyImage: "rules.tester_act_reply_image",
+    deleteMessage: "rules.tester_act_recall",
+    muteUser: "rules.tester_act_mute",
+    executeCommand: "rules.tester_act_command",
+    callPluginCommand: "rules.tester_act_plugin",
+  };
+  const key = labels[a.type];
+  if (!key) return `<div class="rt-act"><span class="k">${esc(a.type)}</span><span class="v">${esc(a.preview ?? "")}</span></div>`;
+  let val = a.preview || "";
+  if (a.type === "muteUser") val = t("rules.tester_mute_for", { n: a.duration || 600 });
+  if (a.type === "deleteMessage") val = "";
+  if (a.type === "executeCommand" || a.type === "callPluginCommand") {
+    return `<div class="rt-act"><span class="k">${esc(t(key))}</span><span class="v"><code>${esc(val)}</code><i class="rt-act-note">${esc(t("rules.tester_not_executed"))}</i></span></div>`;
+  }
+  return `<div class="rt-act"><span class="k">${esc(t(key))}</span><span class="v">${esc(val)}</span></div>`;
+}
+
+function rtResultHtml(d) {
+  if (!d || !d.matched) {
+    return `<div class="rt-res miss">${esc(t("rules.tester_no_match"))}</div>`;
+  }
+  let html = `<div class="rt-res-head hit">${esc(t("rules.tester_hit", { n: d.results.length }))}</div>`;
+  html += d.results.map((r) => `<div class="rt-rule">
+    <div class="rt-rule-top">
+      <b>${esc(r.name || r.id)}</b>
+      ${r.block ? `<span class="rt-block-tag">${esc(t("rules.block_next"))}</span>` : ""}
+    </div>
+    <div class="rt-rule-pattern"><code>/${esc(r.pattern)}/${esc(r.flags || "")}</code></div>
+    ${r.groups && r.groups.length > 1 ? `<div class="rt-groups">${r.groups.slice(1).map((g, i) =>
+      `<span class="re-group">$${i + 1} = ${esc(g || "")}</span>`).join("")}</div>` : ""}
+    ${r.actions && r.actions.length ? `<div class="rt-acts">${r.actions.map(rtActionLine).join("")}</div>` : ""}
+  </div>`).join("");
+  if (d.blocked_after) html += `<div class="rt-blocked">${esc(t("rules.tester_blocked_note"))}</div>`;
+  if (d.admin_note === "no_lumenadmin") html += `<div class="rt-blocked">${esc(t("rules.tester_no_lumenadmin"))}</div>`;
+  html += `<div class="rt-note">${esc(t("rules.tester_exec_note"))}</div>`;
+  return html;
 }
 
 

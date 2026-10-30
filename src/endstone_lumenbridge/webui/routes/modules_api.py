@@ -41,6 +41,28 @@ class ModulesApi(RouteMixin):
             regex.save_rules(body)
         self._send_json({"code": 200, "msg": _t("webui.msg.rules_saved")})
 
+    def api_rules_test(self, m: re.Match, query: dict[str, str]) -> None:
+        """规则测试页：按当前规则库匹配一条消息，只预览不执行。"""
+        regex = self.plugin.regex_module
+        body = self._read_body()
+        if not isinstance(body, dict):
+            self.api_error(400, "webui.msg.rules_test_invalid")
+            return
+        message = str(body.get("message", ""))
+        if not message.strip() or len(message) > 2000:
+            self.api_error(400, "webui.msg.rules_test_invalid")
+            return
+        if not regex:
+            self._send_json({"code": 200, "data": {"matched": False, "results": []}})
+            return
+        data = regex.test_message(
+            message,
+            nickname=str(body.get("nickname", "")),
+            user_id=str(body.get("userId", "")),
+            role=str(body.get("role", "member")),
+        )
+        self._send_json({"code": 200, "data": data})
+
     def api_rules_image(self, m: re.Match, query: dict[str, str]) -> None:
         # 图片存 rules_images/（image() 白名单内）
         file_info = self._read_multipart_file()

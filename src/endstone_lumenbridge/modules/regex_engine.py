@@ -266,6 +266,117 @@ class RegexEngineModule:
         self._clear_pattern_cache()
         self.logger.info(_t("regex_engine.log.rules_saved", count=len(rules)))
 
+    def _preview_actions(
+        self, actions: list[dict[str, Any]], pack: dict[str, Any], groups: list[str]
+    ) -> list[dict[str, Any]]:
+        """测试模式动作预览：与 _execute_actions 同源的 $ 变量替换，但不执行任何动作。
+
+        context 不预置 result：命令类动作未执行、无输出可代入，$result 等变量
+        原样保留在预览文本中，用户能看出该值来自命令输出。
+        """
+        context: dict[str, Any] = {}
+        for idx, val in enumerate(groups):
+            context[str(idx)] = val if val is not None else ""
+
+        previews: list[dict[str, Any]] = []
+        for action in actions or []:
+            if not isinstance(action, dict):
+                continue
+            action_type = action.get("type")
+            params = action.get("params", "")
+            entry: dict[str, Any] = {"type": action_type}
+            if action_type == "replyAtText":
+                sender = pack.get("sender") or {}
+                target = sender.get("card") or sender.get("nickname") or str(pack.get("user_id", ""))
+                entry["preview"] = f"@{target} " + self._parse_variables(params, pack, context)
+            elif action_type == "muteUser":
+                try:
+                    entry["duration"] = int(self._parse_variables(str(params), pack, context))
+                except ValueError:
+                    entry["duration"] = 600
+            elif action_type == "deleteMessage":
+                entry["preview"] = ""
+            else:
+                entry["preview"] = self._parse_variables(str(params), pack, context)
+            previews.append(entry)
+        return previews
+
+    def test_message(
+        self, msg_text: str, *, nickname: str = "", user_id: str = "", role: str = "member"
+    ) -> dict[str, Any]:
+        """规则测试（WebUI 测试页）：按当前规则库匹配一条消息，只预览不执行。
+
+        与 _on_group_message 同源匹配语义（编译缓存 / ReDoS 防护 / 条件判断 /
+        block 阻断），但跳过动作执行与去重——每条测试消息都完整评估。
+        """
+        role = role if role in ("owner", "admin", "member", "lumenadmin") else "member"
+        nickname = nickname.strip() or "Tester"
+        user_id = str(user_id).strip() or "10000"
+        sender: dict[str, Any] = {
+            "nickname": nickname,
+            "card": nickname,
+            "role": "member" if role == "lumenadmin" else role,
+        }
+        # 后台管理员条件依赖 user_id ∈ admin_keys，取一个真实后台管理员 ID 忠实模拟
+        admin_note = ""
+        if role == "lumenadmin":
+            admin_keys = list(self.plugin.config_manager.admin_keys)
+            if admin_keys:
+                user_id = str(admin_keys[0])
+                admin_note = "lumenadmin"
+            else:
+                admin_note = "no_lumenadmin"
+        pack: dict[str, Any] = {
+            "user_id": user_id,
+            "group_id": self.plugin.config_manager.main_group or 10000,
+            "sender": sender,
+            "raw_message": msg_text,
+            "message": msg_text,
+            "time": int(time.time()),
+            "domain": "qq",
+            "self_id": "",
+        }
+
+        text = msg_text[:_MAX_MATCH_TEXT_LEN]
+        results: list[dict[str, Any]] = []
+        blocked_after = False
+        for rule in self.rules:
+            if not rule.get("enabled") or rule.get("triggerType") != "message":
+                continue
+            pattern = (rule.get("pattern") or "").strip()
+            if not pattern:
+                continue
+            regex = self._compile_cached(pattern, rule.get("flags", ""), rule.get("name"))
+            if regex is None:
+                continue
+            match = regex.search(text)
+            if not match:
+                continue
+            if not self._check_conditions(rule.get("conditions"), pack):
+                continue
+            groups = [match.group(0)] + [g or "" for g in match.groups()]
+            results.append(
+                {
+                    "id": rule.get("id", ""),
+                    "name": rule.get("name", ""),
+                    "pattern": pattern,
+                    "flags": rule.get("flags", ""),
+                    "groups": groups,
+                    "actions": self._preview_actions(rule.get("actions", []), pack, groups),
+                    "block": bool(rule.get("block")),
+                }
+            )
+            if rule.get("block"):
+                blocked_after = True
+                break
+        return {
+            "matched": bool(results),
+            "results": results,
+            "blocked_after": blocked_after,
+            "simulated_user_id": user_id,
+            "admin_note": admin_note,
+        }
+
     def _compile_cached(self, pattern: str, flags: str, rule_name: Any) -> "re.Pattern[str] | None":
         """带缓存编译 pattern；非法 / 超长 / 高风险返回 None（负缓存，日志只打一次）。"""
         # getattr 兜底：测试桩经 __new__ 构造时不走 __init__

@@ -106,17 +106,21 @@
 
 .tabbar {
   display: none;
-  position: fixed; left: 10px; right: 10px;
+  /* 自适应收缩：宽度随内容收缩并居中悬浮（大屏不再整条拉满留长空白）；
+     内容放不下时仍占满视口（两侧各留 10px）转为横向滚动 */
+  position: fixed; left: 50%; right: auto; transform: translateX(-50%);
   bottom: calc(8px + env(safe-area-inset-bottom, 0px));
   z-index: 60;
+  width: fit-content; max-width: calc(100vw - 20px);
   padding: 7px 4px;
   border-radius: 24px;
-  background: rgba(255, 255, 255, 0.6) !important;
+  background: var(--glass) !important; /* 主题感知：暗色随 --glass 变深，不再固定白色 */
   -webkit-backdrop-filter: blur(32px) saturate(180%);
   backdrop-filter: blur(32px) saturate(180%);
   box-shadow: 0 10px 36px rgba(0, 0, 0, 0.16);
-  border: 1px solid rgba(255,255,255,.5);
+  border: 1px solid var(--glass-border);
 }
+@media (prefers-color-scheme: dark) { .tabbar { box-shadow: 0 10px 36px rgba(0, 0, 0, .45); } }
 /* 可滚动 tab 条：tab 固定舒适宽度不再挤压（含子插件注册的动态 tab），
    横向溢出滚动；激活 tab 由 JS 平滑滚动居中（scrollIntoView 语义） */
 .tabbar-scroll {
@@ -133,9 +137,9 @@
   pointer-events: none; opacity: 0; transition: opacity .15s;
 }
 .tabbar-fade.left { left: 0; border-radius: 24px 0 0 24px;
-  background: linear-gradient(to right, rgba(255,255,255,.55), transparent); }
+  background: linear-gradient(to right, var(--glass), transparent); }
 .tabbar-fade.right { right: 0; border-radius: 0 24px 24px 0;
-  background: linear-gradient(to left, rgba(255,255,255,.55), transparent); }
+  background: linear-gradient(to left, var(--glass), transparent); }
 .tabbar.edge-left .tabbar-fade.left { opacity: 1; }
 .tabbar.edge-right .tabbar-fade.right { opacity: 1; }
 .tab-item {
@@ -882,6 +886,97 @@ textarea.file-editor {
 /* 等高卡片内操作按钮行贴底对齐；单列自然高度时 free space 为 0，由
    padding-top 保住原有 12px 间距 */
 .rule-actions { display: flex; gap: 8px; margin-top: auto; padding-top: 12px; flex-wrap: wrap; }
+
+/* ---------- 规则编辑器：正则实时校验 + 匹配测试结果 ---------- */
+.rule-check-line { min-height: 18px; margin-top: 8px; font-size: 12.5px; line-height: 1.5; }
+.rule-check-line:empty { display: none; }
+.re-ok { color: var(--green); font-weight: 600; }
+.re-bad { color: var(--red); font-weight: 600; overflow-wrap: anywhere; }
+.re-warn { color: var(--orange); font-weight: 600; }
+.re-group {
+  display: inline-block; margin: 2px 4px 2px 0; padding: 1px 8px;
+  border-radius: 999px; background: var(--accent-soft); color: var(--accent);
+  font-size: 11.5px; font-family: "SF Mono", Consolas, monospace; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle;
+}
+@media (prefers-color-scheme: dark) {
+  .re-bad { color: #ff6961; }
+  .re-warn { color: #ffb454; }
+}
+
+/* ---------- 规则测试：聊天式沙盒 ----------
+   沉浸式对话面板：头像 + 气泡 + 命中规则卡片；执行类动作只预览。 */
+.rule-tester { max-width: 680px; height: min(84vh, 720px); padding: 0; }
+.rt-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 0; padding: 15px 18px 11px; border-bottom: 1px solid var(--divider); }
+.rt-title { display: flex; align-items: center; gap: 10px; font-size: 16.5px; }
+.rt-title-logo { width: 27px; height: 27px; border-radius: 9px; overflow: hidden; flex: none; display: inline-flex; box-shadow: 0 2px 8px rgba(0, 0, 0, .16); background: var(--glass-strong); }
+.rt-title-logo svg, .rt-title-logo img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.rt-head-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+.rule-tester .modal-body { display: flex; flex-direction: column; min-height: 0; }
+
+.rt-chat { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 18px 10px; display: flex; flex-direction: column; gap: 13px; overscroll-behavior: contain; }
+.rt-msg { display: flex; gap: 10px; max-width: 88%; animation: rtIn .24s cubic-bezier(.2, .9, .3, 1); }
+.rt-msg.bot { align-self: flex-start; }
+.rt-msg.user { align-self: flex-end; flex-direction: row-reverse; }
+.rt-msg.sys { align-self: center; max-width: 94%; }
+.rt-avatar { width: 36px; height: 36px; border-radius: 12px; flex: none; overflow: hidden; box-shadow: 0 2px 10px rgba(0, 0, 0, .14); background: var(--glass-strong); }
+.rt-avatar svg, .rt-avatar img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.rt-bubblewrap { display: flex; flex-direction: column; gap: 3px; min-width: 0; max-width: 100%; }
+.rt-msg.user .rt-bubblewrap { align-items: flex-end; }
+.rt-sender { font-size: 11px; color: var(--muted); padding: 0 5px; }
+.rt-bubble { padding: 10px 14px; border-radius: 16px; font-size: 13.5px; line-height: 1.6; overflow-wrap: anywhere; box-shadow: 0 1px 6px rgba(0, 0, 0, .06); }
+.rt-bubble.bot { background: var(--input-bg); border: 1px solid var(--divider); border-bottom-left-radius: 5px; }
+.rt-bubble.user { background: var(--accent); color: #fff; border-bottom-right-radius: 5px; box-shadow: 0 4px 14px rgba(10, 132, 255, .3); }
+.rt-bubble.sys { padding: 6px 16px; border-radius: 999px; background: var(--glass); border: 1px dashed var(--divider); color: var(--muted); font-size: 12px; text-align: center; box-shadow: none; }
+.rt-bubble.typing { display: flex; align-items: center; gap: 5px; padding: 14px 16px; }
+.rt-bubble.typing span { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); opacity: .3; animation: rtDot 1.1s infinite; }
+.rt-bubble.typing span:nth-child(2) { animation-delay: .18s; }
+.rt-bubble.typing span:nth-child(3) { animation-delay: .36s; }
+@keyframes rtDot { 0%, 60%, 100% { opacity: .25; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-3px); } }
+@keyframes rtIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+/* 命中结果卡片（嵌在机器人气泡里） */
+.rt-res-head.hit { color: var(--green); font-weight: 700; font-size: 12.5px; margin-bottom: 2px; }
+.rt-res.miss { color: var(--muted); font-size: 12.5px; }
+.rt-rule { border: 1px solid var(--divider); border-radius: 11px; padding: 9px 12px; margin-top: 8px; background: var(--glass); }
+.rt-rule-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.rt-rule-top b { font-size: 12.5px; min-width: 0; overflow-wrap: anywhere; }
+.rt-block-tag { font-size: 10px; font-weight: 700; padding: 1px 8px; border-radius: 999px; background: rgba(255, 69, 58, .14); color: var(--red); flex: none; }
+.rt-rule-pattern { margin-top: 5px; }
+.rt-rule-pattern code { font-size: 11px; background: var(--accent-soft); color: var(--accent); padding: 2px 8px; border-radius: 6px; overflow-wrap: anywhere; }
+.rt-groups { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px; }
+.rt-acts { margin-top: 8px; border-top: 1px dashed var(--divider); padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.rt-act { display: flex; gap: 8px; font-size: 12px; align-items: baseline; }
+.rt-act .k { color: var(--accent); font-weight: 600; flex: none; }
+.rt-act .v { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.rt-act .v code { background: var(--accent-soft); padding: 1px 6px; border-radius: 5px; font-size: 11px; }
+.rt-act-note { display: block; font-style: normal; color: var(--muted); font-size: 10.5px; margin-top: 1px; }
+.rt-blocked { margin-top: 8px; font-size: 11px; color: var(--orange); background: rgba(255, 159, 10, .1); border-radius: 7px; padding: 4px 9px; }
+.rt-note { margin-top: 8px; font-size: 10.5px; color: var(--muted); }
+
+/* 底部输入区：单行（身份选择 + 消息输入 + 发送），移动端自动换行 */
+.rt-composer { flex: none; border-top: 1px solid var(--divider); padding: 12px 18px calc(14px + env(safe-area-inset-bottom, 0px)); border-radius: 0 0 var(--radius-lg) var(--radius-lg); }
+.rt-input-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.rt-input-row input { flex: 1; min-width: 150px; }
+/* 身份下拉：紧凑变体（选项更矮，移动端不再顶出浏览器 UI） */
+.rt-role-host { flex: 0 0 auto; max-width: 45%; }
+.rt-role-host .lumen-select { width: auto; min-width: 118px; }
+.rt-role-host .ls-trigger { padding: 7px 11px; font-size: 13px; }
+.rt-role-host .ls-list { padding: 4px; }
+.rt-role-host .ls-option { padding: 5px 10px; font-size: 12.5px; border-radius: 7px; }
+
+@media (max-width: 640px) {
+  .rule-tester { height: 88vh; max-width: 100%; }
+  .rt-msg { max-width: 94%; }
+  .rt-chat { padding: 12px 10px 8px; }
+  .rt-composer { padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px)); }
+  .rt-head { padding: 12px 12px 9px; }
+  .rt-role-host { max-width: 100%; }
+}
+@media (prefers-color-scheme: dark) {
+  .rt-bubble.user { color: #fff; }
+  .rt-block-tag { color: #ff6961; }
+}
 
 .code-editor-host {
   position: relative;
