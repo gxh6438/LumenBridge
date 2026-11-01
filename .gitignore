@@ -25,7 +25,7 @@ env/
 .vscode/
 .DS_Store
 
-# IDE share artifacts and local source archives
+# Local source archives
 /lumenbridge-*-src.zip
 
 # VitePress
